@@ -1,0 +1,13 @@
+include LICENSE NOTICE README.md RELEASE_NOTES.md CHANGELOG.md SECURITY.md CONTRIBUTING.md AGENTS.md
+recursive-include docs *.md
+recursive-include examples *.py *.toml
+recursive-include assets *.gif
+recursive-include tests *.py
+recursive-include src/frontier_harness py.typed
+prune .flourite
+prune .frontier
+prune output
+prune .venv
+prune build
+prune dist
+global-exclude __pycache__ *.py[cod] .coverage
