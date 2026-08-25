@@ -15,7 +15,9 @@ from frontier_harness.cognition import (
     compile_guard_obligations,
     fallback_charter,
     finalize_action_receipt,
+    observed_modalities_from_trace,
     reactivate_cruxes_for_open_obligations,
+    reconcile_frontier_kernel,
 )
 from frontier_harness.engine import FrontierEngine
 from frontier_harness.errors import ProviderCallError
@@ -28,6 +30,7 @@ from frontier_harness.models import (
     ActionRecord,
     ActionSpec,
     ArtifactRef,
+    ArtifactSpine,
     BlobRef,
     CharterAssertion,
     CharterProvenance,
@@ -37,11 +40,14 @@ from frontier_harness.models import (
     CostBand,
     Crux,
     CruxStatus,
+    EliminatedDirection,
     EvidenceModality,
     EvidenceRecord,
+    FrontierKernel,
     GoalContract,
     Impact,
     IndependenceClass,
+    InvariantRevision,
     Obligation,
     ObligationDraft,
     ObligationStatus,
@@ -104,6 +110,227 @@ def _charter(*, deliverable: str = "Deliver the report", audience: str = "Operat
         hard_constraints=["Do not replace the user's objective"],
         unacceptable_failures=["Answering a different task"],
     )
+
+
+def test_frontier_kernel_does_not_reward_paraphrase_churn() -> None:
+    current = FrontierKernel(
+        bottleneck="The evaluator rewards a proxy rather than the actual objective.",
+        invariants=["The immutable task remains the optimization target."],
+        live_hypotheses=["The proxy mismatch causes the observed failure."],
+        next_move="Derive a task-equivalent discriminator.",
+        revision=4,
+        last_advance_round=2,
+    )
+    paraphrase = FrontierKernel(
+        bottleneck="The evaluator rewards a proxy, not the real objective.",
+        invariants=["The optimization target stays the immutable task."],
+        live_hypotheses=["Observed failure is caused by mismatch in the proxy."],
+        next_move="Construct an equivalent task discriminator.",
+    )
+
+    updated, notes = reconcile_frontier_kernel(
+        current,
+        paraphrase,
+        cruxes=[],
+        spine=None,
+        next_actions=[],
+        round_index=3,
+    )
+
+    assert not notes.advanced
+    assert updated.revision == 4
+    assert updated.stagnant_rounds == 1
+
+
+def test_frontier_kernel_retains_causal_negative_results_without_fake_revisions() -> None:
+    current = FrontierKernel(
+        bottleneck="Choose the mechanism that generalizes.",
+        invariants=["The task objective is immutable."],
+        live_hypotheses=["A causal planner generalizes."],
+        revision=2,
+        last_advance_round=1,
+    )
+    proposed = current.model_copy(
+        update={
+            "eliminated_directions": [
+                EliminatedDirection(
+                    family="proxy-only hill climbing",
+                    failure_mechanism="It exploits evaluator leakage and fails held-out cases.",
+                    reopen_if="A task-equivalent evaluator removes the leakage.",
+                ),
+                EliminatedDirection(
+                    family="malformed family",
+                    failure_mechanism="",
+                ),
+            ],
+            "source_action_ids": ["act-negative", "act-invented"],
+        }
+    )
+
+    learned, notes = reconcile_frontier_kernel(
+        current,
+        proposed,
+        cruxes=[],
+        spine=None,
+        next_actions=[],
+        round_index=2,
+        eligible_action_ids=["act-negative"],
+    )
+    repeated, repeat_notes = reconcile_frontier_kernel(
+        learned,
+        proposed,
+        cruxes=[],
+        spine=None,
+        next_actions=[],
+        round_index=3,
+        eligible_action_ids=["act-negative"],
+    )
+
+    assert notes.advanced
+    assert learned.revision == 3
+    assert len(learned.eliminated_directions) == 1
+    assert learned.source_action_ids == ["act-negative"]
+    assert notes.rejected == [
+        "eliminated direction lacked a family or failure mechanism",
+        "frontier sources were not completed in this checkpoint: act-invented",
+    ]
+    assert not repeat_notes.advanced
+    assert repeated.revision == 3
+
+
+def test_frontier_kernel_cannot_claim_batch_progress_without_attribution() -> None:
+    current = FrontierKernel(
+        bottleneck="The current mechanism does not explain the residual.",
+        live_hypotheses=["The representation hides the controlling variable."],
+        revision=3,
+    )
+    unattributed = FrontierKernel(
+        bottleneck="A different mechanism now controls the residual.",
+        live_hypotheses=["The scheduler causes the failure."],
+    )
+
+    updated, notes = reconcile_frontier_kernel(
+        current,
+        unattributed,
+        cruxes=[],
+        spine=None,
+        next_actions=[],
+        round_index=4,
+        eligible_action_ids=["act-completed"],
+    )
+
+    assert not notes.advanced
+    assert updated.bottleneck == current.bottleneck
+    assert updated.revision == 3
+    assert updated.stagnant_rounds == 1
+    assert notes.rejected[-1].startswith("semantic frontier update lacked")
+
+
+def test_frontier_kernel_revises_false_working_invariants_but_not_hard_ones() -> None:
+    from frontier_harness.models import ArtifactSpine
+
+    current = FrontierKernel(
+        bottleneck="Explain the held-out failure.",
+        invariants=[
+            "The user's objective remains fixed.",
+            "The proxy score tracks real performance.",
+        ],
+        revision=2,
+    )
+    proposed = current.model_copy(
+        update={
+            "invariant_revisions": [
+                InvariantRevision(
+                    statement="The proxy score tracks actual performance.",
+                    failure_mechanism="Held-out outcomes diverge from the proxy.",
+                    replacement="The proxy is valid only on the calibration slice.",
+                ),
+                InvariantRevision(
+                    statement="The user objective stays fixed.",
+                    failure_mechanism="A simpler objective is easier to optimize.",
+                ),
+            ],
+            "source_action_ids": ["act-held-out"],
+        }
+    )
+
+    updated, notes = reconcile_frontier_kernel(
+        current,
+        proposed,
+        cruxes=[],
+        spine=ArtifactSpine(
+            central_thesis="Solve the original task.",
+            hard_invariants=["The user's objective remains fixed."],
+        ),
+        next_actions=[],
+        round_index=3,
+        eligible_action_ids=["act-held-out"],
+    )
+
+    assert notes.advanced
+    assert updated.revision == 3
+    assert updated.invariants == [
+        "The user's objective remains fixed.",
+        "The proxy is valid only on the calibration slice.",
+    ]
+    assert len(updated.invariant_revisions) == 1
+    assert any("cannot retire" in item for item in notes.rejected)
+
+
+def test_eliminated_hypothesis_leaves_live_frontier_until_evidence_reopens_it() -> None:
+    current = FrontierKernel(
+        bottleneck="Choose a search mechanism.",
+        live_hypotheses=["proxy-only hill climbing"],
+        revision=1,
+    )
+    eliminated = FrontierKernel(
+        bottleneck=current.bottleneck,
+        live_hypotheses=[],
+        eliminated_directions=[
+            EliminatedDirection(
+                family="proxy-only hill climbing",
+                failure_mechanism="It fails held-out objectives.",
+                reopen_if="A task-equivalent evaluator becomes available.",
+            )
+        ],
+        source_action_ids=["act-falsify"],
+    )
+    closed, _ = reconcile_frontier_kernel(
+        current,
+        eliminated,
+        cruxes=[],
+        spine=None,
+        next_actions=[],
+        round_index=2,
+        eligible_action_ids=["act-falsify"],
+    )
+    reopen = ActionProposal(
+        kind=ActionKind.EXPLORE,
+        target="search mechanism",
+        assignment="Reconsider the family under the new evaluator.",
+        impact=Impact.HIGH,
+        cost=CostBand.CHEAP,
+        expected_decision_effect="Retain or kill the family under the real objective.",
+        hypothesis_family="proxy-only hill climbing",
+        novelty_basis="A task-equivalent held-out evaluator is now available.",
+    )
+    reopened, _ = reconcile_frontier_kernel(
+        closed,
+        closed.model_copy(
+            update={
+                "live_hypotheses": ["proxy-only hill climbing"],
+                "source_action_ids": ["act-reopen"],
+            }
+        ),
+        cruxes=[],
+        spine=None,
+        next_actions=[reopen],
+        round_index=3,
+        eligible_action_ids=["act-reopen"],
+    )
+
+    assert closed.live_hypotheses == []
+    assert reopened.live_hypotheses == ["proxy-only hill climbing"]
 
 
 def test_only_destination_changes_require_reframe_witness() -> None:
@@ -220,6 +447,25 @@ def test_context_reads_and_unfinished_tools_do_not_self_certify_evidence() -> No
     assert finalized.observed_evidence_channels == [IndependenceClass.SAME_MODEL]
     assert finalized.evidence_strength == "moderate"
     assert not finalized.evidence_channel_confirmed
+
+
+def test_declared_observation_modality_requires_a_matching_successful_tool() -> None:
+    requested = [
+        EvidenceModality.DETERMINISTIC_TEST,
+        EvidenceModality.STATIC_VISUAL,
+        EvidenceModality.HUMAN_OBSERVATION,
+    ]
+    observed = observed_modalities_from_trace(
+        requested,
+        ProviderTraceSummary(
+            tool_calls=[
+                ToolCallSummary(call_id="bash-ok", name="bash", success=True),
+                ToolCallSummary(call_id="image-failed", name="inspect_image", success=False),
+            ]
+        ),
+    )
+
+    assert observed == [EvidenceModality.DETERMINISTIC_TEST]
 
 
 def test_worker_envelope_replays_legacy_runtime_enriched_receipt() -> None:
@@ -518,7 +764,7 @@ def test_extension_archives_prior_seal_replans_and_releases_fresh(
 
 
 def test_semantic_ci_flags_loss_of_a_protected_strength() -> None:
-    from frontier_harness.models import ArtifactSpine, CompletionCase, RunState
+    from frontier_harness.models import CompletionCase, RunState
     from frontier_harness.semantic_ci import run_semantic_ci
 
     source = capture_task_source("Preserve the unique causal mechanism in the final report.")

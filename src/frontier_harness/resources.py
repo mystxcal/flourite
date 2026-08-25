@@ -7,8 +7,10 @@ from .models import (
     ActionStatus,
     BudgetContract,
     Impact,
+    IndependenceClass,
     IssueStatus,
     ObligationStatus,
+    ProgressVector,
     ResourceDecision,
     ResourceDecisionKind,
     ResourceSnapshot,
@@ -50,26 +52,43 @@ class ResourceGovernor:
             }:
                 continue
             receipt = record.receipt
-            result = record.result
-            if (
-                bool(record.objective_measurement and record.objective_measurement.valid)
-                or bool(
-                    receipt
-                    and (
-                        receipt.state_changes
-                        or receipt.decisions_changed
-                        or receipt.obligations_unlocked
-                        or receipt.obligations_invalidated
-                        or receipt.forecast_was_useful
-                        or receipt.evidence_strength in {"strong", "decisive"}
-                    )
-                )
-                or bool(
-                    result and (result.negative_result or result.materiality in {"high", "fatal"})
+            # Model-authored materiality and negative-result flags are useful
+            # proposals, not resource currency.  A result is independently
+            # informative here only when a runtime measurement landed or the
+            # observed channel was confirmed.  Pure reasoning earns its next
+            # horizon through the keeper-owned FrontierKernel revision.
+            if bool(record.objective_measurement and record.objective_measurement.valid) or bool(
+                receipt
+                and receipt.evidence_channel_confirmed
+                and (
+                    receipt.state_changes
+                    or receipt.decisions_changed
+                    or receipt.obligations_unlocked
+                    or receipt.obligations_invalidated
+                    or receipt.forecast_was_useful
+                    or receipt.evidence_strength in {"strong", "decisive"}
                 )
             ):
                 informative += 1
         return informative
+
+    @staticmethod
+    def _objective_improvements(state: RunState) -> int:
+        improved = 0
+        for record in state.actions.values():
+            before = record.baseline_objective_measurement
+            after = record.objective_measurement
+            if before is None or after is None or not before.valid or not after.valid:
+                continue
+            metric = after.primary_metric
+            if metric not in before.metrics or metric not in after.metrics:
+                continue
+            left, right = before.metrics[metric], after.metrics[metric]
+            improved += int(
+                (after.direction == "maximize" and right > left)
+                or (after.direction == "minimize" and right < left)
+            )
+        return improved
 
     @classmethod
     def snapshot(cls, state: RunState) -> ResourceSnapshot:
@@ -85,15 +104,31 @@ class ResourceGovernor:
             "release": 3,
         }
         scoped_evidence = 0
+
+        def credible(evidence: object) -> bool:
+            item = evidence
+            independence = getattr(item, "independence_class", None)
+            if independence not in {
+                IndependenceClass.SAME_MODEL,
+                IndependenceClass.DIFFERENT_CONDITIONING,
+            }:
+                return True
+            source_action_id = getattr(item, "source_action_id", None)
+            source = state.actions.get(source_action_id or "")
+            return bool(source and source.receipt and source.receipt.evidence_channel_confirmed)
+
         for obligation in state.obligations.values():
             relevant = [
                 evidence
                 for evidence in state.evidence.values()
-                if evidence.evidence_id in obligation.evidence_references
-                or (
-                    evidence.source_action_id in state.actions
-                    and obligation.obligation_id
-                    in state.actions[evidence.source_action_id].spec.obligation_ids
+                if credible(evidence)
+                and (
+                    evidence.evidence_id in obligation.evidence_references
+                    or (
+                        evidence.source_action_id in state.actions
+                        and obligation.obligation_id
+                        in state.actions[evidence.source_action_id].spec.obligation_ids
+                    )
                 )
             ]
             for evidence in relevant:
@@ -110,7 +145,9 @@ class ResourceGovernor:
                     break
         if not state.obligations:
             scoped_evidence = sum(
-                bool(item.modalities or item.establishes) and not item.negative_result
+                credible(item)
+                and bool(item.modalities or item.establishes)
+                and not item.negative_result
                 for item in state.evidence.values()
             )
         return ResourceSnapshot(
@@ -136,6 +173,11 @@ class ResourceGovernor:
             ),
             active_cruxes=len(state.active_cruxes),
             scoped_evidence=scoped_evidence,
+            frontier_revision=(state.frontier_kernel.revision if state.frontier_kernel else 0),
+            objective_improvements=cls._objective_improvements(state),
+            productive_discoveries=sum(
+                item.productive_results for item in state.discovery_records.values()
+            ),
         )
 
     def completion_reserve(self, state: RunState) -> int:
@@ -185,17 +227,16 @@ class ResourceGovernor:
         )
 
     @staticmethod
-    def _progress(before: ResourceSnapshot, after: ResourceSnapshot) -> tuple[int, list[str]]:
-        """Score decision-changing gradient, not visible activity.
+    def _progress(
+        before: ResourceSnapshot, after: ResourceSnapshot
+    ) -> tuple[ProgressVector, list[str]]:
+        """Preserve decision-changing movement as a vector, not a fake utility.
 
         Mutating the artifact is deliberately worth too little to earn a new
         tranche by itself.  Negative results count when they eliminate a live
         branch; failed calls and mere token consumption do not.
         """
 
-        # ``score`` counts independent material signal classes; it is not a
-        # hand-tuned utility function.  Magnitude remains visible in reasons.
-        score = 0
         reasons: list[str] = []
         artifact_changed = bool(
             after.artifact_digest and after.artifact_digest != before.artifact_digest
@@ -205,29 +246,65 @@ class ResourceGovernor:
         accepted_delta = after.accepted_actions - before.accepted_actions
         if after.accepted_actions > before.accepted_actions:
             reasons.append(f"{accepted_delta} new action result(s) were accepted")
-        if artifact_changed and accepted_delta > 0:
-            score += 1
+        quality = int(artifact_changed and accepted_delta > 0)
+        epistemic = 0
+        feasibility_delta = 0
+        exploration = 0
+        reliability = 0
         if after.informative_actions > before.informative_actions:
             delta = after.informative_actions - before.informative_actions
             reasons.append(f"{delta} new discriminative result(s) landed")
-            score += 1
+            epistemic += delta
+        if after.frontier_revision > before.frontier_revision:
+            delta = after.frontier_revision - before.frontier_revision
+            reasons.append(f"frontier understanding advanced by {delta} revision(s)")
+            epistemic += delta
+        if after.objective_improvements > before.objective_improvements:
+            delta = after.objective_improvements - before.objective_improvements
+            reasons.append(f"{delta} runtime objective improvement(s) landed")
+            quality += delta
         if after.release_blockers < before.release_blockers:
             delta = before.release_blockers - after.release_blockers
             reasons.append(f"release-blocking debt decreased by {delta}")
-            score += 1
+            feasibility_delta += delta
         if after.high_impact_issues < before.high_impact_issues:
             delta = before.high_impact_issues - after.high_impact_issues
             reasons.append(f"high-impact issue debt decreased by {delta}")
-            score += 1
+            feasibility_delta += delta
         if after.active_cruxes < before.active_cruxes:
             delta = before.active_cruxes - after.active_cruxes
             reasons.append(f"active crux count decreased by {delta}")
-            score += 1
+            feasibility_delta += delta
+        if after.productive_discoveries > before.productive_discoveries:
+            delta = after.productive_discoveries - before.productive_discoveries
+            reasons.append(f"{delta} productive mechanism discovery result(s) landed")
+            exploration += delta
         if after.scoped_evidence > before.scoped_evidence:
             delta = after.scoped_evidence - before.scoped_evidence
             reasons.append(f"scoped evidence coverage increased by {delta}")
-            score += 1
-        return score, reasons
+            reliability += delta
+        feasibility = (
+            feasibility_delta
+            if feasibility_delta and any((quality, epistemic, exploration, reliability))
+            else 0
+        )
+        if feasibility_delta and not feasibility:
+            reasons.append(
+                "debt-state movement lacked a new causal observation or accepted artifact "
+                "effect, so it did not mint compute"
+            )
+        vector = ProgressVector(
+            quality=quality,
+            epistemic=epistemic,
+            feasibility=feasibility,
+            exploration=exploration,
+            reliability=reliability,
+            calls_spent=max(0, after.calls - before.calls),
+            input_tokens_spent=max(0, after.input_tokens - before.input_tokens),
+            output_tokens_spent=max(0, after.output_tokens - before.output_tokens),
+            wall_seconds_spent=max(0.0, after.wall_seconds - before.wall_seconds),
+        )
+        return vector, reasons
 
     def decide(
         self,
@@ -235,9 +312,20 @@ class ResourceGovernor:
         resource: ResourceState,
         *,
         actionable_actions: int,
+        active_commitments: int = 0,
     ) -> tuple[ResourceDecision, ResourceState]:
         snapshot = self.snapshot(state)
-        gradient_score, progress = self._progress(resource.last_snapshot, snapshot)
+        progress_vector, progress = self._progress(resource.last_snapshot, snapshot)
+        gradient_score = sum(
+            value > 0
+            for value in (
+                progress_vector.quality,
+                progress_vector.epistemic,
+                progress_vector.feasibility,
+                progress_vector.exploration,
+                progress_vector.reliability,
+            )
+        )
         reserve = self.completion_reserve(state)
         debt = snapshot.release_blockers + snapshot.high_impact_issues + snapshot.active_cruxes
         stagnation_patience = (
@@ -260,9 +348,14 @@ class ResourceGovernor:
             stagnant = resource.stagnant_grants
             reasons.append("no feasible decision-changing action remains")
         else:
-            meaningful_progress = gradient_score > 0
+            meaningful_progress = progress_vector.productive
             stagnant = 0 if meaningful_progress else resource.stagnant_grants + 1
-            gradient_alive = meaningful_progress or (debt > 0 and stagnant <= stagnation_patience)
+            commitment_alive = active_commitments > 0
+            gradient_alive = (
+                meaningful_progress
+                or commitment_alive
+                or (debt > 0 and stagnant <= stagnation_patience)
+            )
             if before < hard and gradient_alive:
                 # Default tranche = the feasible worker wave plus its
                 # integration checkpoint.  A one-action frontier therefore
@@ -275,7 +368,11 @@ class ResourceGovernor:
                 reasons.append(
                     "fresh progress supports another work horizon"
                     if meaningful_progress
-                    else "unresolved material debt earns a bounded exploration grace"
+                    else (
+                        "a validated bounded continuation earns its next predicted step"
+                        if commitment_alive
+                        else "unresolved material debt earns a bounded exploration grace"
+                    )
                 )
             elif before >= hard and gradient_alive:
                 after = before
@@ -293,7 +390,9 @@ class ResourceGovernor:
             hard_call_limit=hard,
             completion_reserve_calls=reserve,
             actionable_actions=actionable_actions,
+            active_commitments=active_commitments,
             gradient_score=gradient_score,
+            progress_vector=progress_vector,
             stagnation_patience=stagnation_patience,
             progress_reasons=progress,
             reasons=reasons,

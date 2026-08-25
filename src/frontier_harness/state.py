@@ -22,6 +22,7 @@ from .models import (
     Crux,
     DiscoveryRecord,
     EvidenceRecord,
+    FrontierKernel,
     GoalContract,
     InstrumentSpec,
     Issue,
@@ -111,6 +112,14 @@ class StateReducer:
                 state.charter_history.append(charter)
             if payload.get("artifact_spine"):
                 state.artifact_spine = ArtifactSpine.model_validate(payload["artifact_spine"])
+            if payload.get("frontier_kernel"):
+                kernel = FrontierKernel.model_validate(payload["frontier_kernel"])
+                state.frontier_kernel = kernel
+                state.frontier_advancing_action_ids = list(
+                    dict.fromkeys(
+                        [*state.frontier_advancing_action_ids, *kernel.source_action_ids]
+                    )
+                )
             state.obligations = {
                 item["obligation_id"]: Obligation.model_validate(item)
                 for item in payload.get("obligations", [])
@@ -290,6 +299,14 @@ class StateReducer:
                 state.discovery_records[discovery_record.lineage_id] = discovery_record
             if payload.get("artifact_spine"):
                 state.artifact_spine = ArtifactSpine.model_validate(payload["artifact_spine"])
+            if payload.get("frontier_kernel"):
+                kernel = FrontierKernel.model_validate(payload["frontier_kernel"])
+                state.frontier_kernel = kernel
+                state.frontier_advancing_action_ids = list(
+                    dict.fromkeys(
+                        [*state.frontier_advancing_action_ids, *kernel.source_action_ids]
+                    )
+                )
             if payload.get("task_charter"):
                 charter = TaskCharter.model_validate(payload["task_charter"])
                 state.task_charter = charter
@@ -653,6 +670,9 @@ def state_summary(state: RunState) -> dict[str, Any]:
         "task_charter": state.task_charter.model_dump(mode="json") if state.task_charter else None,
         "artifact_spine": state.artifact_spine.model_dump(mode="json")
         if state.artifact_spine
+        else None,
+        "frontier_kernel": state.frontier_kernel.model_dump(mode="json")
+        if state.frontier_kernel
         else None,
         "open_obligations": [item.model_dump(mode="json") for item in state.open_obligations],
         "active_cruxes": [item.model_dump(mode="json") for item in state.active_cruxes],

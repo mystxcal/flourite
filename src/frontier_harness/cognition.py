@@ -31,10 +31,13 @@ from .models import (
     CruxDraft,
     CruxStatus,
     CruxUpdate,
+    EliminatedDirection,
     EvidenceModality,
+    FrontierKernel,
     GoalContract,
     Impact,
     IndependenceClass,
+    InvariantRevision,
     LeadContinuityAck,
     LeadContinuityStatus,
     Obligation,
@@ -61,6 +64,13 @@ class AdmissionNotes:
     accepted_ids: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class FrontierKernelNotes:
+    advanced: bool = False
+    reasons: list[str] = field(default_factory=list)
+    rejected: list[str] = field(default_factory=list)
 
 
 def capture_task_source(text: str) -> TaskSource:
@@ -219,7 +229,7 @@ def compile_requirement_traces(text: str) -> list[RequirementTrace]:
 def _semantic_tokens(text: str) -> set[str]:
     return {
         token
-        for token in normalize_key(text).split()
+        for token in re.findall(r"[\w]+", normalize_key(text))
         if len(token) >= 4
         and token
         not in {
@@ -253,6 +263,236 @@ def _same_requirement(left: str, right: str) -> bool:
         return False
     overlap = len(left_tokens & right_tokens)
     return overlap / min(len(left_tokens), len(right_tokens)) >= 0.82
+
+
+def _same_frontier_statement(left: str, right: str) -> bool:
+    """Suppress obvious semantic churn without pretending to be an oracle."""
+
+    if _same_requirement(left, right):
+        return True
+    left_tokens = _semantic_tokens(left)
+    right_tokens = _semantic_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = len(left_tokens & right_tokens)
+    return overlap / min(len(left_tokens), len(right_tokens)) >= 0.75
+
+
+def _append_semantic_unique(items: list[str], candidate: str) -> bool:
+    candidate = " ".join(candidate.split()).strip()
+    if not candidate or any(_same_frontier_statement(candidate, item) for item in items):
+        return False
+    items.append(candidate)
+    return True
+
+
+def _same_semantic_set(left: Sequence[str], right: Sequence[str]) -> bool:
+    clean_left = [" ".join(item.split()).strip() for item in left if item.strip()]
+    clean_right = [" ".join(item.split()).strip() for item in right if item.strip()]
+    if len(clean_left) != len(clean_right):
+        return False
+    return all(
+        any(_same_frontier_statement(item, candidate) for candidate in clean_right)
+        for item in clean_left
+    )
+
+
+def reconcile_frontier_kernel(
+    current: FrontierKernel | None,
+    proposed: FrontierKernel | None,
+    *,
+    cruxes: Sequence[Crux],
+    spine: ArtifactSpine | None,
+    next_actions: Sequence[ActionProposal],
+    round_index: int,
+    eligible_action_ids: Sequence[str] = (),
+) -> tuple[FrontierKernel, FrontierKernelNotes]:
+    """Reconcile the solver/keeper handoff without rewarding paraphrase churn.
+
+    The immutable ledger remains the lossless record.  This kernel is only the
+    compact navigational state.  Invariants and killed search families are
+    monotone here so a fresh keeper cannot erase a hard-won lesson by omission;
+    a genuinely reopened direction remains expressible as a new live family
+    whose novelty basis names the reopening evidence.
+    """
+
+    notes = FrontierKernelNotes()
+    active = [item for item in cruxes if item.status == CruxStatus.ACTIVE]
+    if current is None:
+        seed = proposed.model_copy(deep=True) if proposed is not None else FrontierKernel()
+        if not seed.bottleneck and active:
+            seed.bottleneck = active[0].uncertainty or active[0].title
+        if not seed.invariants and spine is not None:
+            seed.invariants = list(spine.hard_invariants)
+        if not seed.live_hypotheses and active:
+            seed.live_hypotheses = unique_preserving_order(
+                possibility
+                for crux in active
+                for possibility in crux.competing_possibilities
+                if possibility.strip()
+            )
+        if not seed.next_move and next_actions:
+            seed.next_move = next_actions[0].assignment
+        has_content = bool(
+            seed.bottleneck
+            or seed.invariants
+            or seed.live_hypotheses
+            or seed.eliminated_directions
+            or seed.next_move
+        )
+        seed.revision = 1 if has_content else 0
+        seed.last_advance_round = round_index if has_content else 0
+        seed.stagnant_rounds = 0
+        seed.source_action_ids = []
+        seed.invariant_revisions = []
+        notes.advanced = has_content
+        if has_content:
+            notes.reasons.append("frontier kernel established")
+        return seed, notes
+
+    candidate = proposed.model_copy(deep=True) if proposed is not None else current.model_copy(deep=True)
+    merged_invariants = list(current.invariants)
+    merged_revisions = [item.model_copy(deep=True) for item in current.invariant_revisions]
+    protected_invariants = list(spine.hard_invariants) if spine is not None else []
+    for revision in candidate.invariant_revisions:
+        statement = " ".join(revision.statement.split()).strip()
+        failure = " ".join(revision.failure_mechanism.split()).strip()
+        replacement = " ".join(revision.replacement.split()).strip()
+        if not statement or not failure:
+            notes.rejected.append("invariant revision lacked a statement or failure mechanism")
+            continue
+        if any(
+            _same_frontier_statement(statement, item.statement) for item in merged_revisions
+        ):
+            continue
+        incumbent = next(
+            (
+                item
+                for item in merged_invariants
+                if _same_frontier_statement(statement, item)
+            ),
+            None,
+        )
+        if incumbent is None:
+            notes.rejected.append("invariant revision did not match an active invariant")
+            continue
+        if any(
+            _same_frontier_statement(incumbent, protected)
+            for protected in protected_invariants
+        ):
+            notes.rejected.append(
+                "kernel cannot retire an Artifact Spine hard invariant; revise the spine first"
+            )
+            continue
+        merged_invariants.remove(incumbent)
+        merged_revisions.append(
+            InvariantRevision(
+                statement=incumbent,
+                failure_mechanism=failure,
+                replacement=replacement,
+            )
+        )
+        if replacement:
+            _append_semantic_unique(merged_invariants, replacement)
+        notes.reasons.append("working invariant revised with a causal failure")
+
+    retired_invariants = [item.statement for item in merged_revisions]
+    for invariant in candidate.invariants:
+        if any(
+            _same_frontier_statement(invariant, retired) for retired in retired_invariants
+        ):
+            continue
+        if _append_semantic_unique(merged_invariants, invariant):
+            notes.reasons.append("new invariant")
+
+    merged_eliminations = [item.model_copy(deep=True) for item in current.eliminated_directions]
+    for elimination in candidate.eliminated_directions:
+        family = " ".join(elimination.family.split()).strip()
+        mechanism = " ".join(elimination.failure_mechanism.split()).strip()
+        if not family or not mechanism:
+            notes.rejected.append("eliminated direction lacked a family or failure mechanism")
+            continue
+        if any(_same_frontier_statement(family, item.family) for item in merged_eliminations):
+            continue
+        merged_eliminations.append(
+            EliminatedDirection(
+                family=family,
+                failure_mechanism=mechanism,
+                reopen_if=" ".join(elimination.reopen_if.split()).strip(),
+            )
+        )
+        notes.reasons.append("search family eliminated with a reusable cause")
+
+    bottleneck = " ".join((candidate.bottleneck or current.bottleneck).split()).strip()
+    live = unique_preserving_order(
+        " ".join(item.split()).strip() for item in candidate.live_hypotheses if item.strip()
+    )
+    if not live:
+        live = list(current.live_hypotheses)
+    reopened_families = [
+        action.hypothesis_family
+        for action in next_actions
+        if action.hypothesis_family.strip() and action.novelty_basis.strip()
+    ]
+    live = [
+        hypothesis
+        for hypothesis in live
+        if not any(
+            _same_frontier_statement(hypothesis, elimination.family)
+            and not any(
+                _same_frontier_statement(elimination.family, reopened)
+                for reopened in reopened_families
+            )
+            for elimination in merged_eliminations
+        )
+    ]
+    next_move = " ".join((candidate.next_move or current.next_move).split()).strip()
+    if not next_move and next_actions:
+        next_move = next_actions[0].assignment
+
+    if (
+        bottleneck
+        and current.bottleneck
+        and not _same_frontier_statement(bottleneck, current.bottleneck)
+    ):
+        notes.reasons.append("controlling bottleneck changed")
+    if not _same_semantic_set(current.live_hypotheses, live):
+        notes.reasons.append("live hypothesis frontier changed")
+
+    eligible = set(eligible_action_ids)
+    requested_sources = candidate.source_action_ids if proposed is not None else []
+    sources = [item for item in requested_sources if item in eligible]
+    invalid_sources = [item for item in requested_sources if item not in eligible]
+    if invalid_sources:
+        notes.rejected.append(
+            "frontier sources were not completed in this checkpoint: "
+            + ", ".join(invalid_sources)
+        )
+    advanced = bool(notes.reasons)
+    if advanced and eligible and not sources:
+        notes.rejected.append(
+            "semantic frontier update lacked a completed source action; prior kernel preserved"
+        )
+        preserved = current.model_copy(deep=True)
+        preserved.source_action_ids = []
+        preserved.stagnant_rounds += 1
+        notes.advanced = False
+        notes.reasons.clear()
+        return preserved, notes
+    updated = FrontierKernel(
+        bottleneck=bottleneck,
+        invariants=merged_invariants,
+        invariant_revisions=merged_revisions,
+        live_hypotheses=live,
+        eliminated_directions=merged_eliminations,
+        next_move=next_move,
+        source_action_ids=sources if advanced else [],
+        revision=current.revision + int(advanced),
+        last_advance_round=round_index if advanced else current.last_advance_round,
+        stagnant_rounds=0 if advanced else current.stagnant_rounds + 1,
+    )
+    notes.advanced = advanced
+    return updated, notes
 
 
 def _requirement_recall(needle: str, haystack: str) -> float:
@@ -811,6 +1051,8 @@ def build_action_contract(
         intervention=proposal.intervention,
         potency_check=proposal.potency_check,
         decision_rule=proposal.decision_rule,
+        observation_modalities=list(proposal.observation_modalities),
+        continuation=proposal.continuation,
         substantive=proposal.substantive,
     )
 
@@ -854,6 +1096,32 @@ _DETERMINISTIC_TOOLS = {
     "eval",
     "lsp",
 }
+
+_MODALITY_TOOLS: dict[EvidenceModality, set[str]] = {
+    EvidenceModality.SOURCE: {"read", "grep", "glob", "github", "browser", "web_search"},
+    EvidenceModality.STRUCTURED_DATA: {"read", "grep", "glob", "bash", "eval", "debug"},
+    EvidenceModality.DETERMINISTIC_TEST: {"bash", "debug", "eval", "lsp"},
+    EvidenceModality.STATIC_VISUAL: {"inspect_image", "browser", "computer"},
+    EvidenceModality.TEMPORAL_VISUAL: {"browser", "computer", "bash"},
+    EvidenceModality.AUDIO: {"browser", "computer", "bash"},
+    EvidenceModality.INTERACTIVE: {"browser", "computer"},
+    EvidenceModality.EXTERNAL_OBSERVATION: {"browser", "web_search", "github"},
+    EvidenceModality.HUMAN_OBSERVATION: set(),
+}
+
+
+def observed_modalities_from_trace(
+    requested: Sequence[EvidenceModality],
+    trace: ProviderTraceSummary,
+) -> list[EvidenceModality]:
+    """Retain only requested modalities whose observation tool actually ran."""
+
+    successful_tools = {item.name for item in trace.tool_calls if item.success is True}
+    return unique_preserving_order(
+        modality
+        for modality in requested
+        if _MODALITY_TOOLS[modality].intersection(successful_tools)
+    )
 
 
 def finalize_action_receipt(

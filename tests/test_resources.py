@@ -8,16 +8,24 @@ import pytest
 from frontier_harness.config import HarnessConfig, ResourcePolicy
 from frontier_harness.engine import FrontierEngine
 from frontier_harness.models import (
+    ActionKind,
+    ActionRecord,
+    ActionSpec,
+    ActionStatus,
     ArtifactRef,
     BlobRef,
     BudgetContract,
+    CostBand,
     EvidenceModality,
     EvidenceRecord,
+    FrontierKernel,
     Impact,
     IndependenceClass,
     Obligation,
+    ObligationStatus,
     ResourceDecisionKind,
     RunState,
+    WorkerEnvelope,
 )
 from frontier_harness.resources import ResourceGovernor
 
@@ -85,9 +93,9 @@ def test_artifact_activity_alone_cannot_earn_compute() -> None:
     before = resource.last_snapshot.model_copy(update={"artifact_digest": "a" * 64})
     resource = resource.model_copy(update={"last_snapshot": before})
     after = allocator.snapshot(run).model_copy(update={"artifact_digest": "b" * 64})
-    score, reasons = allocator._progress(before, after)
+    vector, reasons = allocator._progress(before, after)
 
-    assert score == 0
+    assert vector.productive is False
     assert reasons == ["authoritative artifact changed"]
 
 
@@ -128,6 +136,67 @@ def test_discriminative_evidence_earns_another_horizon() -> None:
     assert updated.active_call_limit > resource.active_call_limit
 
 
+def test_model_claimed_materiality_does_not_mint_compute() -> None:
+    run = state()
+    run.actions["act-claim"] = ActionRecord(
+        spec=ActionSpec(
+            action_id="act-claim",
+            round_index=1,
+            kind=ActionKind.EXPLORE,
+            target="unverified idea",
+            assignment="declare this important",
+            impact=Impact.HIGH,
+            cost=CostBand.CHEAP,
+            expected_decision_effect="change the answer",
+        ),
+        status=ActionStatus.COMPLETE,
+        result=WorkerEnvelope(
+            target="unverified idea",
+            result_or_artifact_reference="output/claim.md",
+            findings=["The model says this matters."],
+            materiality="fatal",
+            negative_result=True,
+        ),
+    )
+
+    assert ResourceGovernor.snapshot(run).informative_actions == 0
+
+
+def test_keeper_owned_frontier_advance_can_earn_the_next_thought_horizon() -> None:
+    run = state()
+    allocator = governor()
+    before = allocator.snapshot(run)
+    run.frontier_kernel = FrontierKernel(
+        bottleneck="A new causal incompatibility controls the result.",
+        revision=1,
+        last_advance_round=1,
+    )
+    after = allocator.snapshot(run)
+
+    vector, reasons = allocator._progress(before, after)
+
+    assert vector.epistemic == 1
+    assert reasons == ["frontier understanding advanced by 1 revision(s)"]
+
+
+def test_valid_delayed_commitment_can_earn_a_horizon_without_fake_progress() -> None:
+    run = state()
+    allocator = governor(max_stagnant_grants=0)
+    resource = allocator.initial_state(run)
+
+    decision, _ = allocator.decide(
+        run,
+        resource,
+        actionable_actions=1,
+        active_commitments=1,
+    )
+
+    assert decision.kind == ResourceDecisionKind.GRANT
+    assert decision.gradient_score == 0
+    assert decision.active_commitments == 1
+    assert "bounded continuation" in decision.reasons[0]
+
+
 def test_unresolved_material_debt_gets_bounded_grace_not_infinite_churn() -> None:
     run = state()
     run.obligations["obl-1"] = Obligation(
@@ -146,6 +215,27 @@ def test_unresolved_material_debt_gets_bounded_grace_not_infinite_churn() -> Non
 
     assert first.kind == ResourceDecisionKind.GRANT
     assert second.kind == ResourceDecisionKind.FINALIZE
+
+
+def test_bookkeeping_only_debt_closure_does_not_mint_compute() -> None:
+    run = state()
+    run.obligations["obl-1"] = Obligation(
+        obligation_id="obl-1",
+        title="Required result",
+        requirement="Resolve the load-bearing requirement",
+        kind="constraint",
+        acceptance="The requirement is evidenced",
+        impact=Impact.HIGH,
+    )
+    allocator = governor(max_stagnant_grants=0)
+    resource = allocator.initial_state(run)
+    run.obligations["obl-1"].status = ObligationStatus.SATISFIED
+
+    decision, _ = allocator.decide(run, resource, actionable_actions=1)
+
+    assert decision.kind == ResourceDecisionKind.FINALIZE
+    assert decision.progress_vector.feasibility == 0
+    assert "did not mint compute" in decision.progress_reasons[-1]
 
 
 def test_live_gradient_at_hard_envelope_recommends_operator_extension() -> None:

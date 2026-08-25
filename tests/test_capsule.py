@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from frontier_harness.adapters.generic import MarkdownAdapter
 from frontier_harness.adapters.profiles import get_profile
 from frontier_harness.blobs import BlobStore
 from frontier_harness.capsule import CapsuleBuilder, stage_sources
+from frontier_harness.models import ContextLens
 
 
 def test_staged_sources_are_immutable_and_exclusions_are_pruned(tmp_path: Path) -> None:
@@ -55,7 +57,7 @@ def test_staged_sources_are_immutable_and_exclusions_are_pruned(tmp_path: Path) 
         current_artifact=None,
     )
     builder = CapsuleBuilder(adapter=adapter, blobs=blobs, sources=staged)
-    builder.populate(
+    manifest = builder.populate(
         workspace,
         task="Use the supplied brief.",
         state=None,
@@ -63,6 +65,13 @@ def test_staged_sources_are_immutable_and_exclusions_are_pruned(tmp_path: Path) 
         goal_contract=None,
     )
     assert (workspace.context_dir / "VERIFICATION_CONTRACT.json").read_text() == "{}"
+    lens = ContextLens.model_validate(
+        json.loads((workspace.context_dir / "CONTEXT_LENS.json").read_text())
+    )
+    assert manifest["context_lens_digest"] == lens.digest
+    assert lens.task_source_digest
+    assert lens.artifact_view == "none"
+    assert json.loads((workspace.context_dir / "OBSERVATION_CONTRACT.json").read_text()) == []
     capsule_copy = next((workspace.context_dir / "sources").iterdir())
     capsule_copy.write_text("worker mutation\n", encoding="utf-8")
 

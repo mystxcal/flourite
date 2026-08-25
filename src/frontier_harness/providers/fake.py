@@ -31,6 +31,7 @@ from ..models import (
     CruxDraft,
     CruxStatus,
     CruxUpdate,
+    EpistemicMode,
     FinalOutput,
     GoalContract,
     Impact,
@@ -245,6 +246,11 @@ class FakeProvider(ModelProvider):
                         impact=Impact.HIGH,
                         cost=CostBand.CHEAP,
                         independence_class=IndependenceClass.DETERMINISTIC_TOOL,
+                        epistemic_mode=EpistemicMode.EXECUTE,
+                        execution_trigger=(
+                            "The central claim survived thought but still needs a deterministic "
+                            "falsification before it can be retained."
+                        ),
                         expected_decision_effect="Confirm or force revision of the central result.",
                         reusable_value=ValueBand.MEDIUM,
                     )

@@ -188,6 +188,13 @@ class LiveDashboard:
         return (
             5
             + int(bool(state.summit_active or state.discovery_records))
+            + int(bool(state.frontier_kernel))
+            + int(
+                bool(
+                    state.resource_state
+                    and state.resource_state.last_decision is not None
+                )
+            )
             + int(bool(state.metadata.get("bootstrap_error")))
         )
 
@@ -236,6 +243,28 @@ class LiveDashboard:
                     f"{sum(item.productive_results for item in state.discovery_records.values())} productive"
                 ),
             )
+        if state.frontier_kernel is not None:
+            table.add_row(
+                "frontier velocity",
+                (
+                    f"revision {state.frontier_kernel.revision} · "
+                    f"{state.frontier_kernel.stagnant_rounds} stagnant round(s)"
+                ),
+                "next",
+                _short(state.frontier_kernel.next_move or "—", 46),
+            )
+        if state.resource_state and state.resource_state.last_decision is not None:
+            decision = state.resource_state.last_decision
+            vector = decision.progress_vector
+            table.add_row(
+                "causal gradient",
+                (
+                    f"Q{vector.quality} · E{vector.epistemic} · "
+                    f"F{vector.feasibility} · X{vector.exploration} · R{vector.reliability}"
+                ),
+                "commitments",
+                str(decision.active_commitments),
+            )
         table.add_row(
             "controller", _short(runtime.detail or "—", 46), "pid", str(runtime.pid or "—")
         )
@@ -261,6 +290,12 @@ class LiveDashboard:
         table.add_column("impact", width=8, no_wrap=True)
         table.add_column("open frontier")
         table.add_column("uncertainty", width=12, no_wrap=True)
+        if state.frontier_kernel is not None and state.frontier_kernel.bottleneck:
+            table.add_row(
+                "crux",
+                _short(state.frontier_kernel.bottleneck, 54),
+                f"rev {state.frontier_kernel.revision}",
+            )
         for issue in state.open_issues[:8]:
             table.add_row(issue.impact.value, _short(issue.title, 54), issue.uncertainty.value)
         if not state.open_issues:

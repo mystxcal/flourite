@@ -141,7 +141,10 @@ class FrontierPolicy(StrictModel):
     correlation_discount: bool = True
     require_decision_relevance: bool = True
     prefer_cheapest_sufficient: bool = True
-    clean_synthesis_every_rounds: int = Field(default=3, ge=1)
+    # A periodic rewrite is process, not evidence.  Set an interval only for a
+    # domain that has demonstrated time-based coherence decay; adaptive runs
+    # otherwise rebuild when the artifact spine or controller says they must.
+    clean_synthesis_every_rounds: int | None = Field(default=None, ge=1)
     minimum_action_impact: Literal["low", "medium", "high"] = "medium"
     expensive_probe_minimum_impact: Literal["medium", "high", "fatal"] = "high"
 
@@ -260,6 +263,12 @@ class CognitionPolicy(StrictModel):
     require_completion_coverage: bool = True
     inline_control_updates: bool = True
     human_evidence_available: bool = False
+    thought_first: bool = True
+    # The model keeps the full trusted tool plane.  This optional strict gate is
+    # off by default because epistemic mode is guidance, not a permission
+    # system; enable it only for deliberately cost-constrained experiments.
+    require_execution_trigger: bool = False
+    frontier_keeper: Literal["auto", "fresh", "continuous"] = "auto"
 
     @model_validator(mode="after")
     def overlay_limits(self) -> CognitionPolicy:
@@ -433,7 +442,7 @@ max_stalled_actions_per_target = 2
 correlation_discount = true
 minimum_action_impact = "medium"
 expensive_probe_minimum_impact = "high"
-clean_synthesis_every_rounds = 3
+# clean_synthesis_every_rounds = 3  # opt in only when a domain proves time-based decay
 
 [cognition]
 mode = "adaptive"                   # adaptive | legacy
@@ -456,6 +465,9 @@ require_reframe_witness = true
 require_completion_coverage = true
 inline_control_updates = true
 human_evidence_available = false
+thought_first = true
+require_execution_trigger = false        # mode guides attention; it never removes tools
+frontier_keeper = "auto"             # auto | fresh | continuous
 
 [summit]
 mode = "auto"                       # off | auto | on

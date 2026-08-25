@@ -79,9 +79,66 @@ The graph is lazy:
 
 The graph aids attention; it never replaces the original task or full artifact.
 
+## 5.1 Frontier Kernel and Keeper
+
+The `FrontierKernel` is the compact working navigation between solver turns:
+
+```text
+controlling bottleneck
+durable invariants
+explicit causal revisions of disproved working invariants
+live hypothesis families
+eliminated families with failure mechanisms and reopen conditions
+best next move
+validated source action IDs for the latest revision
+runtime-owned revision and stagnation
+```
+
+It is neither a transcript summary nor long-term memory. Paraphrase does not
+advance its runtime-owned revision. A repeated eliminated family needs genuine
+reopening evidence before it can consume another action.
+
+At checkpoints, the Frontier Keeper integrates results, compresses the current
+search frontier, and detects semantic repetition. It uses a fresh model context
+where correlated self-judgment is expensive: frontier-quality and
+research/formal/decision/creative/media work, Summit, and observed stagnation.
+This is not an extra phase or permanent manager; the existing integration call
+owns the role.
+
+The solver has one composable capability palette:
+
+```text
+recall · think · retrieve · inspect · execute · build · verify
+```
+
+`epistemic_mode` records the dominant intent and biases attention; it never
+removes provider-native tools. The model may combine the palette freely inside
+one turn. A costly experiment can name the residual uncertainty and decision
+branch that justify it, but ordinary tool use carries no permission ritual.
+See [Frontier velocity, memory, and knowledge](FRONTIER_VELOCITY.md).
+
+## 5.2 Loss-aware context and observation geometry
+
+Each call receives a `CONTEXT_LENS.json` that identifies the exact task and
+artifact digests, question scope, targeted obligations and cruxes, selected
+causal evidence, included material, known omissions, and paths to lossless
+detail. It is a navigational projection, not a wall: the model may open the
+full artifact, staged sources, raw result blobs, or ledger-backed state whenever
+the question needs them.
+
+`OBSERVATION_CONTRACT.json` states what release properties are in scope and
+which artifact scope and modalities can establish them. Planned modalities do
+not become evidence. The runtime retains a requested modality only when the
+provider trace shows a matching successful observation tool; runtime-owned
+objective measurements remain independently captured. This lets models use
+tools aggressively without letting intent self-certify as proof.
+
 ## 6. Persistent Lead
 
-The Lead owns semantic continuity across orientation, controller checkpoints, integration, and final synthesis when enabled.
+The Lead owns solver continuity across orientation, tightly coupled thought,
+and final synthesis when enabled. Checkpoint integration may stay in that
+session for ordinary work or use a fresh Frontier Keeper when independence is
+worth more than hidden-context continuity.
 
 Codex calls use an explicit OMP transport, a persistent session for the Lead, and separate sessions for ordinary harness workers. Lead calls are serialized. In trusted mode each call has the full configured host tool plane and may synchronously delegate to OMP task agents. The provider boundary has no ambient system/developer prompt or project discovery; repository instructions required for software work are explicit capsule inputs. Context and capability hashes make the client-visible boundary auditable.
 
@@ -148,7 +205,10 @@ failure handling
 
 After execution, its receipt records actual state changes, evidence scope, reusable assets, forecast quality, and recommended next action.
 
-Most control bookkeeping is produced in calls already required for solving. V3.5 does not install a permanent model manager.
+Most control bookkeeping is produced in calls already required for solving.
+V3.5 does not install a permanent model manager. Models cannot mint progress
+from claimed materiality, novelty, negative results, or issue-state churn;
+runtime measurements and Keeper-adjudicated kernel revisions own that gradient.
 
 ## 9. Local topology compiler
 
@@ -173,11 +233,16 @@ A persistent specialist is promoted only after repeated state reuse and a meanin
 The call budget is an operator-owned hard envelope, not a phase allocation.
 New runs begin with a smaller derived horizon: orientation, one feasible worker
 wave, its checkpoint, and the current completion path. At a horizon boundary,
-a deterministic governor reads the ledger and grants another worker-plus-
-checkpoint tranche only for decision-changing gradient: discriminative
-evidence, accepted results, resolved cruxes, or reduced release debt. Artifact
-mutation alone cannot unlock compute. Material unresolved debt receives only a
-bounded grace period.
+a deterministic governor reads the ledger and preserves gradient as separate
+quality, epistemic, feasibility, exploration, and reliability components plus
+observed cost. Confirmed discriminative evidence, runtime objective
+improvement, an accepted artifact effect, scoped observation coverage,
+productive mechanism discovery, or a source-backed Frontier Kernel revision
+can earn another worker-plus-checkpoint tranche. Bookkeeping debt reduction and
+artifact mutation alone cannot unlock compute. A model-requested delayed-payoff
+line can continue only through a bounded contract whose prior step was
+integrated and produced a confirmed observation or Frontier Kernel advance.
+Material unresolved debt receives only a bounded grace period.
 
 The completion reserve is recalculated from actual remaining work rather than
 as a fixed budget fraction. It protects clean synthesis, a release challenge

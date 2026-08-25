@@ -69,7 +69,7 @@ max_stalled_actions_per_target = 2
 correlation_discount = true
 minimum_action_impact = "medium"
 expensive_probe_minimum_impact = "high"
-clean_synthesis_every_rounds = 3
+# clean_synthesis_every_rounds = 3  # opt in only when a domain proves time-based decay
 
 [cognition]
 mode = "adaptive"                   # adaptive | legacy
@@ -92,6 +92,9 @@ require_reframe_witness = true
 require_completion_coverage = true
 inline_control_updates = true
 human_evidence_available = false
+thought_first = true
+require_execution_trigger = false        # mode guides attention; it never removes tools
+frontier_keeper = "auto"             # auto | fresh | continuous
 
 [summit]
 mode = "auto"                       # off | auto | on

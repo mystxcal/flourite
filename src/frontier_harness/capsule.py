@@ -9,6 +9,7 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .adapters.base import ArtifactAdapter, CallWorkspace
 from .blobs import BlobStore
@@ -18,12 +19,14 @@ from .models import (
     ActionStatus,
     BlobRef,
     CompletionCase,
+    ContextLens,
+    EvidenceModality,
     GoalContract,
     RunState,
     TaskSource,
 )
 from .state import state_summary
-from .util import atomic_write_text, safe_slug
+from .util import atomic_write_text, canonical_json, safe_slug, sha256_text, unique_preserving_order
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
@@ -171,6 +174,93 @@ class CapsuleBuilder:
     def _relative(workspace: CallWorkspace, path: Path) -> str:
         return path.relative_to(workspace.cwd).as_posix()
 
+    def _select_evidence_records(
+        self,
+        state: RunState,
+        *,
+        explicit_action_ids: list[str],
+        action_contract: ActionContract | None,
+    ) -> list[ActionRecord]:
+        """Compose a causal evidence view instead of a recency transcript.
+
+        Exact requested actions come first, followed by actions sharing the
+        current crux/obligation, prior frontier-changing actions, and finally
+        recent completed work.  The lossless ledger remains the zoom target.
+        """
+
+        ordered: list[ActionRecord] = []
+        seen: set[str] = set()
+
+        def add(action_id: str) -> None:
+            if action_id in seen:
+                return
+            record = state.actions.get(action_id)
+            if record is None or record.status != ActionStatus.COMPLETE:
+                return
+            seen.add(action_id)
+            ordered.append(record)
+
+        for action_id in reversed(explicit_action_ids):
+            add(action_id)
+
+        if action_contract is not None:
+            target_obligations = set(action_contract.obligation_ids)
+            target_cruxes = set(action_contract.target_crux_ids)
+            for record in reversed(list(state.actions.values())):
+                if target_obligations.intersection(record.spec.obligation_ids) or target_cruxes.intersection(
+                    record.spec.crux_ids
+                ):
+                    add(record.spec.action_id)
+
+        for action_id in reversed(state.frontier_advancing_action_ids):
+            add(action_id)
+        for record in reversed(list(state.actions.values())):
+            add(record.spec.action_id)
+        return ordered[: self.evidence_limit]
+
+    @staticmethod
+    def _observation_contract(
+        state: RunState | None,
+        *,
+        action_contract: ActionContract | None,
+        purpose: str,
+    ) -> tuple[list[dict[str, object]], list[EvidenceModality]]:
+        if state is None:
+            return [], []
+        if action_contract is not None and action_contract.obligation_ids:
+            obligations = [
+                state.obligations[item]
+                for item in action_contract.obligation_ids
+                if item in state.obligations
+            ]
+        elif purpose in {"synthesis", "release", "repair"}:
+            obligations = list(state.release_blocking_obligations)
+        else:
+            obligations = list(state.open_obligations)
+        rows: list[dict[str, object]] = [
+            {
+                "obligation_id": item.obligation_id,
+                "property": item.requirement,
+                "acceptance": item.acceptance,
+                "artifact_scope": item.required_artifact_scope,
+                "required_modalities": [value.value for value in item.required_evidence_modalities],
+                "known_evidence_references": list(item.evidence_references),
+                "proxy_boundary": (
+                    "Evidence outside the required artifact scope or modalities may guide work "
+                    "but cannot establish this property."
+                ),
+            }
+            for item in obligations
+        ]
+        modalities = unique_preserving_order(
+            modality for item in obligations for modality in item.required_evidence_modalities
+        )
+        if action_contract is not None:
+            modalities = unique_preserving_order(
+                [*modalities, *action_contract.observation_modalities]
+            )
+        return rows, modalities
+
     def populate(
         self,
         workspace: CallWorkspace,
@@ -186,6 +276,9 @@ class CapsuleBuilder:
         apex_brief: str = "",
         semantic_ci: dict[str, object] | None = None,
         completion_case: CompletionCase | None = None,
+        lens_purpose: Literal[
+            "bootstrap", "action", "checkpoint", "synthesis", "release", "repair"
+        ] = "action",
     ) -> dict[str, str | list[str]]:
         context = workspace.context_dir
         context.mkdir(parents=True, exist_ok=True)
@@ -200,6 +293,7 @@ class CapsuleBuilder:
             from .cognition import capture_task_source
 
             captured = capture_task_source(task)
+            source_value = captured
             atomic_write_text(
                 context / "TASK_SOURCE.json",
                 json.dumps(captured.model_dump(mode="json"), indent=2, ensure_ascii=False),
@@ -245,6 +339,7 @@ class CapsuleBuilder:
             )
         else:
             atomic_write_text(context / "COMPLETION_CASE.json", "{}\n")
+        artifact_view: Literal["none", "full", "preview_with_full"] = "none"
         if state is not None:
             atomic_write_text(
                 context / "STATE.json",
@@ -266,10 +361,21 @@ class CapsuleBuilder:
                     ensure_ascii=False,
                 ),
             )
+            atomic_write_text(
+                context / "FRONTIER_KERNEL.json",
+                json.dumps(
+                    state.frontier_kernel.model_dump(mode="json")
+                    if state.frontier_kernel
+                    else {},
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+            )
             if state.current_artifact is not None:
                 artifact_text = self.adapter.artifact_text(state.current_artifact)
                 if len(artifact_text) <= self.artifact_char_limit:
                     atomic_write_text(context / "CURRENT_ARTIFACT.md", artifact_text)
+                    artifact_view = "full"
                 else:
                     full_path = context / "CURRENT_ARTIFACT.full.md"
                     atomic_write_text(full_path, artifact_text)
@@ -287,6 +393,7 @@ class CapsuleBuilder:
                         "the full file whenever the assignment depends on omitted sections.\n\n"
                         + preview,
                     )
+                    artifact_view = "preview_with_full"
 
                 deliverable_dir = context / "deliverables"
                 deliverable_dir.mkdir(exist_ok=True)
@@ -307,6 +414,7 @@ class CapsuleBuilder:
             atomic_write_text(context / "STATE.json", "{}\n")
             atomic_write_text(context / "TASK_CHARTER.json", "{}\n")
             atomic_write_text(context / "ARTIFACT_SPINE.json", "{}\n")
+            atomic_write_text(context / "FRONTIER_KERNEL.json", "{}\n")
         source_dir = context / "sources"
         source_dir.mkdir(exist_ok=True)
         source_lines = ["# Supplied sources", ""]
@@ -334,23 +442,26 @@ class CapsuleBuilder:
             source_lines.append("- No external source files were supplied.")
         atomic_write_text(context / "SOURCES.md", "\n".join(source_lines) + "\n")
 
+        observation_rows, required_modalities = self._observation_contract(
+            state,
+            action_contract=action_contract,
+            purpose=lens_purpose,
+        )
+        atomic_write_text(
+            context / "OBSERVATION_CONTRACT.json",
+            json.dumps(observation_rows, indent=2, ensure_ascii=False),
+        )
+
         evidence_dir = context / "evidence"
         evidence_dir.mkdir(exist_ok=True)
         evidence_lines = ["# Decision-relevant evidence", ""]
         if state is not None:
-            records: list[ActionRecord] = []
-            if evidence_action_ids:
-                for action_id in evidence_action_ids:
-                    record = state.actions.get(action_id)
-                    if record is not None:
-                        records.append(record)
-            for record in reversed(list(state.actions.values())):
-                if len(records) >= self.evidence_limit:
-                    break
-                if record in records or record.status != ActionStatus.COMPLETE:
-                    continue
-                records.append(record)
-            for record in records[: self.evidence_limit]:
+            records = self._select_evidence_records(
+                state,
+                explicit_action_ids=evidence_action_ids or [],
+                action_contract=action_contract,
+            )
+            for record in records:
                 action_id = record.spec.action_id
                 evidence_lines.extend(
                     [
@@ -401,9 +512,8 @@ class CapsuleBuilder:
                     self.blobs.materialize(record.patch_blob, target)
                     evidence_lines.append(f"Candidate patch: `{self._relative(workspace, target)}`")
                 evidence_lines.append("")
-            retained_records = records[: self.evidence_limit]
-            selected_action_ids = {record.spec.action_id for record in retained_records}
-            remaining = max(0, self.evidence_limit - len(retained_records))
+            selected_action_ids = {record.spec.action_id for record in records}
+            remaining = max(0, self.evidence_limit - len(records))
             standalone_candidates = [
                 evidence
                 for evidence in state.evidence.values()
@@ -438,6 +548,70 @@ class CapsuleBuilder:
             evidence_lines.append("No completed targeted actions are available yet.")
         atomic_write_text(context / "EVIDENCE_INDEX.md", "\n".join(evidence_lines) + "\n")
 
+        assert source_value is not None
+        artifact_scope = (
+            action_contract.artifact_scope
+            if action_contract is not None
+            else ("release" if lens_purpose in {"synthesis", "release", "repair"} else "whole_artifact")
+        )
+        selected_ids = [record.spec.action_id for record in records] if state is not None else []
+        included = [
+            "exact Task Source and verification contract",
+            "compact explicit run state, Task Charter, Artifact Spine, and Frontier Kernel",
+            "task-native observation contract",
+            "supplied source snapshot",
+        ]
+        omissions: list[str] = []
+        zoom_paths = [
+            self._relative(workspace, context / "SOURCES.md"),
+            self._relative(workspace, context / "EVIDENCE_INDEX.md"),
+        ]
+        if state is not None and state.current_artifact is not None:
+            included.append("current authoritative artifact")
+            zoom_paths.append(self._relative(workspace, context / "CURRENT_ARTIFACT.md"))
+            if artifact_view == "preview_with_full":
+                omissions.append(
+                    "The compact artifact view omits its middle; the complete bytes are staged separately."
+                )
+                zoom_paths.append(
+                    self._relative(workspace, context / "CURRENT_ARTIFACT.full.md")
+                )
+            complete_count = sum(
+                record.status == ActionStatus.COMPLETE for record in state.actions.values()
+            )
+            if complete_count > len(selected_ids):
+                omissions.append(
+                    f"{complete_count - len(selected_ids)} completed action record(s) are outside "
+                    "the compact evidence view; the ledger and blob store remain authoritative."
+                )
+        lens_payload = {
+            "purpose": lens_purpose,
+            "action_id": action_contract.action_id if action_contract else None,
+            "task_source_digest": source_value.digest,
+            "artifact_digest": (
+                state.current_artifact.blob.digest
+                if state is not None and state.current_artifact is not None
+                else None
+            ),
+            "artifact_scope": artifact_scope,
+            "artifact_view": artifact_view,
+            "obligation_ids": list(action_contract.obligation_ids) if action_contract else [],
+            "crux_ids": list(action_contract.target_crux_ids) if action_contract else [],
+            "evidence_action_ids": selected_ids,
+            "required_modalities": [item.value for item in required_modalities],
+            "included": included,
+            "omissions": omissions,
+            "zoom_paths": zoom_paths,
+            "state_event_seq": state.last_event_seq if state is not None else 0,
+        }
+        lens = ContextLens.model_validate(
+            {**lens_payload, "digest": sha256_text(canonical_json(lens_payload))}
+        )
+        atomic_write_text(
+            context / "CONTEXT_LENS.json",
+            json.dumps(lens.model_dump(mode="json"), indent=2, ensure_ascii=False),
+        )
+
         return {
             "context_dir": self._relative(workspace, context),
             "request": self._relative(workspace, context / "REQUEST.md"),
@@ -447,6 +621,9 @@ class CapsuleBuilder:
             ),
             "sources": self._relative(workspace, context / "SOURCES.md"),
             "state": self._relative(workspace, context / "STATE.json") if state is not None else "",
+            "frontier_kernel": self._relative(workspace, context / "FRONTIER_KERNEL.json"),
+            "context_lens": self._relative(workspace, context / "CONTEXT_LENS.json"),
+            "context_lens_digest": lens.digest,
             "artifact": self._relative(workspace, context / "CURRENT_ARTIFACT.md")
             if state is not None and state.current_artifact is not None
             else "",

@@ -196,6 +196,22 @@ class CognitiveTopology(StrEnum):
     SUMMIT = "summit"
 
 
+class EpistemicMode(StrEnum):
+    """The action's dominant intent, used for attention and observability.
+
+    ``AUTO`` keeps old ledgers and domain adapters compatible.  New adaptive
+    runs may declare a mode so the context and live view can emphasize the
+    right evidence.  The label never removes a trusted model's ordinary tools.
+    """
+
+    AUTO = "auto"
+    THINK = "think"
+    RETRIEVE = "retrieve"
+    EXECUTE = "execute"
+    BUILD = "build"
+    VERIFY = "verify"
+
+
 class SummitLineageStatus(StrEnum):
     SEED = "seed"
     ACTIVE = "active"
@@ -264,6 +280,41 @@ class ResourceSnapshot(StrictModel):
     high_impact_issues: int = Field(default=0, ge=0)
     active_cruxes: int = Field(default=0, ge=0)
     scoped_evidence: int = Field(default=0, ge=0)
+    frontier_revision: int = Field(default=0, ge=0)
+    objective_improvements: int = Field(default=0, ge=0)
+    productive_discoveries: int = Field(default=0, ge=0)
+
+
+class ProgressVector(StrictModel):
+    """Runtime-observed movement kept separate by causal meaning.
+
+    The controller deliberately does not collapse these dimensions into a
+    universal quality score.  Their positive support controls continuation;
+    their individual values remain visible for audit and task-specific policy.
+    """
+
+    quality: int = Field(default=0, ge=0)
+    epistemic: int = Field(default=0, ge=0)
+    feasibility: int = Field(default=0, ge=0)
+    exploration: int = Field(default=0, ge=0)
+    reliability: int = Field(default=0, ge=0)
+    calls_spent: int = Field(default=0, ge=0)
+    input_tokens_spent: int = Field(default=0, ge=0)
+    output_tokens_spent: int = Field(default=0, ge=0)
+    wall_seconds_spent: float = Field(default=0.0, ge=0.0)
+
+    @property
+    def productive(self) -> bool:
+        return any(
+            value > 0
+            for value in (
+                self.quality,
+                self.epistemic,
+                self.feasibility,
+                self.exploration,
+                self.reliability,
+            )
+        )
 
 
 class ResourceDecisionKind(StrEnum):
@@ -279,7 +330,9 @@ class ResourceDecision(StrictModel):
     hard_call_limit: int = Field(ge=1)
     completion_reserve_calls: int = Field(ge=1)
     actionable_actions: int = Field(default=0, ge=0)
+    active_commitments: int = Field(default=0, ge=0)
     gradient_score: int = Field(default=0, ge=0)
+    progress_vector: ProgressVector = Field(default_factory=ProgressVector)
     stagnation_patience: int = Field(default=0, ge=0)
     progress_reasons: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
@@ -485,10 +538,72 @@ class CruxUpdate(StrictModel):
     evidence_references: list[str] = Field(default_factory=list)
 
 
+class EliminatedDirection(StrictModel):
+    """One semantic search family that should not be rediscovered blindly."""
+
+    family: str
+    failure_mechanism: str
+    reopen_if: str = ""
+
+
+class InvariantRevision(StrictModel):
+    """Explicit causal retirement of a formerly useful working invariant."""
+
+    statement: str
+    failure_mechanism: str
+    replacement: str = ""
+
+
+class FrontierKernel(StrictModel):
+    """Small, loss-aware working memory for the current problem frontier.
+
+    This is deliberately not the long-term memory or knowledge base.  It is
+    the dense handoff between a solver and its frontier keeper: what must stay
+    true, what remains live, what already failed for a reusable reason, and
+    where attention belongs next.  Runtime-owned revision fields prevent a
+    model from self-awarding movement by merely rewriting the summary.
+    """
+
+    bottleneck: str = ""
+    invariants: list[str] = Field(default_factory=list)
+    invariant_revisions: list[InvariantRevision] = Field(default_factory=list)
+    live_hypotheses: list[str] = Field(default_factory=list)
+    eliminated_directions: list[EliminatedDirection] = Field(default_factory=list)
+    next_move: str = ""
+    source_action_ids: list[str] = Field(default_factory=list)
+    revision: int = Field(default=0, ge=0)
+    last_advance_round: int = Field(default=0, ge=0)
+    stagnant_rounds: int = Field(default=0, ge=0)
+
+
 class ActionOutcome(StrictModel):
     outcome: str
     decision_effect: str
     obligation_effect: str = ""
+
+
+class ContinuationContract(StrictModel):
+    """A tiny option contract for work whose payoff is genuinely delayed.
+
+    It is not a plan.  Later steps are admissible only after the prior step was
+    integrated and produced a source-backed frontier change or confirmed
+    observation.  This protects deep constructions without giving vague
+    promises an unbounded claim on compute.
+    """
+
+    key: str = Field(min_length=1, max_length=120)
+    thesis: str = Field(min_length=1)
+    terminal_observation: str = Field(min_length=1)
+    continuation_evidence: str = Field(min_length=1)
+    kill_condition: str = Field(min_length=1)
+    step: int = Field(default=1, ge=1, le=6)
+    max_steps: int = Field(default=2, ge=2, le=6)
+
+    @model_validator(mode="after")
+    def step_within_bound(self) -> ContinuationContract:
+        if self.step > self.max_steps:
+            raise ValueError("continuation step cannot exceed max_steps")
+        return self
 
 
 class ActionContract(StrictModel):
@@ -507,7 +622,29 @@ class ActionContract(StrictModel):
     intervention: str = ""
     potency_check: str = ""
     decision_rule: str = ""
+    observation_modalities: list[EvidenceModality] = Field(default_factory=list)
+    continuation: ContinuationContract | None = None
     substantive: bool = True
+
+
+class ContextLens(StrictModel):
+    """Auditable, loss-aware projection supplied to one model call."""
+
+    purpose: Literal["bootstrap", "action", "checkpoint", "synthesis", "release", "repair"]
+    action_id: str | None = None
+    task_source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    artifact_scope: ArtifactScope = "targeted"
+    artifact_view: Literal["none", "full", "preview_with_full"] = "none"
+    obligation_ids: list[str] = Field(default_factory=list)
+    crux_ids: list[str] = Field(default_factory=list)
+    evidence_action_ids: list[str] = Field(default_factory=list)
+    required_modalities: list[EvidenceModality] = Field(default_factory=list)
+    included: list[str] = Field(default_factory=list)
+    omissions: list[str] = Field(default_factory=list)
+    zoom_paths: list[str] = Field(default_factory=list)
+    state_event_seq: int = Field(default=0, ge=0)
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ObservedActionCost(StrictModel):
@@ -552,6 +689,8 @@ class ActionReceipt(ActionObservation):
     observed_cost: ObservedActionCost = Field(default_factory=ObservedActionCost)
     integration_status: Literal["pending", "accepted", "rejected", "failed"] = "pending"
     forecast_was_useful: bool = False
+    context_lens_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    parent_artifact_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class SubstrateEntry(StrictModel):
@@ -859,6 +998,10 @@ class ActionProposal(StrictModel):
     cost: CostBand
     independence_class: IndependenceClass = IndependenceClass.SAME_MODEL
     topology: CognitiveTopology = CognitiveTopology.WORKER
+    epistemic_mode: EpistemicMode = EpistemicMode.AUTO
+    hypothesis_family: str = ""
+    novelty_basis: str = ""
+    execution_trigger: str = ""
     could_change_decision: bool = True
     expected_decision_effect: str
     reusable_value: ValueBand = ValueBand.LOW
@@ -877,6 +1020,7 @@ class ActionProposal(StrictModel):
     )
     failure_handling: str = "Preserve raw output and do not infer success."
     outcome_branches: list[ActionOutcome] = Field(default_factory=list)
+    continuation: ContinuationContract | None = None
     instrument: InstrumentSpec | None = None
     overlay_id: str | None = None
     lineage_id: str | None = None
@@ -993,6 +1137,7 @@ class BootstrapOutput(StrictModel):
     actions: list[ActionProposal] = Field(default_factory=list)
     task_charter: TaskCharter | None = None
     artifact_spine: ArtifactSpine | None = None
+    frontier_kernel: FrontierKernel | None = None
     obligations: list[ObligationDraft] = Field(default_factory=list)
     cruxes: list[CruxDraft] = Field(default_factory=list)
     ceiling_scan: CeilingSensitivityScan | None = None
@@ -1018,6 +1163,7 @@ class CheckpointOutput(StrictModel):
     overlays: list[SpeculativeOverlay] = Field(default_factory=list)
     lineages: list[SummitLineage] = Field(default_factory=list)
     artifact_spine: ArtifactSpine | None = None
+    frontier_kernel: FrontierKernel | None = None
     reframe_witness: ReframeWitness | None = None
     ceiling_scan: CeilingSensitivityScan | None = None
     accepted_action_ids: list[str] = Field(default_factory=list)
@@ -1110,6 +1256,8 @@ class RunState(StrictModel):
     task_charter: TaskCharter | None = None
     charter_history: list[TaskCharter] = Field(default_factory=list)
     artifact_spine: ArtifactSpine | None = None
+    frontier_kernel: FrontierKernel | None = None
+    frontier_advancing_action_ids: list[str] = Field(default_factory=list)
     obligations: dict[str, Obligation] = Field(default_factory=dict)
     cruxes: dict[str, Crux] = Field(default_factory=dict)
     substrate: dict[str, SubstrateEntry] = Field(default_factory=dict)

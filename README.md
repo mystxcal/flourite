@@ -16,7 +16,9 @@ every expensive step was taken.
 
 [Quick start](#quick-start) · [How it works](#how-it-works) ·
 [Live control](#watch-and-steer) · [Commands](#commands) ·
+[Canonical model](docs/CANONICAL_MODEL.md) ·
 [Architecture](docs/V3_5_ARCHITECTURE.md) ·
+[Frontier velocity](docs/FRONTIER_VELOCITY.md) ·
 [Autoresearch](docs/AUTORESEARCH.md) ·
 [Operations](docs/OPERATOR_GUIDE.md) · [Security](SECURITY.md)
 
@@ -79,8 +81,13 @@ when the shape of the problem earns it.
 - **Compute has to earn its next horizon.** The configured call budget is a
   hard operator ceiling, not a quota or a phase script. Flourite starts with a
   derived working grant and expands it only when the ledger shows new
-  discriminative evidence, accepted decisions, or shrinking material debt.
-  Rewritten bytes alone do not count as progress.
+  discriminative evidence, measured objective improvement, or a semantic
+  advance confirmed by the Frontier Keeper. Rewritten bytes and model-declared
+  importance do not count as progress.
+- **Thought is the cheapest search space.** The solver generates and kills
+  possibilities mentally before retrieval, execution, or verification. More
+  expensive media must name the residual that thought cannot settle and the
+  decision their result can change.
 - **A tool beats a second opinion.** Sol can inspect, edit, execute, browse,
   research, debug, evaluate, and delegate. Where a deterministic check exists,
   Flourite runs it rather than asking another model what it thinks. Evidence
@@ -252,7 +259,7 @@ flowchart LR
         ARTIFACT["Current artifact<br/>+ Artifact Spine"]
         FRONTIER["Active cruxes<br/>+ candidate deltas"]
         GOVERNOR{"Evidence-driven<br/>resource governor"}
-        TOPOLOGY{"Minimum sufficient<br/>topology"}
+        TOPOLOGY{"Need another<br/>context?"}
 
         LEAD --> ARTIFACT
         ARTIFACT --> FRONTIER
@@ -264,21 +271,24 @@ flowchart LR
     OPERATOR -->|hard envelope| GOVERNOR
 
     subgraph EXECUTION["Temporary execution"]
+        CAPABILITIES["Full trusted capability plane<br/>reason · code · shell · search · media"]
         WORKER["Sol specialist"]
-        TOOLS["Tools · tests<br/>research"]
         INSTRUMENT["Validated<br/>instrument"]
         SUMMIT["Experimental frontier<br/>develop · falsify · mutate · cross"]
         OBJECTIVE["Domain objective<br/>runtime measurement"]
     end
 
-    TOPOLOGY -->|tightly coupled| WORKER
-    TOPOLOGY -->|exact operation| TOOLS
+    CAPABILITIES --> LEAD
+    TOPOLOGY -->|independent question| WORKER
     TOPOLOGY -->|weak feedback| INSTRUMENT
     TOPOLOGY -->|credible ceiling risk| SUMMIT
+    CAPABILITIES --> WORKER
+    CAPABILITIES --> INSTRUMENT
+    CAPABILITIES --> SUMMIT
     SUMMIT --> OBJECTIVE
 
     WORKER --> RECEIPT["Action receipts"]
-    TOOLS --> RECEIPT
+    CAPABILITIES --> RECEIPT
     INSTRUMENT --> RECEIPT
     SUMMIT --> RECEIPT
     OBJECTIVE --> RECEIPT
@@ -294,7 +304,7 @@ flowchart LR
     LEDGER -. reconstructs .-> LEAD
     LEDGER --> BLOBS[("Content-addressed<br/>artifacts + traces")]
     LEDGER -. compact state .-> OPERATOR
-    TOOLS -. sanitized activity .-> OPERATOR
+    CAPABILITIES -. sanitized activity .-> OPERATOR
 
     ARTIFACT --> PROOF["Semantic CI<br/>+ Completion Case"]
     PROOF --> CHALLENGE{"Fresh release<br/>challenge"}
@@ -308,7 +318,7 @@ flowchart LR
     classDef sealed fill:#102b28,color:#ecfffb,stroke:#55e6c1,stroke-width:2px;
 
     class SOURCE,CHARTER,ARTIFACT,OPERATOR anchor;
-    class LEAD,FRONTIER,GOVERNOR,TOPOLOGY,WORKER,TOOLS,INSTRUMENT,SUMMIT,OBJECTIVE active;
+    class LEAD,FRONTIER,GOVERNOR,TOPOLOGY,CAPABILITIES,WORKER,INSTRUMENT,SUMMIT,OBJECTIVE active;
     class INBOX,RECEIPT,CHECKPOINT,LEDGER,REDUCER,STATE,BLOBS evidence;
     class PROOF,CHALLENGE gate;
     class SEALED sealed;
@@ -410,6 +420,7 @@ runs the offline end-to-end demo, and verifies the resulting completion seal.
 
 ## Project notes
 
+- [Canonical model](docs/CANONICAL_MODEL.md)
 - [Architecture](docs/V3_5_ARCHITECTURE.md)
 - [Operator guide](docs/OPERATOR_GUIDE.md)
 - [Live validation](docs/LIVE_CODEX_VALIDATION.md)

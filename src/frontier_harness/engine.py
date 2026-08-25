@@ -43,7 +43,9 @@ from .cognition import (
     finalize_action_receipt,
     instantiate_cruxes,
     instantiate_obligations,
+    observed_modalities_from_trace,
     reactivate_cruxes_for_open_obligations,
+    reconcile_frontier_kernel,
     validate_lead_ack,
     validate_reframe,
 )
@@ -87,9 +89,11 @@ from .models import (
     CruxDraft,
     CruxStatus,
     DiscoveryRecord,
+    EpistemicMode,
     EvidenceModality,
     EvidenceRecord,
     FinalOutput,
+    FrontierKernel,
     Impact,
     IndependenceClass,
     InstrumentStatus,
@@ -136,7 +140,7 @@ from .providers import (
     build_provider,
 )
 from .resources import ResourceGovernor
-from .scheduler import ActionScheduler
+from .scheduler import ActionScheduler, SelectionResult
 from .semantic_ci import run_semantic_ci
 from .state import StateReducer
 from .summit import SummitArchive
@@ -1029,28 +1033,36 @@ class FrontierEngine:
     def _completion_reserve_calls(self) -> int:
         return self.resource_governor.completion_reserve(self.state)
 
-    def _actionable_count(self, proposals: Sequence[ActionSpec]) -> int:
-        if not proposals:
-            return 0
-        selection = self.scheduler.select(
+    def _actionable_selection(self, proposals: Sequence[ActionSpec]) -> SelectionResult:
+        return self.scheduler.select(
             list(proposals),
             max_parallel=self.config.run.budget.max_parallel,
             available_calls=self.config.run.budget.max_parallel,
             obligations=self.state.obligations,
             target_stalls=self._target_stalls(),
             human_evidence_available=self.config.cognition.human_evidence_available,
+            require_execution_trigger=self.config.cognition.require_execution_trigger,
+            frontier_kernel=self.state.frontier_kernel,
+            action_records=self.state.actions,
+            frontier_advancing_action_ids=set(self.state.frontier_advancing_action_ids),
         )
-        return len(selection.selected)
+
+    def _actionable_count(self, proposals: Sequence[ActionSpec]) -> int:
+        return len(self._actionable_selection(proposals).selected)
 
     def _resource_boundary(self, proposals: Sequence[ActionSpec]) -> bool:
         """Return true only when the governor grants another work horizon."""
 
         self._ensure_resource_state()
         assert self.state.resource_state is not None
+        selection = self._actionable_selection(proposals)
         decision, resource = self.resource_governor.decide(
             self.state,
             self.state.resource_state,
-            actionable_actions=self._actionable_count(proposals),
+            actionable_actions=len(selection.selected),
+            active_commitments=sum(
+                item.continuation is not None for item in selection.selected
+            ),
         )
         self._append(
             et.RESOURCE_DECIDED,
@@ -1091,11 +1103,14 @@ class FrontierEngine:
                 continue
             key = self.scheduler._target_key(record.spec)
             receipt = record.receipt
-            result = record.result
+            keeper_advanced = bool(
+                record.spec.action_id in self.state.frontier_advancing_action_ids
+            )
             informative = (
                 bool(record.objective_measurement and record.objective_measurement.valid)
                 or bool(
                     receipt
+                    and receipt.evidence_channel_confirmed
                     and (
                         receipt.state_changes
                         or receipt.decisions_changed
@@ -1105,9 +1120,7 @@ class FrontierEngine:
                         or receipt.evidence_strength in {"strong", "decisive"}
                     )
                 )
-                or bool(
-                    result and (result.negative_result or result.materiality in {"high", "fatal"})
-                )
+                or keeper_advanced
             )
             stalls[key] = 0 if informative else stalls.get(key, 0) + 1
         return stalls
@@ -1205,6 +1218,62 @@ class FrontierEngine:
                     mapping[tag.removeprefix("local-key:")] = item.crux_id
         return mapping
 
+    def _compile_epistemic_action(self, proposal: ActionProposal) -> ActionProposal:
+        """Keep unambiguously conceptual work in one continuous solver thread."""
+
+        if not self.config.cognition.thought_first:
+            return proposal
+        if proposal.epistemic_mode == EpistemicMode.THINK:
+            if proposal.topology == CognitiveTopology.SUMMIT:
+                return proposal
+            return proposal.model_copy(update={"topology": CognitiveTopology.LEAD})
+        if proposal.epistemic_mode != EpistemicMode.AUTO:
+            return proposal
+        conceptual = proposal.kind in {
+            ActionKind.EXPLORE,
+            ActionKind.DISCRIMINATE,
+            ActionKind.REFRAME,
+            ActionKind.CEILING_AUDIT,
+        }
+        has_execution_surface = bool(
+            proposal.observation_modalities
+            or proposal.instrument is not None
+            or proposal.intervention.strip()
+            or proposal.network
+            or proposal.topology == CognitiveTopology.SUMMIT
+            or proposal.independence_class
+            in {
+                IndependenceClass.DETERMINISTIC_TOOL,
+                IndependenceClass.EXTERNAL_EVIDENCE,
+                IndependenceClass.HUMAN,
+                IndependenceClass.REAL_WORLD,
+            }
+        )
+        if proposal.topology == CognitiveTopology.SUMMIT:
+            return proposal.model_copy(update={"epistemic_mode": EpistemicMode.THINK})
+        if proposal.kind == ActionKind.ACQUIRE:
+            return proposal.model_copy(update={"epistemic_mode": EpistemicMode.RETRIEVE})
+        if proposal.kind == ActionKind.INSTRUMENT or proposal.instrument is not None:
+            return proposal.model_copy(update={"epistemic_mode": EpistemicMode.BUILD})
+        if has_execution_surface:
+            return proposal.model_copy(update={"epistemic_mode": EpistemicMode.EXECUTE})
+        if proposal.kind in {
+            ActionKind.EXPLOIT,
+            ActionKind.REPAIR,
+            ActionKind.TOOL,
+            ActionKind.INTEGRATE,
+            ActionKind.RECONSTRUCT,
+        }:
+            return proposal.model_copy(update={"epistemic_mode": EpistemicMode.BUILD})
+        if conceptual or proposal.kind == ActionKind.MECHANISM_GRAFT:
+            return proposal.model_copy(
+                update={
+                    "epistemic_mode": EpistemicMode.THINK,
+                    "topology": CognitiveTopology.LEAD,
+                }
+            )
+        return proposal
+
     def _instantiate_actions(
         self,
         proposals: Sequence[ActionProposal],
@@ -1220,6 +1289,7 @@ class FrontierEngine:
         obligation_keymap = obligation_keymap or {}
         crux_keymap = crux_keymap or {}
         for proposal in proposals:
+            proposal = self._compile_epistemic_action(proposal)
             if proposal.kind == ActionKind.STOP:
                 dropped.append(f"stop proposal for {proposal.target}")
                 continue
@@ -1901,6 +1971,7 @@ class FrontierEngine:
                 ),
                 goal_contract=None,
                 task_source=self.state.task_source,
+                lens_purpose="bootstrap",
             )
             prompt = bootstrap_prompt(
                 workspace,
@@ -2142,6 +2213,7 @@ class FrontierEngine:
                         cost=CostBand.MODERATE,
                         independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
                         topology=CognitiveTopology.SUMMIT,
+                        epistemic_mode=EpistemicMode.THINK,
                         expected_decision_effect=(
                             "Either establish a viable distant mechanism for the same task, or record why upper-tail expansion is not justified."
                         ),
@@ -2190,6 +2262,14 @@ class FrontierEngine:
                 crux_keymap=crux_keymap,
                 round_index=1,
             )
+            frontier_kernel, frontier_notes = reconcile_frontier_kernel(
+                None,
+                output.frontier_kernel,
+                cruxes=cruxes,
+                spine=spine,
+                next_actions=actions,
+                round_index=0,
+            )
             high_open = any(issue.impact in {Impact.FATAL, Impact.HIGH} for issue in issues)
             active_crux = any(item.status == CruxStatus.ACTIVE for item in cruxes)
             stop_requested = bool(
@@ -2208,6 +2288,7 @@ class FrontierEngine:
                 "contract": contract.model_dump(mode="json"),
                 "task_charter": charter.model_dump(mode="json"),
                 "artifact_spine": spine.model_dump(mode="json"),
+                "frontier_kernel": frontier_kernel.model_dump(mode="json"),
                 "artifact": artifact.model_dump(mode="json"),
                 "issues": [item.model_dump(mode="json") for item in issues],
                 "obligations": [item.model_dump(mode="json") for item in obligations],
@@ -2234,6 +2315,7 @@ class FrontierEngine:
                 "overlay_admission": asdict(overlay_notes),
                 "lineage_admission": lineage_notes,
                 "dropped_action_proposals": dropped_actions,
+                "frontier_kernel_notes": asdict(frontier_notes),
                 "ceiling_scan": output.ceiling_scan.model_dump(mode="json")
                 if output.ceiling_scan
                 else None,
@@ -2333,8 +2415,14 @@ class FrontierEngine:
                     obligation_ids=list(crux.obligation_ids),
                     impact=crux.unlock_value,
                     cost=CostBand.MODERATE,
-                    independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
-                    topology=CognitiveTopology.WORKER,
+                    independence_class=IndependenceClass.SAME_MODEL,
+                    topology=CognitiveTopology.LEAD,
+                    epistemic_mode=EpistemicMode.THINK,
+                    hypothesis_family=crux.title,
+                    novelty_basis=(
+                        "Continue the unresolved controlling crux from the compact frontier "
+                        "kernel; attack and eliminate conceptual branches before escalating."
+                    ),
                     expected_decision_effect=crux.decision_controlled,
                     reusable_value=ValueBand.MEDIUM,
                     distinctive_angle="Deterministic fallback for an unscheduled live crux.",
@@ -2366,6 +2454,11 @@ class FrontierEngine:
                     cost=CostBand.MODERATE,
                     independence_class=IndependenceClass.SAME_MODEL,
                     topology=CognitiveTopology.LEAD,
+                    epistemic_mode=EpistemicMode.BUILD,
+                    execution_trigger=(
+                        "The release-blocking obligation is already known; the remaining "
+                        "uncertainty is whether a concrete artifact change can satisfy it."
+                    ),
                     expected_decision_effect=(
                         "Satisfy the obligation or expose the exact evidence/tool/user input still required."
                     ),
@@ -2374,6 +2467,106 @@ class FrontierEngine:
                 )
             ]
         return []
+
+    def _ensure_frame_pressure(
+        self,
+        proposals: list[ActionProposal],
+        *,
+        obligations: Mapping[str, Obligation],
+        cruxes: Mapping[str, Crux],
+        frontier_kernel: FrontierKernel | None = None,
+    ) -> None:
+        """Inject one fresh frame challenge only after observed semantic samsara."""
+
+        frame_kinds = {
+            ActionKind.REFRAME,
+            ActionKind.RECONSTRUCT,
+            ActionKind.CEILING_AUDIT,
+            ActionKind.MECHANISM_GRAFT,
+        }
+        if any(item.kind in frame_kinds for item in proposals):
+            return
+        kernel = frontier_kernel or self.state.frontier_kernel
+        kernel_stalls = kernel.stagnant_rounds if kernel is not None else 0
+        target_stalls = self._target_stalls()
+        repeated_local_failure = bool(
+            kernel_stalls >= 2
+            or (
+                kernel is None
+                and any(
+                count >= self.config.frontier.max_stalled_actions_per_target
+                for count in target_stalls.values()
+                )
+            )
+        )
+        blockers = sorted(
+            (
+                item
+                for item in obligations.values()
+                if item.release_blocking
+                and item.status in {ObligationStatus.OPEN, ObligationStatus.BLOCKED}
+            ),
+            key=lambda item: (-_IMPACT_RANK[item.impact], item.created_seq),
+        )
+        active_cruxes = sorted(
+            (item for item in cruxes.values() if item.status == CruxStatus.ACTIVE),
+            key=lambda item: (-_IMPACT_RANK[item.unlock_value], item.created_seq),
+        )
+        if not repeated_local_failure or not (blockers or active_cruxes):
+            return
+
+        pressure = []
+        if kernel_stalls:
+            pressure.append(f"Frontier Kernel unchanged for {kernel_stalls} checkpoint(s)")
+        pressure.extend(
+            f"{target}: {count} non-informative attempt(s)"
+            for target, count in sorted(target_stalls.items())
+            if count >= self.config.frontier.max_stalled_actions_per_target
+        )
+        proposals.append(
+            ActionProposal(
+                kind=ActionKind.CEILING_AUDIT,
+                target="shared frame behind the stalled frontier",
+                assignment=(
+                    "Re-derive the controlling problem from the immutable Task Source, the "
+                    "Artifact Spine, raw observations, and the actual artifact. Treat the "
+                    "current solution and vocabulary as hypotheses, not authority. Identify "
+                    "the shared representation, assumption, objective, or observation channel "
+                    "that could explain the repeated local failures. Use any available tools "
+                    "that sharpen the reasoning. Generate and kill alternatives internally; "
+                    "return one causal frame break with a discriminating prediction and direct "
+                    "next move, or strong evidence that the current frame remains the best one. "
+                    "Do not write a survey, process report, or generic critique. Trigger: "
+                    + "; ".join(pressure)
+                ),
+                obligation_ids=[item.obligation_id for item in blockers[:2]],
+                crux_ids=[item.crux_id for item in active_cruxes[:1]],
+                impact=(
+                    blockers[0].impact
+                    if blockers
+                    else active_cruxes[0].unlock_value
+                ),
+                cost=CostBand.MODERATE,
+                independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
+                topology=CognitiveTopology.WORKER,
+                epistemic_mode=EpistemicMode.THINK,
+                hypothesis_family="shared representation or objective behind local failure",
+                novelty_basis="Fresh task-anchored context after runtime-observed stagnation.",
+                expected_decision_effect=(
+                    "Replace the limiting frame and redirect construction, or close frame error "
+                    "as the explanation for the observed stalls."
+                ),
+                reusable_value=ValueBand.HIGH,
+                optimization_value=ValueBand.HIGH,
+                information_value=ValueBand.HIGH,
+                feasibility=ValueBand.HIGH,
+                distinctive_angle="Runtime-triggered independent frame pressure.",
+                stop_condition=(
+                    "Stop after one causal frame and discriminator survives attack, or after "
+                    "the current frame is materially vindicated."
+                ),
+            )
+        )
 
     def _ensure_fresh_global_review(
         self,
@@ -2431,6 +2624,11 @@ class FrontierEngine:
                 cost=CostBand.MODERATE,
                 independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
                 topology=CognitiveTopology.WORKER,
+                epistemic_mode=EpistemicMode.VERIFY,
+                execution_trigger=(
+                    "Construction context cannot establish the exact integrated artifact's "
+                    "whole-experience quality; cold artifact-bound observation controls release."
+                ),
                 expected_decision_effect=(
                     "Either admit whole-artifact quality with artifact-bound observation, or "
                     "reopen the causal defect before more local polishing."
@@ -2652,6 +2850,7 @@ class FrontierEngine:
             current_artifact=lineage_base,
         )
         action_contract: ActionContract | None = None
+        context_lens_digest: str | None = None
         try:
             record = round_state.actions.get(action.action_id)
             action_contract = record.contract if record else None
@@ -2663,7 +2862,9 @@ class FrontierEngine:
                 goal_contract=round_state.contract,
                 task_source=round_state.task_source,
                 action_contract=action_contract,
+                lens_purpose="action",
             )
+            context_lens_digest = cast(str, capsule["context_lens_digest"])
             lineage_context: list[dict[str, Any]] = []
             lineage_dir = workspace.context_dir / "lineage-candidates"
             for lineage_id in lineage_parent_ids:
@@ -2951,6 +3152,44 @@ class FrontierEngine:
                 trace=result.trace_summary,
                 usage=result.usage,
             )
+            receipt = receipt.model_copy(
+                update={
+                    "context_lens_digest": context_lens_digest,
+                    "parent_artifact_digest": (
+                        lineage_base.blob.digest if lineage_base is not None else None
+                    ),
+                }
+            )
+            observed_modalities = observed_modalities_from_trace(
+                action.observation_modalities,
+                result.trace_summary,
+            )
+            missing_modalities = [
+                item for item in action.observation_modalities if item not in observed_modalities
+            ]
+            evidence = evidence.model_copy(
+                update={
+                    "modalities": observed_modalities,
+                    "establishes": (
+                        list(receipt.decisions_changed) if observed_modalities else []
+                    ),
+                    "cannot_establish": unique_preserving_order(
+                        [
+                            *evidence.cannot_establish,
+                            *(
+                                [
+                                    "requested observation modalities were not seen in the "
+                                    "provider tool trace: "
+                                    + ", ".join(item.value for item in missing_modalities)
+                                ]
+                                if missing_modalities
+                                else []
+                            ),
+                        ]
+                    ),
+                }
+            )
+            evidence_items[0] = evidence
             if objective is not None and objective.valid:
                 measured_channels = list(receipt.observed_evidence_channels)
                 if IndependenceClass.DETERMINISTIC_TOOL not in measured_channels:
@@ -3144,6 +3383,14 @@ class FrontierEngine:
                 trace=provider_trace,
                 usage=usage,
             )
+            failed_receipt = failed_receipt.model_copy(
+                update={
+                    "context_lens_digest": context_lens_digest,
+                    "parent_artifact_digest": (
+                        lineage_base.blob.digest if lineage_base is not None else None
+                    ),
+                }
+            )
             failed_discovery: list[DiscoveryRecord] = []
             if action.topology == CognitiveTopology.SUMMIT:
                 projected_failure_records = self.experimental_frontier.observe(
@@ -3191,6 +3438,30 @@ class FrontierEngine:
                 raise
         finally:
             self._close_workspace(workspace)
+
+    def _fresh_frontier_keeper(self) -> bool:
+        mode = self.config.cognition.frontier_keeper
+        if mode == "fresh":
+            return True
+        if mode == "continuous":
+            return False
+        profiles = set(self.config.run.semantic_profiles)
+        if self.state.contract is not None:
+            profiles.update(self.state.contract.semantic_profiles)
+            if self.state.contract.quality_floor in {"very_high", "frontier"}:
+                return True
+        return bool(
+            profiles.intersection({"research", "formal", "decision", "creative", "media"})
+            or self.state.summit_active
+            or bool(
+                self.state.frontier_kernel
+                and self.state.frontier_kernel.stagnant_rounds > 0
+            )
+            or any(
+                count >= self.config.frontier.max_stalled_actions_per_target
+                for count in self._target_stalls().values()
+            )
+        )
 
     async def _checkpoint(self, action_ids: Sequence[str], round_index: int) -> bool:
         repairing_verification = bool(
@@ -3253,10 +3524,15 @@ class FrontierEngine:
                 evidence_action_ids=list(action_ids),
                 task_source=self.state.task_source,
                 extra_notes=checkpoint_notes,
+                lens_purpose="checkpoint",
             )
-            force_clean = bool(self.state.metadata.get("clean_synthesis_needed")) or (
-                round_index % self.config.frontier.clean_synthesis_every_rounds == 0
+            synthesis_interval = self.config.frontier.clean_synthesis_every_rounds
+            force_clean = bool(self.state.metadata.get("clean_synthesis_needed")) or bool(
+                synthesis_interval
+                and round_index > 0
+                and round_index % synthesis_interval == 0
             )
+            fresh_keeper = self._fresh_frontier_keeper()
             prompt = checkpoint_prompt(
                 workspace,
                 profile=self._profile,
@@ -3268,9 +3544,12 @@ class FrontierEngine:
                 max_cruxes=self.config.cognition.max_active_cruxes,
                 normal_overlay_limit=self.config.cognition.normal_overlay_limit,
                 summit_mode=self.config.summit.mode,
+                fresh_keeper=fresh_keeper,
             )
             use_lead = (
-                self.config.cognition.mode == "adaptive" and self.config.cognition.persistent_lead
+                self.config.cognition.mode == "adaptive"
+                and self.config.cognition.persistent_lead
+                and not fresh_keeper
             )
             result, trace = await self._invoke(
                 workspace,
@@ -3610,6 +3889,7 @@ class FrontierEngine:
                         cost=CostBand.MODERATE,
                         independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
                         topology=CognitiveTopology.SUMMIT,
+                        epistemic_mode=EpistemicMode.THINK,
                         expected_decision_effect=(
                             "Either establish a viable upper-tail mechanism or close the concrete ceiling risk with scoped negative evidence."
                         ),
@@ -3677,6 +3957,7 @@ class FrontierEngine:
                             cost=CostBand.MODERATE,
                             independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
                             topology=CognitiveTopology.SUMMIT,
+                            epistemic_mode=EpistemicMode.THINK,
                             expected_decision_effect=(
                                 "Either mature the lineage into a viable mechanism, extract reusable residue, or falsify it within its bounded unlock contract."
                             ),
@@ -3694,6 +3975,21 @@ class FrontierEngine:
                     )
                 )
 
+            frontier_kernel, frontier_notes = reconcile_frontier_kernel(
+                self.state.frontier_kernel,
+                output.frontier_kernel,
+                cruxes=list(projected_cruxes.values()),
+                spine=spine,
+                next_actions=proposals,
+                round_index=round_index,
+                eligible_action_ids=completed,
+            )
+            self._ensure_frame_pressure(
+                proposals,
+                obligations=projected_obligations,
+                cruxes=projected_cruxes,
+                frontier_kernel=frontier_kernel,
+            )
             actions, action_contracts, dropped_actions = self._instantiate_actions(
                 proposals,
                 issue_keymap=issue_keymap,
@@ -3753,6 +4049,7 @@ class FrontierEngine:
                     "artifact": artifact.model_dump(mode="json"),
                     "task_charter": charter.model_dump(mode="json") if charter else None,
                     "artifact_spine": spine.model_dump(mode="json") if spine else None,
+                    "frontier_kernel": frontier_kernel.model_dump(mode="json"),
                     "issue_upserts": [item.model_dump(mode="json") for item in upserts],
                     "obligation_upserts": [
                         item.model_dump(mode="json") for item in obligation_upserts
@@ -3793,6 +4090,7 @@ class FrontierEngine:
                     "lineage_admission": lineage_admission,
                     "reframe_notes": reframe_notes,
                     "dropped_action_proposals": dropped_actions,
+                    "frontier_kernel_notes": asdict(frontier_notes),
                     "ceiling_scan": (
                         output.ceiling_scan.model_dump(mode="json") if output.ceiling_scan else None
                     ),
@@ -3955,6 +4253,12 @@ class FrontierEngine:
                 obligations=self.state.obligations,
                 target_stalls=self._target_stalls(),
                 human_evidence_available=self.config.cognition.human_evidence_available,
+                require_execution_trigger=self.config.cognition.require_execution_trigger,
+                frontier_kernel=self.state.frontier_kernel,
+                action_records=self.state.actions,
+                frontier_advancing_action_ids=set(
+                    self.state.frontier_advancing_action_ids
+                ),
             )
             selection.deferred.update(control_deferred)
             lead_actions = [
@@ -4134,6 +4438,7 @@ class FrontierEngine:
                 extra_notes=f"Frontier stop reason: {stop_reason}",
                 task_source=self.state.task_source,
                 apex_brief=apex_brief,
+                lens_purpose="synthesis",
             )
             prompt = final_prompt(
                 workspace,
@@ -4731,6 +5036,7 @@ class FrontierEngine:
                     ],
                 },
                 completion_case=self.state.completion_case,
+                lens_purpose="release",
             )
             prompt = release_prompt(workspace, profile=self._profile)
             role = (
@@ -4943,6 +5249,7 @@ class FrontierEngine:
                     ],
                 },
                 completion_case=self.state.completion_case,
+                lens_purpose="repair",
             )
             prompt = repair_prompt(
                 workspace,

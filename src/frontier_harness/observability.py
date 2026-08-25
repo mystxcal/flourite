@@ -95,9 +95,15 @@ class LiveObserver:
             message = f"{event.action_id} failed · residue retained"
             activity_state = "warn"
         elif event.event_type == et.CHECKPOINT_STARTED:
-            message = "reducing evidence into the current artifact"
+            message = "frontier keeper compressing the search state"
         elif event.event_type == et.CHECKPOINT_COMPLETED:
-            message = f"round {state.round_index} · {len(state.open_issues)} open issues"
+            kernel = state.frontier_kernel
+            velocity = (
+                f" · frontier r{kernel.revision} · {kernel.stagnant_rounds} stagnant"
+                if kernel
+                else ""
+            )
+            message = f"round {state.round_index} · {len(state.open_issues)} open issues{velocity}"
             activity_state = "done"
         elif event.event_type == et.FINALIZATION_STARTED:
             message = "rebuilding one coherent deliverable"
