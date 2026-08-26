@@ -39,9 +39,9 @@ def test_flourite_identity_and_terminal_language(tmp_path: Path) -> None:
         ["run", "Render the product shell.", "--fake", "--run-root", str(run_root)],
     )
     assert result.exit_code == 0, result.output
-    assert "F L O U R I T E" in result.output
-    assert "◇ ORIENT" in result.output
-    assert "◆ SEALED" in result.output
+    assert "FLOURITE" in result.output
+    assert "OFFLINE RUN" in result.output
+    assert "SATISFIED" in result.output
 
     run_id = next(item.name for item in run_root.iterdir() if item.is_dir())
     status = runner.invoke(
@@ -50,7 +50,7 @@ def test_flourite_identity_and_terminal_language(tmp_path: Path) -> None:
     )
     assert status.exit_code == 0, status.output
     assert "FLOURITE" not in status.output
-    assert json.loads(status.output)["phase"] == "complete"
+    assert json.loads(status.output)["status"] == "satisfied"
 
 
 def test_cli_fake_run_status_verify_and_export(tmp_path: Path) -> None:
@@ -78,11 +78,11 @@ def test_cli_fake_run_status_verify_and_export(tmp_path: Path) -> None:
 
     status = runner.invoke(app, ["status", run_id, "--run-root", str(run_root)])
     assert status.exit_code == 0, status.output
-    assert "complete" in status.output
+    assert "satisfied" in status.output
 
     verify = runner.invoke(app, ["verify", run_id, "--run-root", str(run_root)])
     assert verify.exit_code == 0, verify.output
-    assert '"sealed": true' in verify.output
+    assert '"state": "verified"' in verify.output
 
     archive = tmp_path / "diagnostic.zip"
     exported = runner.invoke(
@@ -98,6 +98,11 @@ def test_cli_fake_run_status_verify_and_export(tmp_path: Path) -> None:
     )
     assert exported.exit_code == 0, exported.output
     assert archive.exists()
+
+    inspected = runner.invoke(app, ["inspect", run_id, "--run-root", str(run_root)])
+    assert inspected.exit_code == 0, inspected.output
+    assert "TRAJECTORIES" in inspected.output
+    assert "MOVES" in inspected.output
 
 
 def test_evolution_check_surfaces_a_withheld_promotion(tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -34,6 +34,7 @@ from ..util import atomic_write_text, utc_now
 from .context import ContextFrame
 from .contracts import (
     ArtifactDraft,
+    BlockerDraft,
     FinishDraft,
     MoveDirective,
     MoveExecutionResult,
@@ -53,6 +54,7 @@ class ModelChallengeObservation(ModelObservation):
     kind: ObservationKind = ObservationKind.CHALLENGE
     verdict: ChallengeVerdict
     material_to_claim: bool = True
+    artifact_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ModelNextMove(CoreModel):
@@ -67,17 +69,29 @@ class ModelFinish(CoreModel):
     residual_uncertainty: list[str] = Field(default_factory=list)
 
 
+class ModelBlocker(CoreModel):
+    reason: str = Field(min_length=1)
+
+
 class ModelOutputBase(CoreModel):
     artifact_changed: bool = False
     observations: Sequence[ModelObservation] = Field(default_factory=list)
     next_move: ModelNextMove | None = None
     branches: Sequence[ModelNextMove] = Field(default_factory=list)
     finish: ModelFinish | None = None
+    blocker: ModelBlocker | None = None
 
     @model_validator(mode="after")
     def one_continuation(self) -> ModelOutputBase:
-        if (self.next_move is not None or self.branches) and self.finish is not None:
-            raise ValueError("choose continuation moves or a finish claim, not both")
+        outcomes = sum(
+            (
+                self.next_move is not None or bool(self.branches),
+                self.finish is not None,
+                self.blocker is not None,
+            )
+        )
+        if outcomes > 1:
+            raise ValueError("choose continuation moves, a finish claim, or a blocker")
         if any(item.fork_purpose is None for item in self.branches):
             raise ValueError("every branch requires a concrete fork_purpose")
         return self
@@ -96,7 +110,9 @@ class NavigatorModelOutput(ModelOutputBase):
 class ChallengeModelOutput(ModelOutputBase):
     observations: Sequence[ModelChallengeObservation] = Field(min_length=1)
     next_move: None = None
+    branches: Sequence[ModelNextMove] = Field(default_factory=list, max_length=0)
     finish: None = None
+    blocker: None = None
 
 
 ModelOutput = LeadModelOutput | NavigatorModelOutput | ChallengeModelOutput
@@ -112,11 +128,13 @@ class OmpMoveRunner:
         adapter: ArtifactAdapter,
         run_dir: Path,
         sources: list[StagedInput] | None = None,
+        activity_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.provider = provider
         self.adapter = adapter
         self.run_dir = run_dir
         self.sources = list(sources or [])
+        self.activity_callback = activity_callback
         self.executions_dir = run_dir / "kernel-executions"
         self.sessions_path = run_dir / "provider-sessions.json"
         self.lead_cwd = run_dir / "lead-session"
@@ -176,6 +194,7 @@ class OmpMoveRunner:
                     "provider_lead_cwd": self.lead_cwd / move.trajectory_id,
                     "recovering": recovering,
                 },
+                activity_callback=self.activity_callback,
             )
             failed_resume_usage = ComputeUsage()
             reconstructed_session = False
@@ -332,13 +351,16 @@ class OmpMoveRunner:
         ]
         if not candidates:
             return None
-        artifact = candidates[-1]
+        return self._legacy_artifact(state, candidates[-1])
+
+    def _legacy_artifact(self, state: RunState, artifact: Any) -> ArtifactRef:
+        workspace = state.current_workspace
         return ArtifactRef(
             artifact_id=artifact.artifact_id,
             version=int(artifact.metadata.get("legacy_version", len(state.artifacts))),
             blob=artifact.content_ref,
-            kind=self.adapter.artifact_kind,
-            summary=workspace.summary,
+            kind=str(artifact.metadata.get("kind", self.adapter.artifact_kind)),
+            summary=workspace.summary if workspace is not None else "current artifact",
             parent_artifact_id=(artifact.parent_artifact_ids[0] if artifact.parent_artifact_ids else None),
             source_action_ids=[artifact.created_by_move_id],
             deliverables=artifact.deliverables,
@@ -472,6 +494,8 @@ the isolated repository itself. Before returning, write a compact decision map t
 failed approaches worth remembering, unresolved load-bearing uncertainty, and the next
 frontier. Set `workspace_path` to that file. Choose one next move or make an evidenced
 finish claim. If no move is obvious, broaden or reframe rather than inferring completion.
+Use `blocker` only for a concrete external dependency that tools and further reasoning
+cannot resolve; difficulty, uncertainty, and failed attempts are not blockers.
 Open `branches` only when competing hypotheses or solution families make genuinely
 different predictions; give each a concrete `fork_purpose`. Branching is optional, not
 a default display of effort.
@@ -489,9 +513,11 @@ one concrete observation and normally a next move for the Lead.
 Act as an independent Challenger. Do not judge a description of the work: inspect the
 actual current artifact and decision-relevant evidence. Try to falsify the finish claim
 against the exact objective. Every observation must say whether it supports, challenges,
-or remains uncertain, with concrete scope. Mark `material_to_claim=false` when a finding
-is real but cannot change whether the exact objective is satisfied. Do not edit the
-artifact or prescribe a ritual.
+or remains uncertain, with concrete scope. Bind support to the exact `artifact_digest`
+you inspected; every claimed artifact head needs direct support. Mark
+`material_to_claim=false` when a finding is real but cannot change whether the exact
+objective is satisfied. If such a finding is the only criticism, also state direct
+support for the claim. Do not edit the artifact or prescribe a ritual.
 """
 
     def _convert(
@@ -536,6 +562,16 @@ artifact or prescribe a ritual.
             MoveMode.ENVIRONMENT: "environment",
         }[move.mode]
         current_digest = parent.blob.digest if parent is not None else None
+        claim_artifacts = (
+            [
+                state.artifacts[item]
+                for item in state.finish_claim.artifact_head_ids
+                if item in state.artifacts
+            ]
+            if state.finish_claim is not None
+            else []
+        )
+        claim_digests = {item.digest for item in claim_artifacts}
         observations: list[ObservationDraft] = []
         for model_observation in output.observations:
             raw_ref = None
@@ -552,13 +588,28 @@ artifact or prescribe a ritual.
                 if isinstance(model_observation, ModelChallengeObservation)
                 else None
             )
+            bound_digest = current_digest if move.mode == MoveMode.CHALLENGE else None
+            if isinstance(model_observation, ModelChallengeObservation):
+                if (
+                    model_observation.artifact_digest is not None
+                    and model_observation.artifact_digest not in claim_digests
+                ):
+                    raise ValueError(
+                        "challenge observation references a digest outside the finish claim"
+                    )
+                if model_observation.artifact_digest is not None:
+                    bound_digest = model_observation.artifact_digest
+                elif len(claim_digests) == 1:
+                    bound_digest = next(iter(claim_digests))
+                else:
+                    bound_digest = None
             observations.append(
                 ObservationDraft(
                     kind=model_observation.kind,
                     summary=model_observation.summary,
                     source=source,
                     raw_ref=raw_ref,
-                    artifact_digest=(current_digest if move.mode == MoveMode.CHALLENGE else None),
+                    artifact_digest=bound_digest,
                     confidence=model_observation.confidence,
                     challenge_verdict=verdict,
                     metadata=(
@@ -569,8 +620,14 @@ artifact or prescribe a ritual.
                 )
             )
 
-        checked_artifact = candidate if candidate is not None else parent
-        if checked_artifact is not None:
+        checked_artifacts = (
+            [self._legacy_artifact(state, item) for item in claim_artifacts]
+            if move.mode == MoveMode.CHALLENGE
+            else [candidate]
+            if candidate is not None
+            else []
+        )
+        for checked_artifact in checked_artifacts:
             try:
                 checks = (
                     self.adapter.deterministic_checks(checked_artifact)
@@ -644,12 +701,18 @@ artifact or prescribe a ritual.
                 satisfaction_claims=output.finish.satisfaction_claims,
                 residual_uncertainty=output.finish.residual_uncertainty,
             )
+        blocker = (
+            BlockerDraft(reason=output.blocker.reason, evidence_refs=[])
+            if output.blocker is not None
+            else None
+        )
         return MoveExecutionResult(
             observations=observations,
             artifact=artifact_draft,
             workspace=workspace_draft,
             next_moves=directives,
             finish=finish,
+            blocker=blocker,
             usage=usage,
         )
 

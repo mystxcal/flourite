@@ -12,7 +12,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
-from .core.types import ContentRef as BlobRef
+from .core.types import ContentRef
+
+BlobRef = ContentRef
 
 ArtifactScope = Literal["targeted", "sequence", "whole_artifact", "release"]
 

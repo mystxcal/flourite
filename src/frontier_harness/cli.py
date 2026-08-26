@@ -44,7 +44,7 @@ from .events import (
     TASK_SOURCE_AMENDED,
 )
 from .evolution import HarnessCandidate, HarnessPromotionGate, HarnessTrial
-from .exporter import export_run
+from .exporter import export_kernel_run, export_run
 from .live import open_live_dashboard
 from .presentation import (
     data_table,
@@ -255,6 +255,7 @@ def _kernel_overrides(
     run_root: Path | None,
     max_wall_seconds: float | None,
     max_model_turns: int | None,
+    max_parallel: int | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {"run": {"adapter": adapter}}
     if run_root is not None:
@@ -264,6 +265,8 @@ def _kernel_overrides(
         kernel["max_wall_seconds"] = max_wall_seconds
     if max_model_turns is not None:
         kernel["max_model_turns"] = max_model_turns
+    if max_parallel is not None:
+        kernel["max_parallel"] = max_parallel
     if kernel:
         data["kernel"] = kernel
     return data
@@ -278,7 +281,7 @@ def _print_run_header(engine: FrontierEngine, *, mode: str, compact: bool = Fals
     console.print(table)
 
 
-def _print_new_activity(engine: FrontierEngine, after_seq: int) -> int:
+def _print_new_activity(engine: Any, after_seq: int) -> int:
     latest = after_seq
     for item in engine.control.recent_activity(
         limit=engine.control.MAX_ACTIVITY_ROWS,
@@ -319,6 +322,98 @@ async def _execute_with_activity(
     if follow_activity:
         _print_new_activity(engine, latest)
     return await task
+
+
+async def _execute_kernel_with_activity(
+    engine: KernelEngine,
+    output: Path | None,
+    *,
+    follow_activity: bool,
+) -> tuple[Any, Path | None]:
+    existing = engine.control.recent_activity(limit=engine.control.MAX_ACTIVITY_ROWS)
+    latest = existing[-1].seq if existing else 0
+    task = asyncio.create_task(engine.execute())
+    while not task.done():
+        if follow_activity:
+            latest = _print_new_activity(engine, latest)
+        with suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
+    if follow_activity:
+        _print_new_activity(engine, latest)
+    state = await task
+    path = engine.materialize_current(output) if state.current_workspace is not None else None
+    return state, path
+
+
+def _run_kernel_engine(
+    engine: KernelEngine,
+    output: Path | None,
+    *,
+    quiet: bool,
+) -> None:
+    try:
+        state, path = asyncio.run(
+            _execute_kernel_with_activity(engine, output, follow_activity=not quiet)
+        )
+        if quiet:
+            console.print(path or engine.run_dir)
+        else:
+            console.print(
+                phase_line(
+                    state.status.value,
+                    str(path or state.terminal_reason or engine.run_dir),
+                    state="done" if state.status.value == "satisfied" else "warn",
+                )
+            )
+    except FrontierError as exc:
+        error_console.print(phase_line("error", str(exc), state="error"))
+        error_console.print(phase_line("retained", str(engine.run_dir), state="muted"))
+        raise typer.Exit(1) from exc
+    finally:
+        engine.close()
+
+
+def _create_and_run_kernel(
+    task_text: str,
+    *,
+    adapter: str,
+    workspace: Path | None,
+    source: list[Path],
+    output: Path | None,
+    config_path: Path | None,
+    run_root: Path | None,
+    max_wall_seconds: float | None,
+    max_model_turns: int | None,
+    max_parallel: int | None,
+    quiet: bool,
+) -> None:
+    config = load_config(
+        config_path,
+        overrides=_kernel_overrides(
+            adapter=adapter,
+            run_root=run_root,
+            max_wall_seconds=max_wall_seconds,
+            max_model_turns=max_model_turns,
+            max_parallel=max_parallel,
+        ),
+    )
+    if adapter == "software" and workspace is None:
+        raise typer.BadParameter("--workspace is required for the software adapter")
+    engine = KernelEngine.create(
+        task_text,
+        config=config,
+        adapter_name=adapter,
+        workspace=workspace,
+        source_paths=source,
+    )
+    if not quiet:
+        print_brand(console, compact=True)
+        table = key_value_table(title="new run")
+        table.add_row("run", engine.state.run_id)
+        table.add_row("adapter", adapter)
+        table.add_row("state", str(engine.run_dir))
+        console.print(table)
+    _run_kernel_engine(engine, output, quiet=quiet)
 
 
 def _run_engine(
@@ -369,29 +464,16 @@ def _resume_kernel(
         engine = KernelEngine.load(run_ref, run_root=run_root)
     except (FrontierError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
-    try:
-        if engine.state.status.value == "paused":
-            engine.control.enqueue(CommandKind.RESUME)
-        if not quiet:
-            print_brand(console, compact=True)
-            table = key_value_table(title="resume")
-            table.add_row("run", engine.state.run_id)
-            table.add_row("kernel", KernelEngine.ARCHITECTURE)
-            table.add_row("state", engine.state.status.value)
-            console.print(table)
-        state = asyncio.run(engine.execute())
-        path = engine.materialize_current(output) if state.current_workspace is not None else None
-        console.print(
-            path
-            if quiet
-            else phase_line(
-                state.status.value,
-                str(path or state.terminal_reason or engine.run_dir),
-                state="done" if state.status.value == "satisfied" else "warn",
-            )
-        )
-    finally:
-        engine.close()
+    if engine.state.status.value == "paused":
+        engine.control.enqueue(CommandKind.RESUME)
+    if not quiet:
+        print_brand(console, compact=True)
+        table = key_value_table(title="resume")
+        table.add_row("run", engine.state.run_id)
+        table.add_row("kernel", KernelEngine.ARCHITECTURE)
+        table.add_row("state", engine.state.status.value)
+        console.print(table)
+    _run_kernel_engine(engine, output, quiet=quiet)
 
 
 def _extend_engine(
@@ -491,30 +573,92 @@ def run(
     run_root: Annotated[
         Path | None, typer.Option("--run-root", help="Directory for durable runs.")
     ] = None,
-    max_calls: Annotated[int | None, typer.Option("--max-calls", min=4)] = None,
-    max_rounds: Annotated[int | None, typer.Option("--max-rounds", min=0)] = None,
     max_parallel: Annotated[int | None, typer.Option("--max-parallel", min=1)] = None,
-    release_gate: Annotated[
-        str | None, typer.Option("--release-gate", help="auto, always, or never")
+    max_wall_seconds: Annotated[
+        float | None,
+        typer.Option("--max-wall-seconds", min=30, help="Optional hard wall-time envelope."),
+    ] = None,
+    max_model_turns: Annotated[
+        int | None,
+        typer.Option("--max-model-turns", min=1, help="Optional hard model-turn envelope."),
     ] = None,
     fake: Annotated[
         bool, typer.Option("--fake", help="Run the deterministic offline demo provider.")
     ] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
 ) -> None:
-    """Create and execute a new run."""
+    """Create and execute a phase-free intelligence run."""
 
     task_text = _read_task(task, task_file)
-    overrides = _overrides(
-        fake=fake,
+    if fake:
+        config = load_config(
+            config_path,
+            overrides={
+                **_kernel_overrides(
+                    adapter=adapter,
+                    run_root=run_root,
+                    max_wall_seconds=max_wall_seconds,
+                    max_model_turns=max_model_turns,
+                    max_parallel=max_parallel,
+                ),
+                "provider": {"kind": "fake"},
+            },
+        )
+        if adapter == "software" and workspace is None:
+            raise typer.BadParameter("--workspace is required for the software adapter")
+        engine = KernelEngine.create(
+            task_text,
+            config=config,
+            adapter_name=adapter,
+            workspace=workspace,
+            source_paths=source or [],
+        )
+        if not quiet:
+            print_brand(console, compact=True)
+            table = key_value_table(title="offline run")
+            table.add_row("run", engine.state.run_id)
+            table.add_row("kernel", KernelEngine.ARCHITECTURE)
+            table.add_row("state", str(engine.run_dir))
+            console.print(table)
+        _run_kernel_engine(engine, output, quiet=quiet)
+        return
+    _create_and_run_kernel(
+        task_text,
         adapter=adapter,
+        workspace=workspace,
+        source=source or [],
+        output=output,
+        config_path=config_path,
         run_root=run_root,
-        max_calls=max_calls,
-        max_rounds=max_rounds,
+        max_wall_seconds=max_wall_seconds,
+        max_model_turns=max_model_turns,
         max_parallel=max_parallel,
-        release_gate=release_gate,
+        quiet=quiet,
     )
-    config = load_config(config_path, overrides=overrides)
+
+
+@app.command("legacy-run", hidden=True)
+def legacy_run(
+    task: Annotated[str | None, typer.Argument(help="Task text; omit to read stdin.")] = None,
+    task_file: Annotated[
+        Path | None, typer.Option("--task-file", help="Read the task from a UTF-8 file.")
+    ] = None,
+    adapter: Annotated[str, typer.Option("--adapter", "-a")] = "generic",
+    workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
+    source: Annotated[list[Path] | None, typer.Option("--source", "-s")] = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    config_path: Annotated[Path | None, typer.Option("--config", "-c")] = None,
+    run_root: Annotated[Path | None, typer.Option("--run-root")] = None,
+    fake: Annotated[bool, typer.Option("--fake")] = False,
+    quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
+) -> None:
+    """Run the retired controller for controlled compatibility comparisons."""
+
+    task_text = _read_task(task, task_file)
+    config = load_config(
+        config_path,
+        overrides=_overrides(fake=fake, adapter=adapter, run_root=run_root),
+    )
     if adapter == "software" and workspace is None:
         raise typer.BadParameter("--workspace is required for the software adapter")
     engine = FrontierEngine.create(
@@ -526,7 +670,7 @@ def run(
         on_event=_event_printer(quiet),
     )
     if not quiet:
-        _print_run_header(engine, mode="new run")
+        _print_run_header(engine, mode="legacy run")
     path = _run_engine(engine, output, follow_activity=not quiet)
     if quiet:
         console.print(path)
@@ -569,49 +713,22 @@ def kernel_run(
     ] = None,
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
 ) -> None:
-    """Run the phase-free intelligence kernel (redesign preview)."""
+    """Compatibility alias for the phase-free intelligence kernel."""
 
     task_text = _read_task(task, task_file)
-    config = load_config(
-        config_path,
-        overrides=_kernel_overrides(
-            adapter=adapter,
-            run_root=run_root,
-            max_wall_seconds=max_wall_seconds,
-            max_model_turns=max_model_turns,
-        ),
-    )
-    if adapter == "software" and workspace is None:
-        raise typer.BadParameter("--workspace is required for the software adapter")
-    engine = KernelEngine.create(
+    _create_and_run_kernel(
         task_text,
-        config=config,
-        adapter_name=adapter,
+        adapter=adapter,
         workspace=workspace,
-        source_paths=source or [],
+        source=source or [],
+        output=output,
+        config_path=config_path,
+        run_root=run_root,
+        max_wall_seconds=max_wall_seconds,
+        max_model_turns=max_model_turns,
+        max_parallel=None,
+        quiet=quiet,
     )
-    if not quiet:
-        print_brand(console, compact=True)
-        table = key_value_table(title="new kernel run")
-        table.add_row("run", engine.state.run_id)
-        table.add_row("adapter", adapter)
-        table.add_row("state", str(engine.run_dir))
-        console.print(table)
-    try:
-        state = asyncio.run(engine.execute())
-        path = engine.materialize_current(output) if state.current_workspace is not None else None
-        if quiet:
-            console.print(path or engine.run_dir)
-        else:
-            console.print(
-                phase_line(
-                    state.status.value,
-                    str(path or state.terminal_reason or engine.run_dir),
-                    state="done" if state.status.value == "satisfied" else "warn",
-                )
-            )
-    finally:
-        engine.close()
 
 
 @app.command("kernel-resume", hidden=True)
@@ -1124,9 +1241,66 @@ def inspect_run(
 ) -> None:
     """Inspect issues, actions, probes, and evidence without advancing the run."""
 
-    engine = FrontierEngine.load(run_ref, run_root=run_root)
+    run_dir = FrontierEngine.resolve_run_dir(run_ref, run_root=run_root)
+    if _is_kernel_run(run_dir):
+        kernel_engine = KernelEngine.load(run_dir)
+        try:
+            kernel_state = kernel_engine.state
+            print_brand(console, compact=True)
+            trajectories = data_table(title="trajectories")
+            for name in ("ID", "Status", "Purpose", "Artifact head"):
+                trajectories.add_column(name)
+            for trajectory in kernel_state.trajectories.values():
+                trajectories.add_row(
+                    trajectory.trajectory_id,
+                    trajectory.status.value,
+                    trajectory.purpose,
+                    trajectory.artifact_head_id or "—",
+                )
+            console.print(trajectories)
+
+            moves = data_table(title="moves")
+            for name in ("ID", "Mode", "Status", "Trajectory", "Intent"):
+                moves.add_column(name)
+            for move in kernel_state.moves.values():
+                moves.add_row(
+                    move.move_id,
+                    move.mode.value,
+                    move.status.value,
+                    move.trajectory_id,
+                    move.intent,
+                )
+            console.print(moves)
+
+            observations = data_table(title="observations")
+            for name in ("Kind", "Source", "Verdict", "Summary"):
+                observations.add_column(name)
+            for observation in kernel_state.observations.values():
+                observations.add_row(
+                    observation.kind.value,
+                    observation.source,
+                    observation.challenge_verdict.value
+                    if observation.challenge_verdict
+                    else "—",
+                    observation.summary,
+                )
+            console.print(observations)
+            console.print(
+                phase_line(
+                    "usage",
+                    f"{kernel_state.usage.model_turns} turns · "
+                    f"{kernel_state.usage.tool_calls} tools · "
+                    f"{kernel_state.usage.input_tokens:,}/"
+                    f"{kernel_state.usage.output_tokens:,} tokens",
+                    state="muted",
+                )
+            )
+        finally:
+            kernel_engine.close()
+        return
+    legacy_engine = FrontierEngine.load(run_dir)
     try:
-        state = engine.state
+        state = legacy_engine.state
         print_brand(console, compact=True)
         issues = data_table(title="issue graph")
         for name in ("ID", "Status", "Impact", "Uncertainty", "Title"):
@@ -1204,7 +1378,7 @@ def inspect_run(
             "Continuity",
         ):
             epochs.add_column(name)
-        for event in engine.events():
+        for event in legacy_engine.events():
             trace = event.payload.get("provider_trace_summary")
             usage = event.payload.get("usage")
             if not isinstance(trace, dict) or not trace or not isinstance(usage, dict):
@@ -1242,7 +1416,7 @@ def inspect_run(
             )
         )
     finally:
-        engine.close()
+        legacy_engine.close()
 
 
 @app.command()
@@ -1319,7 +1493,17 @@ def export_command(
 
     if mode not in {"diagnostic", "audit"}:
         raise typer.BadParameter("--mode must be diagnostic or audit")
-    engine = FrontierEngine.load(run_ref, run_root=run_root)
+    run_dir = FrontierEngine.resolve_run_dir(run_ref, run_root=run_root)
+    if _is_kernel_run(run_dir):
+        kernel_engine = KernelEngine.load(run_dir)
+        try:
+            with kernel_engine.lock:
+                path = export_kernel_run(kernel_engine, destination, mode=mode)  # type: ignore[arg-type]
+            console.print(path)
+        finally:
+            kernel_engine.close()
+        return
+    engine = FrontierEngine.load(run_dir)
     try:
         with engine.lock:
             engine._refresh_state_from_ledger()
@@ -1365,26 +1549,20 @@ def demo(
     """Run a deterministic offline end-to-end demonstration."""
 
     config = load_config(
-        overrides={
-            "provider": {"kind": "fake"},
-            "run": {
-                "run_root": str(run_root),
-                "budget": {
-                    "max_rounds": 2,
-                    "max_calls": 8,
-                    "max_parallel": 2,
-                    "synthesis_reserve_calls": 3,
-                },
-            },
-        }
+        overrides={"provider": {"kind": "fake"}, "run": {"run_root": str(run_root)}}
     )
-    engine = FrontierEngine.create(
-        "Demonstrate Flourite with one baseline, one targeted probe, one checkpoint, and a bounded release gate.",
+    engine = KernelEngine.create(
+        "Demonstrate Flourite's canonical kernel, atomic move commit, and fresh completion challenge.",
         config=config,
-        on_event=_event_printer(False),
+        adapter_name="generic",
     )
-    _print_run_header(engine, mode="offline demo")
-    _run_engine(engine, None, follow_activity=True)
+    print_brand(console, compact=True)
+    table = key_value_table(title="offline demo")
+    table.add_row("run", engine.state.run_id)
+    table.add_row("kernel", KernelEngine.ARCHITECTURE)
+    table.add_row("state", str(engine.run_dir))
+    console.print(table)
+    _run_kernel_engine(engine, None, quiet=False)
 
 
 if __name__ == "__main__":

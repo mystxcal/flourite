@@ -1,20 +1,18 @@
-# Flourite — frontier-scale agent harness
+# Flourite configuration
 
 [run]
 adapter = "generic"
-semantic_profiles = []         # e.g. ["creative", "media"]
 run_root = ".flourite/runs"
-keep_capsules = true
-release_gate = "auto"          # auto | always | never
 
-[run.budget]
-max_calls = 48
-max_parallel = 3
-synthesis_reserve_calls = 4 # legacy/static mode only
-# max_rounds = 8
-# max_input_tokens = 500000
-# max_output_tokens = 60000
+[kernel]
+max_parallel = 1
+# Optional operator-owned hard envelopes. Leave them unset to avoid an
+# arbitrary harness horizon.
 # max_wall_seconds = 7200
+# max_input_tokens = 1000000
+# max_output_tokens = 100000
+# max_model_turns = 1000
+# max_cost_usd = 100
 
 [provider]
 kind = "omp-codex"
@@ -42,89 +40,22 @@ task_soft_request_budget = 80
 task_max_runtime_ms = 900000
 retry_max_retries = 6
 
-[resource]
-mode = "adaptive"
-# initial_call_grant = 9
-# grant_step_calls = 4
-# max_stagnant_grants = 2
-
 [provider.strong]
 model = "gpt-5.6-sol"
 reasoning_effort = "xhigh"
 
-[provider.worker]
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
-
-[provider.cheap]
-model = "gpt-5.6-sol"
-reasoning_effort = "medium"
-
-[frontier]
-max_open_issues = 8
-max_candidate_deltas = 4
-max_actions_per_batch = 3
-max_actions_per_target = 2
-max_stalled_actions_per_target = 2
-correlation_discount = true
-minimum_action_impact = "medium"
-expensive_probe_minimum_impact = "high"
-# clean_synthesis_every_rounds = 3  # opt in only when a domain proves time-based decay
-
-[cognition]
-mode = "adaptive"                   # adaptive | legacy
-persistent_lead = true
-max_active_cruxes = 3
-normal_overlay_limit = 2
-hard_overlay_limit = 4
-specialist_reuse_threshold = 2
-semantic_regression = true
-completion_case = true
-instruments_enabled = true
-ceiling_scan = true
-action_contracts = true
-fallback_to_sparse = true
-lead_reconstruction_check_after_turns = 8
-# max_material_repairs = 3
-max_control_call_fraction = 0.30
-require_behavioral_overlay_difference = true
-require_reframe_witness = true
-require_completion_coverage = true
-inline_control_updates = true
-human_evidence_available = false
-thought_first = true
-require_execution_trigger = false        # mode guides attention; it never removes tools
-frontier_keeper = "auto"             # auto | fresh | continuous
-
-[summit]
-mode = "auto"                       # off | auto | on
-profile = "deep"                    # lean | deep | max | frontier
-max_archive_lineages = 8
-max_active_lineages = 4
-max_per_niche = 2
-stepping_stone_probe_allowance = 1
-stepping_stone_development_allowance = 1
-require_concrete_auto_trigger = true
-enable_reconstruction = true
-enable_ceiling_audit = true
-enable_mechanism_grafting = true
-preserve_falsification_residue = true
-experimental_frontier = true
-max_discovery_actions_per_round = 1
-stagnation_before_mutation = 2
-enable_semantic_mutation = true
-enable_semantic_crossover = true
-
 [software]
-checks = []                     # e.g. ["python -m pytest -q", "ruff check ."]
+preflight_checks = []
+candidate_checks = []
+checks = []
 check_timeout_seconds = 900
 include_untracked = true
-apply_final_patch = false       # never mutate the source repo unless explicit
-release_artifacts = []          # e.g. ["dist/*.mp4", "dist/report.pdf"]
+apply_final_patch = false
+release_artifacts = []
 max_release_artifact_bytes = 250000000
 
 [software.objective]
 # command = "python evaluate.py --json"
 primary_metric = "score"
-direction = "maximize"          # maximize | minimize
+direction = "maximize"
 timeout_seconds = 900

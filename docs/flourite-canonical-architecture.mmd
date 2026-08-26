@@ -1,164 +1,55 @@
-%%{init: {
-  "theme": "base",
-  "securityLevel": "loose",
-  "flowchart": {
-    "htmlLabels": true,
-    "curve": "basis",
-    "nodeSpacing": 34,
-    "rankSpacing": 52,
-    "padding": 14,
-    "useMaxWidth": false
-  },
-  "themeVariables": {
-    "background": "#070912",
-    "primaryColor": "#17152a",
-    "primaryTextColor": "#f5f2ff",
-    "primaryBorderColor": "#9f8cff",
-    "lineColor": "#53627c",
-    "secondaryColor": "#101b2a",
-    "tertiaryColor": "#0c131f",
-    "clusterBkg": "#0b0e18",
-    "clusterBorder": "#333b55",
-    "fontFamily": "Inter, ui-sans-serif, system-ui, sans-serif",
-    "fontSize": "16px"
-  }
-}}%%
+flowchart LR
+    OP["Operator<br/>task · sources · steering · hard envelope"]
 
-flowchart TB
-    %% Flourite's conceptual object and the executable architecture beneath it.
-
-    subgraph AUTH["01 · FIXED AUTHORITY"]
-        direction LR
-        OP["<b>Operator</b><br/><span>task · amendments · hard envelope<br/>pause · resume · stop · steer</span>"]
-        INBOX[("<b>Durable control inbox</b><br/><span>commands enter only<br/>at safe boundaries</span>")]
-        SOURCE["<b>Immutable Task Source</b><br/><span>exact request + amendments<br/>content-addressed provenance</span>"]
-        CHARTER["<b>Task Charter</b><br/><span>revisable interpretation<br/>requirements traced to source</span>"]
-        CONTRACT["<b>Goal contract</b><br/><span>deliverable · constraints · stakes<br/>evidence required for release</span>"]
-        OP --> INBOX --> SOURCE --> CHARTER --> CONTRACT
+    subgraph A["Stable authority"]
+      OBJ["Objective<br/>immutable text + amendments"]
+      LOG["Hash-chained journal<br/>semantic source of truth"]
+      BLOBS["Content-addressed store<br/>artifacts · evidence · traces"]
     end
 
-    subgraph CRYSTAL["02 · ONE EVOLVING SEMANTIC CRYSTAL  Xₜ"]
-        direction LR
-        ARTIFACT["<b>Aₜ · Authoritative artifact</b><br/><span>one current best answer<br/>every accepted gain lands here</span>"]
-        SPINE["<b>Sₜ · Artifact Spine</b><br/><span>mechanism · key decisions<br/>revisable commitments + retirements</span>"]
-        OBLIG["<b>Oₜ · Release obligations</b><br/><span>what must become true<br/>acceptance + evidence boundary</span>"]
-        FRONTIER["<b>Fₜ · Frontier Kernel</b><br/><span>controlling bottleneck · active cruxes<br/>live / eliminated families · next move</span>"]
-        OBSERVE["<b>Ωₜ + Eₜ · Observation &amp; evidence</b><br/><span>right modality · provenance · scope<br/>what it proves / cannot prove</span>"]
-        GRADIENT["<b>Gₜ · Causal gradient</b><br/><span>quality · epistemic · feasibility<br/>exploration · reliability · cost</span>"]
-        RECOVERY["<b>Bₜ + Rₜ · Compute &amp; recovery</b><br/><span>earned horizon · bounded commitment<br/>earliest falsified boundary</span>"]
-        ARTIFACT --> SPINE --> OBLIG --> FRONTIER --> OBSERVE --> GRADIENT --> RECOVERY
+    subgraph S["Live search state"]
+      WS["Current workspace<br/>compact global understanding"]
+      ART["Artifact heads<br/>actual current deliverables"]
+      OBS["Observations<br/>tests · sources · failures · challenge"]
+      TRAJ["Trajectories<br/>only earned alternatives"]
     end
 
-    subgraph LOOP["03 · THE INTELLIGENCE LOOP — MAP → CHOOSE → ZOOM → ACT → INTEGRATE"]
-        direction LR
-        MAP["<b>Loss-aware frontier map</b><br/><span>task · spine · debt · evidence<br/>constant attention budget</span>"]
-        QUESTION{"<b>Highest-value question</b><br/><span>consequence × discrimination × unlock<br/>× potency × reversibility ÷ cost</span>"}
-        LENS["<b>Question-specific lens</b><br/><span>map + exact zoom + known omissions<br/>paths to lossless source material</span>"]
-        MOVE{"<b>Model chooses the move</b><br/><span>most direct potent method<br/>after question and view are fixed</span>"}
-        CAP["<b>Full capability plane</b><br/><span>reason · retrieve · shell · code · browser<br/>media · instruments · bounded workers</span>"]
-        RECEIPT["<b>Durable action receipt</b><br/><span>result · scope · trace · actual cost<br/>decision effect · limits · residue</span>"]
-        KEEPER["<b>Frontier Keeper</b><br/><span>accept · reject · reopen · compress<br/>integrate meaning exactly once</span>"]
-        GOVERN{"<b>Resource governor</b><br/><span>causal movement or<br/>valid commitment?</span>"}
-        MAP --> QUESTION --> LENS --> MOVE --> RECEIPT --> KEEPER --> GOVERN
-        CAP --> MOVE
+    subgraph I["Intelligence"]
+      LEAD["Persistent Lead<br/>construct · inspect · use tools"]
+      NAV["Fresh Navigator<br/>reframe when the local view stalls"]
+      CHAL["Fresh Challenger<br/>falsify the exact finish claim"]
     end
 
-    subgraph HORIZON["CAUSAL CONTINUATION — NOT A FIXED CEREMONY"]
-        direction LR
-        CONTINUE["<b>Earn one more work horizon</b><br/><span>minimum sufficient next slate<br/>completion capacity protected</span>"]
-        TRANSITION["<b>Xₜ → Xₜ₊₁</b><br/><span>artifact · spine · frontier · evidence<br/>gradient · commitments · recovery</span>"]
-        CONVERGE["<b>Converge</b><br/><span>no useful horizon remains<br/>release debt is now the bottleneck</span>"]
-        CONTINUE --> TRANSITION
+    subgraph K["Deterministic kernel"]
+      CTX["Context lens<br/>objective + relevant direct state"]
+      MOVE["Move<br/>one semantic unit of work"]
+      APPLY["Atomic application<br/>all meaning or none"]
+      REDUCE["Reducer<br/>legal state transition"]
+      TERM["Terminal truth<br/>satisfied · exhausted · blocked<br/>stopped · failed"]
     end
 
-    subgraph RELEASE["04 · RELEASE MEMBRANE — CLAIMS MAY LEAVE ONLY THROUGH HERE"]
-        direction LR
-        SYNTH["<b>Clean synthesis</b><br/><span>rebuild from accepted state<br/>one coherent final proposition</span>"]
-        SEMCI["<b>Semantic CI</b><br/><span>task fidelity · Spine preservation<br/>deterministic checks</span>"]
-        CASE["<b>Completion Case</b><br/><span>obligation-by-obligation evidence<br/>assumptions · uncertainty · reopen rules</span>"]
-        CHALLENGE{"<b>Fresh artifact-bound challenge</b><br/><span>exact digest · real modalities<br/>material failures only</span>"}
-        LOCAL["<b>Bounded local repair</b><br/><span>fix the defect only<br/>then face a fresh challenge</span>"]
-        UPSTREAM["<b>Backpropagate upstream</b><br/><span>reobserve · reconstruct · reframe<br/>retire bad commitments + dependants</span>"]
-        SEALED["<b>Sealed result</b><br/><span>verified artifact + audit trail<br/>external mutation stays explicit</span>"]
-        SYNTH --> SEMCI --> CASE --> CHALLENGE -->|survives| SEALED
-        CHALLENGE -->|local / sequence| LOCAL
-        CHALLENGE -->|architecture / frame / observation| UPSTREAM
-    end
-
-    subgraph RUNTIME["05 · EXECUTABLE OWNERSHIP — POLICY AND MECHANISM STAY SEPARATE"]
-        direction LR
-        COORD["<b>RunCoordinator</b><br/><span>resume safely · cross semantic phases<br/>never decides what evidence means</span>"]
-        F_LOOP["<b>FrontierLoop</b><br/><span>sparse selection · completion reserve<br/>another horizon or convergence</span>"]
-        ACTION["<b>ActionExecutor</b><br/><span>intent → attempt → observation<br/>never mutates shared state directly</span>"]
-        CAPSULE["<b>CapsuleBuilder</b><br/><span>typed CapsuleSpec → scoped view<br/>exact lens retained as a blob</span>"]
-        PROVIDER["<b>ProviderCallExecutor</b><br/><span>request · retries · reconstruction<br/>telemetry · schema · raw trace</span>"]
-        MODEL["<b>Model provider</b><br/><span>bounded cognitive execution<br/>response + usage + raw boundary</span>"]
-        CHECKPOINT["<b>CheckpointExecutor</b><br/><span>semantic projection · plan compilation<br/>one validated commit</span>"]
-        PIPELINE["<b>ReleasePolicy + Pipeline</b><br/><span>fresh challenge · causal routing<br/>fail-closed mutation gate</span>"]
-        ADAPTERS["<b>Artifact adapters</b><br/><span>capture · measure · check · materialize<br/>domain translation, never policy</span>"]
-        COORD --> F_LOOP --> ACTION --> CAPSULE --> PROVIDER --> MODEL
-        ACTION --> CHECKPOINT
-        COORD --> PIPELINE
-        ADAPTERS --> ACTION
-        ADAPTERS --> PIPELINE
-    end
-
-    subgraph TRUTH["06 · LOSSLESS FOUNDATION — THE ONLY AUTHORITATIVE WRITE PATH"]
-        direction LR
-        INTENT["<b>Intent</b>"]
-        START["<b>attempt.started</b>"]
-        FINISH["<b>attempt.finished</b><br/><span>raw result survives<br/>integration failure</span>"]
-        SEMANTIC["<b>semantic event</b>"]
-        JOURNAL["<b>RunJournal</b><br/><span>append → project → validate → commit</span>"]
-        LEDGER[("<b>Hash-chained event ledger</b><br/><span>authoritative semantic history</span>")]
-        BLOBS[("<b>Content-addressed blobs</b><br/><span>artifacts · prompts · lenses · schemas<br/>boundaries · traces · evidence</span>")]
-        PROJECT["<b>Deterministic projectors</b><br/><span>bootstrap · work · semantics<br/>runtime · release</span>"]
-        STATE["<b>Typed RunState</b><br/><span>validated in-memory projection</span>"]
-        SNAPSHOT["<b>state.json</b><br/><span>best-effort cache · replay-repairable<br/>never the success boundary</span>"]
-        INTENT --> START --> FINISH --> SEMANTIC --> JOURNAL --> LEDGER --> PROJECT --> STATE --> SNAPSHOT
-        BLOBS --> PROJECT
-    end
-
-    INV["<b>CANONICAL INVARIANTS</b><br/><span>one exact task · one current artifact · one lossless history · explicit release debt · sparse attention · value before cost<br/>loss-aware views · full capability · task-native observation · causal negative memory · bounded commitments · fail-closed release · upstream backpropagation</span>"]
-
-    AUTH -->|"anchors Xₜ"| CRYSTAL
-    CRYSTAL -->|"projects current frontier"| LOOP
-    LOOP -->|"continue or converge"| HORIZON
-    HORIZON -->|"release debt becomes the bottleneck"| RELEASE
-    RELEASE -->|"policy becomes execution"| RUNTIME
-    RUNTIME -->|"all facts take one write path"| TRUTH
-    TRUTH -->|"must preserve"| INV
-
-    classDef authority fill:#211837,color:#faf8ff,stroke:#ad9bff,stroke-width:2px;
-    classDef crystal fill:#111b2b,color:#f2f7ff,stroke:#5b8cff,stroke-width:1.6px;
-    classDef frontier fill:#11252d,color:#effdff,stroke:#4fd5df,stroke-width:1.6px;
-    classDef decision fill:#241b34,color:#faf5ff,stroke:#c084fc,stroke-width:2px;
-    classDef evidence fill:#142131,color:#eef7ff,stroke:#6ba5ff,stroke-width:1.5px;
-    classDef runtime fill:#161925,color:#f4f4fa,stroke:#68738d,stroke-width:1.4px;
-    classDef truth fill:#111727,color:#eef4ff,stroke:#53698e,stroke-width:1.5px;
-    classDef store fill:#0d1724,color:#eef8ff,stroke:#4e7aa7,stroke-width:2px;
-    classDef release fill:#281c2b,color:#fff4fc,stroke:#e17cc8,stroke-width:1.7px;
-    classDef repair fill:#2a2117,color:#fff9ee,stroke:#d4a85d,stroke-width:1.7px;
-    classDef sealed fill:#102722,color:#effffb,stroke:#53d9b4,stroke-width:2.4px;
-    classDef invariant fill:#17142a,color:#f8f5ff,stroke:#8e79ff,stroke-width:2px;
-
-    class OP,INBOX,SOURCE,CHARTER,CONTRACT authority;
-    class ARTIFACT,SPINE,OBLIG,FRONTIER,OBSERVE,GRADIENT,RECOVERY crystal;
-    class MAP,LENS,CAP,CONTINUE,TRANSITION frontier;
-    class QUESTION,MOVE,GOVERN decision;
-    class RECEIPT,KEEPER evidence;
-    class SYNTH,SEMCI,CASE,CHALLENGE release;
-    class LOCAL,UPSTREAM repair;
-    class SEALED sealed;
-    class COORD,F_LOOP,ACTION,CAPSULE,PROVIDER,MODEL,CHECKPOINT,PIPELINE,ADAPTERS runtime;
-    class INTENT,START,FINISH,SEMANTIC,JOURNAL,PROJECT,STATE,SNAPSHOT truth;
-    class LEDGER,BLOBS store;
-    class INV invariant;
-
-    style AUTH fill:#0b0b15,stroke:#4d426d,stroke-width:1.5px
-    style CRYSTAL fill:#090f1b,stroke:#294b79,stroke-width:2px
-    style LOOP fill:#091317,stroke:#27626c,stroke-width:2px
-    style HORIZON fill:#091317,stroke:#27626c,stroke-width:1.5px
-    style RELEASE fill:#130d16,stroke:#75446d,stroke-width:2px
-    style RUNTIME fill:#0b0d13,stroke:#31394d,stroke-width:1.5px
-    style TRUTH fill:#080c14,stroke:#31435f,stroke-width:2px
+    OP --> OBJ
+    OBJ --> CTX
+    WS --> CTX
+    ART --> CTX
+    OBS --> CTX
+    TRAJ --> CTX
+    CTX --> LEAD
+    CTX -. "stagnation / no live continuation" .-> NAV
+    CTX -. "concrete finish claim" .-> CHAL
+    LEAD --> MOVE
+    NAV --> MOVE
+    CHAL --> MOVE
+    MOVE --> APPLY
+    APPLY --> REDUCE
+    REDUCE --> LOG
+    REDUCE --> WS
+    REDUCE --> ART
+    REDUCE --> OBS
+    REDUCE --> TRAJ
+    ART --> BLOBS
+    OBS --> BLOBS
+    LOG --> CTX
+    CHAL -->|"material finding"| LEAD
+    CHAL -->|"direct support for every claimed head"| TERM
+    OP -->|"pause · resume · stop · steer"| K

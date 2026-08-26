@@ -1,154 +1,108 @@
 # Operator guide
 
-## Recommended starting mode
+## Start with the default
 
-Use:
-
-```toml
-[cognition]
-mode = "adaptive"
-persistent_lead = true
-
-[resource]
-mode = "adaptive"
-
-[summit]
-mode = "auto"
-profile = "deep"
+```sh
+flourite doctor
+flourite run --source brief.md --output answer.md "Exact task"
 ```
 
-Adaptive mode starts sparse. It does not imply that Summit, overlays, instruments, specialists, or reconstruction will run.
+The normal run uses one persistent Sol xhigh Lead with the configured tool
+plane. Flourite introduces a fresh Navigator only when the local frame stalls,
+a fresh Challenger only for a concrete finish claim, and additional
+trajectories only when the problem contains real uncertainty width.
 
-## Budget selection
+Do not set an artificial call or round budget. If the work needs a hard
+boundary, choose the resource that is actually scarce:
 
-`run.budget.max_calls` is the operator's hard outer envelope, not Flourite's
-planned consumption. The default is deliberately roomy. Adaptive mode derives
-a smaller initial horizon from the execution topology and current completion
-risk, then grants small additional tranches only when the ledger shows useful
-gradient. It can stop far below the envelope. `max_rounds` is optional and is
-best reserved for an independent safety ceiling rather than ordinary phase
-allocation.
+```sh
+flourite run \
+  --max-wall-seconds 7200 \
+  --max-model-turns 1000 \
+  "Exact task"
+```
 
-A sparse call is one provider process or boundary attempt, not one internal
-model/tool-loop turn. `Model requests`, token totals, and wall time expose the
-full parent and nested cost. Configure token or wall envelopes when those are
-the real scarcity. Every hard envelope is a cap, never a quota.
-
-Extend the hard envelope when Flourite reports `extension required` and:
-
-- active high-impact cruxes remain;
-- a validated instrument can unlock several decisions;
-- a mechanism lineage has earned another development step;
-- final uncertainty remains decision-sensitive;
-- an extension can reuse substantial prior evidence.
-
-Do not extend merely because the run has unused conceptual possibilities. The
-resource governor records its latest decision, evidence gradient, active
-horizon, completion reserve, and hard ceiling in the ledger and live UI.
+Token and cost envelopes are available under `[kernel]`. Unset values mean the
+harness does not invent a limit.
 
 ## Capability mode
 
-Use trusted mode on a dedicated VM/VPS when result quality is the priority. It gives the model yolo-approved shell, editing, code intelligence, browser/search, and synchronous task delegation. Use contained mode only when you deliberately accept a smaller tool surface in exchange for an inner Bubblewrap boundary.
+Trusted mode is the intended high-ceiling configuration on a dedicated VM or
+VPS. It gives the model shell, editing, code intelligence, browser/search, and
+bounded nested-task access with automatic approval. Contained mode deliberately
+trades capability for an inner sandbox.
 
-## Choosing Summit mode
+## Read a run
 
-- `off`: prohibit upper-tail lineage expansion.
-- `auto`: activate only for a recorded concrete trigger.
-- `on`: guarantee that the bounded exact-task upper-tail path is reachable.
-
-`on` does not create a grid search. It seeds or develops a small number of mechanismally distinct lineages within configured archive and active limits.
-
-## Reading status
-
-```bash
+```sh
 flourite status latest
 flourite inspect latest
-```
-
-Pay attention to:
-
-- open release-blocking obligations;
-- active cruxes;
-- Lead continuity status;
-- active overlays and protected stepping stones;
-- Summit activation reasons;
-- semantic CI status;
-- Completion Case gaps;
-- calls used relative to the active horizon and hard envelope;
-- the resource governor's latest decision and evidence gradient.
-
-A `degraded` Lead is not necessarily a failed run, but it deserves inspection.
-
-## Live control
-
-Use the attachable control surface for a running task:
-
-```bash
 flourite live latest
 ```
 
-The view combines current semantic state with a bounded stream of sanitized
-model/tool activity. It never displays raw hidden reasoning or raw tool output.
-The dashboard can:
+`status` answers where the run is. `inspect` shows trajectories, moves,
+observations, challenge verdicts, and usage. `live` combines the durable state
+with sanitized provider and tool activity.
 
-- steer at the next safe boundary;
-- pause and resume without discarding an in-flight call;
-- stop while preserving resumable state;
-- restart a resting controller; or
-- detach without affecting execution.
+Useful questions are:
 
-Operator commands are durable. Steering is recorded as a Task Source amendment
-and forces a fresh checkpoint before the prior plan can continue. The semantic
-ledger remains single-writer and authoritative; dashboard activity is only a
-projection.
+- Is the Lead still changing the artifact or producing direct evidence?
+- Did a trajectory open for a real alternative or for superficial variation?
+- Is a completion finding material to the claim?
+- Does support bind to the current artifact digest?
+- Is the run active, paused, honestly exhausted, externally blocked, stopped,
+  failed, or satisfied?
 
-For scripts or a second shell, use `flourite steer`, `flourite pause`,
-`flourite resume`, and `flourite stop` directly.
+Tool activity is not semantic progress. The ledger changes only at move
+boundaries.
 
-## Recovery
+## Steer and control
 
-Use `flourite resume` only for interrupted active runs. Use `flourite extend` for completed sealed runs that need more research.
-
-Before either:
-
-```bash
-flourite verify latest
+```sh
+flourite steer latest "Inspect the rendered artifact, not only its source."
+flourite pause latest
+flourite resume latest
+flourite stop latest
 ```
 
-Extension archives the prior seal and produces a new release. It does not overwrite the historical release record.
+Commands are durable. Steering becomes an objective amendment at the next safe
+boundary. Pause and stop do not throw away an in-flight provider call or claim
+that partial output was integrated.
 
-## Instruments
+An interrupted active run resumes from the ledger:
 
-Inspect generated tools before execution on sensitive data or code. Confirm that the validation plan tests the instrument’s intended inference, not only whether it runs.
+```sh
+flourite verify latest
+flourite resume latest
+```
 
 ## Software
 
-Configure deterministic checks:
+Give the adapter cheap direct checks where they exist:
 
 ```toml
 [software]
-checks = ["python -m pytest -q", "python -m compileall -q src"]
+candidate_checks = ["ruff check ."]
+checks = ["python -m pytest -q"]
 ```
 
-The harness emits a patch but does not mutate the source repository automatically.
+The source repository is not mutated during the run. Applying a result is a
+separate explicit action:
 
-```bash
+```sh
 flourite verify latest
 flourite apply latest
 ```
 
-Apply refuses when release is blocked, checks failed, the source fingerprint changed, or the run is not sealed.
-
-## Arena
-
-Use arena to evaluate controller changes, not to solve every production task twice.
-
-```bash
-flourite arena --judges 4 --adapter research --source brief.md "Exact task"
-```
-
-Review judge rationales and fatal issues, not only the aggregate vote. A tied or noisy arena is evidence that the claimed improvement is not yet established.
+Apply requires a satisfied run and a matching source fingerprint.
 
 ## Exports
 
-Use diagnostic exports for operational review after inspecting them. Use audit exports only when exact evidence is required; they are intentionally sensitive.
+```sh
+flourite export latest --output diagnostic.zip
+flourite export latest --mode audit --output exact-audit.zip
+```
+
+Diagnostic export applies best-effort secret-pattern redaction and must still be
+reviewed before sharing. Audit export is lossless by design and may contain
+private sources, prompts, traces, and credentials.

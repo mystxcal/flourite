@@ -387,23 +387,12 @@ EXAMPLE_CONFIG = """# Flourite configuration
 
 [run]
 adapter = "generic"
-semantic_profiles = []          # e.g. ["creative", "media"] with any artifact adapter
 run_root = ".flourite/runs"
-keep_capsules = true
-release_gate = "auto"          # auto | always | never
-
-[run.budget]
-max_calls = 48                    # hard operator envelope; adaptive runs stop earlier
-max_parallel = 3
-synthesis_reserve_calls = 4       # legacy/static mode only
-# max_rounds = 8                   # optional independent safety ceiling
-# max_input_tokens = 500000
-# max_output_tokens = 60000
-# max_wall_seconds = 7200
 
 [kernel]
-# max_wall_seconds = 43200          # optional operator-owned hard envelope
-max_parallel = 1                    # search widens only when the task needs it
+max_parallel = 1                  # search widens only when the task needs it
+# Optional operator-owned hard envelopes; unset means no hidden harness limit.
+# max_wall_seconds = 7200
 # max_input_tokens = 1000000
 # max_output_tokens = 100000
 # max_model_turns = 1000
@@ -436,78 +425,9 @@ task_max_runtime_ms = 900000
 retry_max_retries = 6
 # The harness owns durable planning, so it omits OMP's redundant todo plane.
 
-[resource]
-mode = "adaptive"                 # adaptive | static
-# initial_call_grant = 9           # normally derived from topology + finish reserve
-# grant_step_calls = 4             # normally derived from the feasible worker wave
-# max_stagnant_grants = 2          # normally derived from unresolved material debt
-
 [provider.strong]
 model = "gpt-5.6-sol"
 reasoning_effort = "xhigh"
-
-[provider.worker]
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
-
-[provider.cheap]
-model = "gpt-5.6-sol"
-reasoning_effort = "medium"
-
-[frontier]
-max_open_issues = 8
-max_candidate_deltas = 4
-max_actions_per_batch = 3
-max_actions_per_target = 2
-max_stalled_actions_per_target = 2
-correlation_discount = true
-minimum_action_impact = "medium"
-expensive_probe_minimum_impact = "high"
-# clean_synthesis_every_rounds = 3  # opt in only when a domain proves time-based decay
-
-[cognition]
-mode = "adaptive"                   # adaptive | legacy
-persistent_lead = true
-max_active_cruxes = 3
-normal_overlay_limit = 2
-hard_overlay_limit = 4
-specialist_reuse_threshold = 2
-semantic_regression = true
-completion_case = true
-instruments_enabled = true
-ceiling_scan = true
-action_contracts = true
-fallback_to_sparse = true
-lead_reconstruction_check_after_turns = 8
-# max_material_repairs = 3         # optional hard safety ceiling; normally evidence-bounded
-max_control_call_fraction = 0.30
-require_behavioral_overlay_difference = true
-require_reframe_witness = true
-require_completion_coverage = true
-inline_control_updates = true
-human_evidence_available = false
-thought_first = true
-require_execution_trigger = false        # mode guides attention; it never removes tools
-frontier_keeper = "auto"             # auto | fresh | continuous
-
-[summit]
-mode = "auto"                       # off | auto | on
-profile = "deep"                    # lean | deep | max | frontier
-max_archive_lineages = 8
-max_active_lineages = 4
-max_per_niche = 2
-stepping_stone_probe_allowance = 1
-stepping_stone_development_allowance = 1
-require_concrete_auto_trigger = true
-enable_reconstruction = true
-enable_ceiling_audit = true
-enable_mechanism_grafting = true
-preserve_falsification_residue = true
-experimental_frontier = true
-max_discovery_actions_per_round = 1
-stagnation_before_mutation = 2
-enable_semantic_mutation = true
-enable_semantic_crossover = true
 
 [software]
 preflight_checks = []           # cheap contract/schema checks after the first candidate
@@ -520,7 +440,7 @@ release_artifacts = []          # e.g. ["dist/*.mp4", "dist/report.pdf"]
 max_release_artifact_bytes = 250000000
 
 [software.objective]
-# command = "python evaluate.py --json"  # final non-empty stdout line must be JSON
+# command = "python evaluate.py --json"
 primary_metric = "score"
 direction = "maximize"          # maximize | minimize
 timeout_seconds = 900

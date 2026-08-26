@@ -383,6 +383,115 @@ async def test_problem_selected_branches_remain_isolated_then_rejoin_context(
     )
 
 
+async def test_completion_requires_direct_support_for_every_claimed_head(
+    tmp_path: Path,
+) -> None:
+    class MultiHeadRunner:
+        def __init__(self) -> None:
+            self.calls: list[MoveMode] = []
+            self.challenge_count = 0
+
+        async def run(
+            self,
+            *,
+            move: Move,
+            state: RunState,
+            context: ContextFrame,
+            recovering: bool,
+        ) -> MoveExecutionResult:
+            del context, recovering
+            self.calls.append(move.mode)
+            if len(self.calls) == 1:
+                return MoveExecutionResult(
+                    artifact=artifact("# Root candidate"),
+                    workspace=workspace("Root candidate"),
+                    next_moves=[
+                        MoveDirective(
+                            mode=MoveMode.LEAD,
+                            intent="Develop the independent alternative",
+                            fork_purpose="A materially different solution family",
+                        ),
+                        MoveDirective(
+                            mode=MoveMode.LEAD,
+                            intent="Integrate all viable heads",
+                        ),
+                    ],
+                )
+            if len(self.calls) == 2:
+                return MoveExecutionResult(
+                    artifact=artifact("# Alternative candidate"),
+                    workspace=WorkspaceDraft(
+                        document="# Alternative",
+                        summary="Alternative",
+                        activate=False,
+                    ),
+                )
+            if move.mode == MoveMode.LEAD:
+                heads = list(state.artifacts)
+                return MoveExecutionResult(
+                    workspace=WorkspaceDraft(
+                        document="# Integrated",
+                        summary="Integrated",
+                        artifact_head_ids=heads,
+                    ),
+                    finish=FinishDraft(
+                        satisfaction_claims=["Both claimed heads satisfy their scope"],
+                        artifact_head_ids=heads,
+                    ),
+                )
+            claim = state.finish_claim
+            assert claim is not None
+            artifact_id = claim.artifact_head_ids[self.challenge_count]
+            self.challenge_count += 1
+            return MoveExecutionResult(
+                observations=[
+                    ObservationDraft(
+                        kind=ObservationKind.CHALLENGE,
+                        summary=f"Direct support for {artifact_id}",
+                        source="fresh-challenger",
+                        artifact_digest=state.artifacts[artifact_id].digest,
+                        challenge_verdict=ChallengeVerdict.SUPPORTS,
+                    )
+                ]
+            )
+
+    def artifact(text: str) -> ArtifactDraft:
+        encoded = text.encode()
+        return ArtifactDraft(
+            content_ref=ContentRef(
+                digest=sha256_text(text),
+                size=len(encoded),
+                media_type="text/markdown",
+                relative_path=f"sha256/{sha256_text(text)}",
+                original_name="artifact.md",
+            )
+        )
+
+    runner = MultiHeadRunner()
+    blobs = BlobStore(tmp_path / "blobs")
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_multi_head"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=runner,
+    )
+    kernel.start("Build and directly verify a multi-head result.")
+
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.SATISFIED
+    assert runner.challenge_count == 2
+    assert runner.calls == [
+        MoveMode.LEAD,
+        MoveMode.LEAD,
+        MoveMode.LEAD,
+        MoveMode.CHALLENGE,
+        MoveMode.CHALLENGE,
+    ]
+
+
 async def test_repeated_low_information_lead_moves_trigger_fresh_navigation(
     tmp_path: Path,
 ) -> None:

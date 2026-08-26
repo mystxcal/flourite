@@ -30,6 +30,7 @@ from ..core.types import (
 from ..errors import LedgerIntegrityError, RunNotFoundError
 from ..ids import new_id
 from ..intelligence.contracts import MoveRunner
+from ..intelligence.fake_runner import DeterministicMoveRunner
 from ..intelligence.omp_runner import OmpMoveRunner
 from ..ledger import EventLedger
 from ..locking import RunLock
@@ -132,14 +133,17 @@ class KernelEngine:
             )
             if runner is None:
                 provider = build_provider(config.provider)
-                if not isinstance(provider, OmpCodexProvider):
-                    raise ValueError("the intelligence kernel currently requires omp-codex")
-                runner = OmpMoveRunner(
-                    provider=provider,
-                    adapter=adapter,
-                    run_dir=run_dir,
-                    sources=sources,
-                )
+                if config.provider.kind == "fake":
+                    runner = DeterministicMoveRunner()
+                else:
+                    if not isinstance(provider, OmpCodexProvider):
+                        raise ValueError("the intelligence kernel currently requires omp-codex")
+                    runner = OmpMoveRunner(
+                        provider=provider,
+                        adapter=adapter,
+                        run_dir=run_dir,
+                        sources=sources,
+                    )
             ledger = EventLedger(
                 run_dir / cls.LEDGER_FILE,
                 run_id,
@@ -161,6 +165,8 @@ class KernelEngine:
                 workspace=resolved_workspace,
                 sources=sources,
             )
+            if isinstance(runner, OmpMoveRunner):
+                runner.activity_callback = engine._record_provider_activity
             atomic_write_text(
                 run_dir / cls.MANIFEST_FILE,
                 json.dumps(
@@ -228,14 +234,17 @@ class KernelEngine:
         )
         adapter.prepare()
         provider = build_provider(config.provider)
-        if not isinstance(provider, OmpCodexProvider):
-            raise ValueError("the intelligence kernel currently requires omp-codex")
-        runner = OmpMoveRunner(
-            provider=provider,
-            adapter=adapter,
-            run_dir=run_dir,
-            sources=sources,
-        )
+        if config.provider.kind == "fake":
+            runner: MoveRunner = DeterministicMoveRunner()
+        else:
+            if not isinstance(provider, OmpCodexProvider):
+                raise ValueError("the intelligence kernel currently requires omp-codex")
+            runner = OmpMoveRunner(
+                provider=provider,
+                adapter=adapter,
+                run_dir=run_dir,
+                sources=sources,
+            )
         journal = KernelJournal(
             ledger=EventLedger(
                 run_dir / cls.LEDGER_FILE,
@@ -246,7 +255,7 @@ class KernelEngine:
             max_event_payload_bytes=config.kernel.max_event_payload_bytes,
         )
         journal.refresh()
-        return cls(
+        engine = cls(
             run_dir=run_dir,
             config=config,
             blobs=blobs,
@@ -257,6 +266,9 @@ class KernelEngine:
             workspace=workspace,
             sources=sources,
         )
+        if isinstance(runner, OmpMoveRunner):
+            runner.activity_callback = engine._record_provider_activity
+        return engine
 
     @classmethod
     def resolve_run_dir(
@@ -375,6 +387,45 @@ class KernelEngine:
                 self.control.mark_command(command.command_id, CommandStatus.APPLIED, detail)
             except (LedgerIntegrityError, ValueError) as exc:
                 self.control.mark_command(command.command_id, CommandStatus.REJECTED, str(exc))
+
+    def _record_provider_activity(self, event: dict[str, object]) -> None:
+        event_type = str(event.get("type") or "provider")
+        label = "model"
+        message = "model activity"
+        state = "active"
+        action_id = None
+        if event_type == "session":
+            label = "session"
+            message = "model context opened"
+        elif event_type == "tool_execution_start":
+            label = str(event.get("toolName") or "tool")
+            intent = " ".join(str(event.get("intent") or "").split())
+            message = intent[:180] or "tool started"
+            action_id = str(event.get("toolCallId") or "") or None
+        elif event_type == "tool_execution_end":
+            label = str(event.get("toolName") or "tool")
+            failed = bool(event.get("isError"))
+            message = "tool failed" if failed else "tool completed"
+            state = "warn" if failed else "done"
+            action_id = str(event.get("toolCallId") or "") or None
+        elif event_type == "subagent_activity":
+            label = str(event.get("agent") or "subagent")
+            message = " ".join(str(event.get("message") or "reported progress").split())[:180]
+            candidate_state = str(event.get("state") or "active")
+            state = candidate_state if candidate_state in {"active", "done", "warn"} else "active"
+        elif event_type == "message_end":
+            label = "model"
+            message = "model returned a move boundary"
+            state = "done"
+        else:
+            return
+        self.control.record_activity(
+            kind=f"provider.{event_type}",
+            label=label,
+            message=message,
+            state=state,
+            action_id=action_id,
+        )
 
     def _publish_events(self, *, after_seq: int) -> None:
         labels = {
