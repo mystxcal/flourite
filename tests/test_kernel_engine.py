@@ -25,6 +25,7 @@ from frontier_harness.intelligence.contracts import (
 )
 from frontier_harness.live import KernelLiveDashboard
 from frontier_harness.presentation import FLOURITE_THEME
+from frontier_harness.runtime.activity import ProviderActivity
 from frontier_harness.runtime.engine import KernelEngine
 
 
@@ -162,3 +163,45 @@ def test_kernel_live_dashboard_renders_the_actual_kernel_projection(tmp_path: Pa
     assert "1 live/history" in rendered
     assert "queued" in rendered
     assert "lead" in rendered
+
+
+def test_provider_activity_projects_only_operator_relevant_events() -> None:
+    assert ProviderActivity.from_event({"type": "irrelevant"}) is None
+    assert ProviderActivity.from_event({"type": "session"}) == ProviderActivity(
+        kind="session",
+        label="session",
+        message="model context opened",
+    )
+    assert ProviderActivity.from_event(
+        {
+            "type": "tool_execution_start",
+            "toolName": "shell",
+            "toolCallId": "call_1",
+            "intent": "  inspect   the result  ",
+        }
+    ) == ProviderActivity(
+        kind="tool_execution_start",
+        label="shell",
+        message="inspect the result",
+        action_id="call_1",
+    )
+    assert ProviderActivity.from_event(
+        {"type": "tool_execution_end", "toolName": "shell", "isError": True}
+    ) == ProviderActivity(
+        kind="tool_execution_end",
+        label="shell",
+        message="tool failed",
+        state="warn",
+    )
+    assert ProviderActivity.from_event(
+        {
+            "type": "subagent_activity",
+            "agent": "critic",
+            "message": "  found   a gap ",
+            "state": "invented",
+        }
+    ) == ProviderActivity(
+        kind="subagent_activity",
+        label="critic",
+        message="found a gap",
+    )

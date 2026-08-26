@@ -9,6 +9,6 @@
 - [ ] Test `summit.mode = "auto"` on an easy task and `summit.mode = "on"` on a hard mechanism task; confirm auto stays sparse while on exposes a bounded exact-task Summit action.
 - [ ] Inspect the Task Source, Charter, obligations, Artifact Spine, semantic CI, and Completion Case; confirm no reframe changed the user’s real objective and every release blocker is covered.
 - [ ] Run a software task on a disposable Git repository; confirm isolated work, configured checks, no automatic mutation, and refusal to apply after the source fingerprint changes.
-- [ ] Extend a completed run; confirm the prior seal is archived, a fresh seal is written, accumulated research survives, and `flourite verify` still passes.
+- [ ] Interrupt and resume an active run; confirm the ledger reconstructs the exact workspace and `flourite verify` still passes.
 - [ ] Run a two-judge fake arena and a small live arena; confirm A/B positions alternate and adaptive/legacy solver budgets match.
 - [ ] Inspect diagnostic and audit exports for sensitive content before sharing either file.

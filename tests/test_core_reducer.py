@@ -19,6 +19,7 @@ from frontier_harness.core.types import (
     MoveMode,
     MoveProposed,
     MoveStarted,
+    MoveStatus,
     Objective,
     Observation,
     ObservationKind,
@@ -28,6 +29,7 @@ from frontier_harness.core.types import (
     RunTerminated,
     SteeringReceived,
     Trajectory,
+    TrajectoryStatus,
     WorkspaceCommitted,
     WorkspaceVersion,
 )
@@ -452,3 +454,319 @@ def test_new_operator_steering_invalidates_an_older_finish_claim(tmp_path: Path)
 
     assert journal.state.finish_claim is None
     assert journal.state.pending_steering_ids == ["obs_steer"]
+
+
+def composite_move_application(journal: KernelJournal) -> MoveApplied:
+    artifact_ref = ref("atomic artifact", "artifact.md")
+    artifact = ArtifactVersion(
+        artifact_id="art_atomic",
+        content_ref=artifact_ref,
+        digest=artifact_ref.digest,
+        trajectory_id="traj_root",
+        created_by_move_id="move_atomic",
+        created_at=NOW,
+    )
+    observation = Observation(
+        observation_id="obs_atomic",
+        kind=ObservationKind.TEST,
+        summary="The atomic artifact passed its direct check",
+        source="test",
+        created_at=NOW,
+        move_id="move_atomic",
+        trajectory_id="traj_root",
+        artifact_digest=artifact.digest,
+    )
+    branch = Trajectory(
+        trajectory_id="traj_branch",
+        purpose="Test a distinct live alternative",
+        parent_trajectory_id="traj_root",
+        created_at=NOW,
+    )
+    workspace = WorkspaceVersion(
+        workspace_id="ws_atomic",
+        document_ref=ref("# Atomic workspace"),
+        summary="One coherent committed result",
+        based_on_event_seq=journal.state.last_event_seq,
+        artifact_head_ids=[artifact.artifact_id],
+        active_trajectory_ids=["traj_root", branch.trajectory_id],
+        consumed_observation_ids=[observation.observation_id],
+        created_by_move_id="move_atomic",
+        created_at=NOW,
+    )
+    continuation = Move(
+        move_id="move_next",
+        based_on_workspace_id=workspace.workspace_id,
+        trajectory_id=branch.trajectory_id,
+        mode=MoveMode.NAVIGATE,
+        intent="Discriminate the live alternative",
+        idempotency_key="key-move-next",
+        proposed_at=NOW,
+    )
+    return MoveApplied(
+        move_id="move_atomic",
+        success=True,
+        finished_at=NOW,
+        usage_delta=ComputeUsage(model_turns=1, tool_calls=2),
+        observations=[observation],
+        artifacts=[artifact],
+        new_trajectories=[branch],
+        workspace=workspace,
+        next_moves=[continuation],
+    )
+
+
+def replace_nested(
+    payload: MoveApplied,
+    field: str,
+    **updates: object,
+) -> MoveApplied:
+    values = list(getattr(payload, field))
+    values[0] = values[0].model_copy(update=updates)
+    return payload.model_copy(update={field: values})
+
+
+def invalid_atomic_applications() -> list[tuple[str, object, str]]:
+    return [
+        (
+            "duplicate observation",
+            lambda item: item.model_copy(update={"observations": item.observations * 2}),
+            "duplicate observations",
+        ),
+        (
+            "duplicate artifact",
+            lambda item: item.model_copy(update={"artifacts": item.artifacts * 2}),
+            "duplicate artifacts",
+        ),
+        (
+            "duplicate trajectory",
+            lambda item: item.model_copy(update={"new_trajectories": item.new_trajectories * 2}),
+            "duplicate trajectories",
+        ),
+        (
+            "inactive trajectory",
+            lambda item: replace_nested(item, "new_trajectories", status=TrajectoryStatus.ARCHIVED),
+            "new trajectory must be active",
+        ),
+        (
+            "missing trajectory parent",
+            lambda item: replace_nested(
+                item, "new_trajectories", parent_trajectory_id="traj_missing"
+            ),
+            "new trajectory parent is missing",
+        ),
+        (
+            "artifact digest mismatch",
+            lambda item: replace_nested(item, "artifacts", digest="f" * 64),
+            "artifact digest differs",
+        ),
+        (
+            "artifact owner mismatch",
+            lambda item: replace_nested(item, "artifacts", created_by_move_id="move_other"),
+            "artifact has another owner",
+        ),
+        (
+            "artifact trajectory mismatch",
+            lambda item: replace_nested(item, "artifacts", trajectory_id="traj_branch"),
+            "artifact has another trajectory",
+        ),
+        (
+            "missing artifact parent",
+            lambda item: replace_nested(item, "artifacts", parent_artifact_ids=["art_missing"]),
+            "artifact parent is missing",
+        ),
+        (
+            "observation owner mismatch",
+            lambda item: replace_nested(item, "observations", move_id="move_other"),
+            "observation has another owner",
+        ),
+        (
+            "observation trajectory mismatch",
+            lambda item: replace_nested(item, "observations", trajectory_id="traj_branch"),
+            "observation has another trajectory",
+        ),
+        (
+            "unknown observation artifact",
+            lambda item: replace_nested(item, "observations", artifact_digest="e" * 64),
+            "unknown artifact",
+        ),
+        (
+            "workspace owner mismatch",
+            lambda item: item.model_copy(
+                update={
+                    "workspace": item.workspace.model_copy(
+                        update={"created_by_move_id": "move_other"}
+                    )
+                }
+            ),
+            "workspace has another owner",
+        ),
+        (
+            "workspace lineage mismatch",
+            lambda item: item.model_copy(
+                update={
+                    "workspace": item.workspace.model_copy(
+                        update={"parent_workspace_id": "ws_missing"}
+                    )
+                }
+            ),
+            "workspace lineage differs",
+        ),
+        (
+            "future workspace dependency",
+            lambda item: item.model_copy(
+                update={"workspace": item.workspace.model_copy(update={"based_on_event_seq": 4})}
+            ),
+            "future event",
+        ),
+        (
+            "workspace missing artifact",
+            lambda item: item.model_copy(
+                update={
+                    "workspace": item.workspace.model_copy(
+                        update={"artifact_head_ids": ["art_missing"]}
+                    )
+                }
+            ),
+            "missing artifact",
+        ),
+        (
+            "workspace missing trajectory",
+            lambda item: item.model_copy(
+                update={
+                    "workspace": item.workspace.model_copy(
+                        update={"active_trajectory_ids": ["traj_missing"]}
+                    )
+                }
+            ),
+            "missing trajectory",
+        ),
+        (
+            "workspace missing observation",
+            lambda item: item.model_copy(
+                update={
+                    "workspace": item.workspace.model_copy(
+                        update={"consumed_observation_ids": ["obs_missing"]}
+                    )
+                }
+            ),
+            "missing observation",
+        ),
+        (
+            "continuation reuses move id",
+            lambda item: replace_nested(item, "next_moves", move_id="move_atomic"),
+            "reuses a next-move id",
+        ),
+        (
+            "continuation reuses key",
+            lambda item: replace_nested(item, "next_moves", idempotency_key="key-move_atomic"),
+            "duplicates a move idempotency key",
+        ),
+        (
+            "continuation is already running",
+            lambda item: replace_nested(item, "next_moves", status=MoveStatus.RUNNING),
+            "continuation must be proposed",
+        ),
+        (
+            "continuation trajectory missing",
+            lambda item: replace_nested(item, "next_moves", trajectory_id="traj_missing"),
+            "trajectory is missing or inactive",
+        ),
+        (
+            "continuation workspace missing",
+            lambda item: replace_nested(item, "next_moves", based_on_workspace_id="ws_missing"),
+            "continuation workspace is missing",
+        ),
+        (
+            "continuation omits workspace",
+            lambda item: replace_nested(item, "next_moves", based_on_workspace_id=None),
+            "omitted an available workspace",
+        ),
+        (
+            "finish claim references missing artifact",
+            lambda item: item.model_copy(
+                update={
+                    "next_moves": [],
+                    "finish_claim": FinishClaim(
+                        claim_id="claim_invalid",
+                        workspace_id="ws_atomic",
+                        artifact_head_ids=["art_missing"],
+                        satisfaction_claims=["Done"],
+                        created_at=NOW,
+                    ),
+                }
+            ),
+            "finish claim references a missing artifact",
+        ),
+        (
+            "finish claim references missing evidence",
+            lambda item: item.model_copy(
+                update={
+                    "next_moves": [],
+                    "finish_claim": FinishClaim(
+                        claim_id="claim_invalid",
+                        workspace_id="ws_atomic",
+                        satisfaction_claims=["Done"],
+                        evidence_refs=["obs_missing"],
+                        created_at=NOW,
+                    ),
+                }
+            ),
+            "finish claim references missing evidence",
+        ),
+        (
+            "blocker references missing evidence",
+            lambda item: item.model_copy(
+                update={
+                    "next_moves": [],
+                    "blocked_reason": "External authority is required",
+                    "blocker_evidence_refs": ["obs_missing"],
+                }
+            ),
+            "blocker references missing evidence",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "mutate", "message"),
+    invalid_atomic_applications(),
+    ids=lambda item: item if isinstance(item, str) else None,
+)
+def test_atomic_move_rejects_invalid_aggregate_without_state_leak(
+    tmp_path: Path,
+    case: str,
+    mutate: object,
+    message: str,
+) -> None:
+    del case
+    journal = open_journal(tmp_path)
+    propose_and_start(journal, "move_atomic")
+    before = journal.state.model_dump(mode="json")
+    before_count = journal.ledger.count()
+    payload = mutate(composite_move_application(journal))  # type: ignore[operator]
+
+    with pytest.raises(LedgerIntegrityError, match=message):
+        journal.append("move.applied", payload)
+
+    assert journal.ledger.count() == before_count
+    assert journal.state.model_dump(mode="json") == before
+
+
+def test_atomic_move_commits_every_aggregate_and_replays_exactly(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    propose_and_start(journal, "move_atomic")
+    journal.append("move.applied", composite_move_application(journal))
+
+    state = journal.state
+    assert state.current_workspace_id == "ws_atomic"
+    assert state.moves["move_atomic"].status == MoveStatus.SUCCEEDED
+    assert state.moves["move_next"].status == MoveStatus.PROPOSED
+    assert state.trajectories["traj_branch"].status == TrajectoryStatus.ACTIVE
+    assert state.trajectories["traj_root"].artifact_head_id == "art_atomic"
+    assert state.pending_steering_ids == []
+    assert state.usage.model_turns == 1
+    assert state.usage.tool_calls == 2
+
+    expected = state.model_dump(mode="json")
+    (tmp_path / "state.json").unlink()
+    assert journal.refresh().model_dump(mode="json") == expected

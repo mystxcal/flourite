@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 from ..blobs import BlobStore
 from ..ids import new_id
+from ..intelligence.compiler import MoveResultCompiler
 from ..intelligence.context import ContextAssembler
 from ..intelligence.contracts import (
     MoveDirective,
@@ -16,12 +17,9 @@ from ..intelligence.contracts import (
 from ..util import canonical_json, sha256_text, utc_now
 from .journal import KernelJournal
 from .types import (
-    ArtifactVersion,
     ChallengeVerdict,
     ComputeEnvelope,
-    FinishClaim,
     Move,
-    MoveApplied,
     MoveMode,
     MoveProposed,
     MoveStarted,
@@ -34,7 +32,6 @@ from .types import (
     RunStatus,
     RunTerminated,
     Trajectory,
-    WorkspaceVersion,
 )
 
 
@@ -175,50 +172,65 @@ class IntelligenceKernel:
             and obs.metadata.get("material_to_claim", True) is not False
         ]
         if challenged:
-            findings = "\n".join(f"- {obs.summary}" for obs in challenged)
-            self._propose(
-                MoveDirective(
-                    mode=MoveMode.LEAD,
-                    intent="Learn from the completion challenge and improve the live artifact",
-                    instructions=(
-                        "The current finish claim was not established. Treat these findings as "
-                        "new evidence, inspect their direct sources, and reconstruct at the "
-                        f"earliest falsified boundary:\n{findings}"
-                    ),
-                )
-            )
-            return True
+            return self._continue_after_challenge(challenged)
         support = [obs for obs in relevant if obs.challenge_verdict == ChallengeVerdict.SUPPORTS]
         if support:
-            claimed_digests = {
-                state.artifacts[item].digest for item in claim.artifact_head_ids
-            }
-            supported_digests = {
-                item.artifact_digest for item in support if item.artifact_digest is not None
-            }
-            missing_digests = claimed_digests - supported_digests
-            if missing_digests:
-                self._propose(
-                    MoveDirective(
-                        mode=MoveMode.CHALLENGE,
-                        intent="Challenge the unverified artifact heads in the finish claim",
-                        instructions=(
-                            "Directly inspect the claimed artifact heads whose digests still lack "
-                            "independent support: " + ", ".join(sorted(missing_digests))
-                        ),
-                    )
-                )
-                return True
-            self.journal.append(
-                "run.satisfied",
-                RunTerminated(
-                    status="satisfied",
-                    reason="completion claim survived direct independent challenge",
-                    claim_id=claim.claim_id,
-                    supporting_observation_ids=[obs.observation_id for obs in support],
+            return self._resolve_support(support)
+        return self._request_finish_challenge()
+
+    def _continue_after_challenge(self, challenged: list[Observation]) -> bool:
+        findings = "\n".join(f"- {observation.summary}" for observation in challenged)
+        self._propose(
+            MoveDirective(
+                mode=MoveMode.LEAD,
+                intent="Learn from the completion challenge and improve the live artifact",
+                instructions=(
+                    "The current finish claim was not established. Treat these findings as new "
+                    "evidence, inspect their direct sources, and reconstruct at the earliest "
+                    f"falsified boundary:\n{findings}"
                 ),
             )
+        )
+        return True
+
+    def _resolve_support(self, support: list[Observation]) -> bool:
+        state = self.state
+        claim = state.finish_claim
+        assert claim is not None
+        claimed = {state.artifacts[item].digest for item in claim.artifact_head_ids}
+        supported = {
+            observation.artifact_digest
+            for observation in support
+            if observation.artifact_digest is not None
+        }
+        missing = claimed - supported
+        if missing:
+            self._request_artifact_challenge(missing)
             return True
+        self.journal.append(
+            "run.satisfied",
+            RunTerminated(
+                status="satisfied",
+                reason="completion claim survived direct independent challenge",
+                claim_id=claim.claim_id,
+                supporting_observation_ids=[item.observation_id for item in support],
+            ),
+        )
+        return True
+
+    def _request_artifact_challenge(self, missing_digests: set[str]) -> None:
+        self._propose(
+            MoveDirective(
+                mode=MoveMode.CHALLENGE,
+                intent="Challenge the unverified artifact heads in the finish claim",
+                instructions=(
+                    "Directly inspect the claimed artifact heads whose digests still lack "
+                    "independent support: " + ", ".join(sorted(missing_digests))
+                ),
+            )
+        )
+
+    def _request_finish_challenge(self) -> bool:
         self._propose(
             MoveDirective(
                 mode=MoveMode.CHALLENGE,
@@ -322,263 +334,14 @@ class IntelligenceKernel:
         visible_observations: list[Observation],
         result: MoveExecutionResult,
     ) -> None:
-        new_artifact: ArtifactVersion | None = None
-        if result.artifact is not None:
-            artifact_draft = result.artifact
-            new_artifact = ArtifactVersion(
-                artifact_id=new_id("art"),
-                content_ref=artifact_draft.content_ref,
-                digest=artifact_draft.content_ref.digest,
-                parent_artifact_ids=artifact_draft.parent_artifact_ids,
-                trajectory_id=move.trajectory_id,
-                created_by_move_id=move.move_id,
-                deliverables=artifact_draft.deliverables,
-                metadata=dict(artifact_draft.metadata),
-                created_at=utc_now(),
-            )
-
-        observations: list[Observation] = []
-        for observation_draft in result.observations:
-            metadata = dict(observation_draft.metadata)
-            if move.mode == MoveMode.CHALLENGE and self.state.finish_claim is not None:
-                metadata.setdefault("claim_id", self.state.finish_claim.claim_id)
-            observation = Observation(
-                observation_id=new_id("obs"),
-                kind=observation_draft.kind,
-                summary=observation_draft.summary,
-                source=observation_draft.source,
-                created_at=utc_now(),
-                move_id=move.move_id,
-                trajectory_id=move.trajectory_id,
-                artifact_digest=(
-                    observation_draft.artifact_digest
-                    or (
-                        new_artifact.digest
-                        if observation_draft.bind_to_new_artifact and new_artifact is not None
-                        else None
-                    )
-                ),
-                raw_ref=observation_draft.raw_ref,
-                confidence=observation_draft.confidence,
-                challenge_verdict=observation_draft.challenge_verdict,
-                metadata=metadata,
-            )
-            observations.append(observation)
-
-        low_information = (
-            move.mode == MoveMode.LEAD
-            and move.based_on_workspace_id is not None
-            and new_artifact is None
-            and not any(
-                item.raw_ref is not None
-                or item.kind
-                in {
-                    ObservationKind.TOOL,
-                    ObservationKind.TEST,
-                    ObservationKind.SOURCE,
-                    ObservationKind.ARTIFACT,
-                }
-                for item in observations
-            )
-        )
-        repeated_low_information = low_information and self._last_move_was_low_information(
-            move.trajectory_id
-        )
-        if low_information:
-            observations.append(
-                Observation(
-                    observation_id=new_id("obs"),
-                    kind=ObservationKind.RESOURCE,
-                    summary=(
-                        "This Lead move changed neither the artifact nor decision-relevant "
-                        "external evidence."
-                    ),
-                    source="kernel",
-                    created_at=utc_now(),
-                    move_id=move.move_id,
-                    trajectory_id=move.trajectory_id,
-                    metadata={
-                        "kernel_signal": "low_information",
-                        "repeated": repeated_low_information,
-                    },
-                )
-            )
-
-        new_workspace: WorkspaceVersion | None = None
-        if result.workspace is not None:
-            workspace_draft = result.workspace
-            document_ref = self.blobs.put_text(
-                workspace_draft.document,
-                media_type="text/markdown; charset=utf-8",
-                original_name="workspace.md",
-            )
-            base_workspace = self.state.workspaces.get(move.based_on_workspace_id or "")
-            current_heads = list(base_workspace.artifact_head_ids if base_workspace else [])
-            if new_artifact is not None:
-                replaced = {
-                    artifact_id
-                    for artifact_id in current_heads
-                    if self.state.artifacts[artifact_id].trajectory_id == move.trajectory_id
-                }
-                current_heads = [item for item in current_heads if item not in replaced]
-                current_heads.append(new_artifact.artifact_id)
-            heads = workspace_draft.artifact_head_ids or current_heads
-            trajectories = workspace_draft.active_trajectory_ids or [
-                item.trajectory_id
-                for item in self.state.trajectories.values()
-                if item.status.value == "active"
-            ]
-            consumed = list(
-                dict.fromkeys(
-                    [obs.observation_id for obs in visible_observations]
-                    + workspace_draft.consumed_observation_ids
-                )
-            )
-            new_workspace = WorkspaceVersion(
-                workspace_id=new_id("ws"),
-                parent_workspace_id=move.based_on_workspace_id,
-                document_ref=document_ref,
-                summary=workspace_draft.summary,
-                based_on_event_seq=self.state.last_event_seq,
-                artifact_head_ids=heads,
-                active_trajectory_ids=trajectories,
-                consumed_observation_ids=consumed,
-                created_by_move_id=move.move_id,
-                created_at=utc_now(),
-            )
-        resulting_workspace = (
-            new_workspace
-            if new_workspace is not None and result.workspace is not None and result.workspace.activate
-            else self.state.current_workspace
-        )
-        finish_claim: FinishClaim | None = None
-        if result.success and result.finish is not None:
-            if resulting_workspace is None:
-                raise ValueError("finish claim requires a live workspace")
-            finish_draft = result.finish
-            finish_claim = FinishClaim(
-                claim_id=new_id("claim"),
-                workspace_id=resulting_workspace.workspace_id,
-                artifact_head_ids=(
-                    finish_draft.artifact_head_ids or resulting_workspace.artifact_head_ids
-                ),
-                satisfaction_claims=finish_draft.satisfaction_claims,
-                evidence_refs=(
-                    finish_draft.evidence_refs
-                    or [item.observation_id for item in observations]
-                ),
-                residual_uncertainty=finish_draft.residual_uncertainty,
-                created_at=utc_now(),
-            )
-
-        next_moves: list[Move] = []
-        new_trajectories: list[Trajectory] = []
-        directives = (
-            result.next_moves
-            if result.next_moves
-            else [result.next_move]
-            if result.next_move is not None
-            else []
-        )
-        if repeated_low_information and directives and finish_claim is None:
-            directives = [
-                MoveDirective(
-                    mode=MoveMode.NAVIGATE,
-                    intent="Escape a repeated low-information trajectory",
-                    instructions=(
-                        "Two consecutive Lead moves changed neither the artifact nor direct "
-                        "evidence. Reconstruct the frontier from fresh context, identify the "
-                        "repeated assumption or missing representation, and return a materially "
-                        "different next move."
-                    ),
-                    trajectory_id=move.trajectory_id,
-                )
-            ]
-        continuation_workspace_id = (
-            new_workspace.workspace_id
-            if new_workspace is not None
-            else resulting_workspace.workspace_id
-            if resulting_workspace is not None
-            else None
-        )
-        if result.success and directives and finish_claim is None:
-            for directive in directives:
-                effective = directive
-                if directive.fork_purpose is not None:
-                    trajectory = Trajectory(
-                        trajectory_id=new_id("traj"),
-                        purpose=directive.fork_purpose,
-                        base_workspace_id=continuation_workspace_id,
-                        parent_trajectory_id=move.trajectory_id,
-                        created_at=utc_now(),
-                    )
-                    new_trajectories.append(trajectory)
-                    effective = directive.model_copy(
-                        update={
-                            "trajectory_id": trajectory.trajectory_id,
-                            "fork_purpose": None,
-                        }
-                    )
-                candidate = self._build_move(
-                    effective,
-                    based_on_workspace_id=continuation_workspace_id,
-                    additional_trajectory_ids={
-                        item.trajectory_id for item in new_trajectories
-                    },
-                )
-                if candidate is not None:
-                    next_moves.append(candidate)
-
-        if new_workspace is not None and new_trajectories:
-            new_workspace.active_trajectory_ids = list(
-                dict.fromkeys(
-                    new_workspace.active_trajectory_ids
-                    + [item.trajectory_id for item in new_trajectories]
-                )
-            )
-
-        blocker_reason = result.blocker.reason if result.blocker is not None else None
-        blocker_refs = result.blocker.evidence_refs if result.blocker is not None else []
+        payload = MoveResultCompiler(
+            state=self.state,
+            blobs=self.blobs,
+            build_move=self._build_move,
+        ).compile(move, visible_observations, result)
         self.journal.append(
             "move.applied",
-            MoveApplied(
-                move_id=move.move_id,
-                success=result.success,
-                finished_at=utc_now(),
-                usage_delta=result.usage,
-                observations=observations,
-                artifacts=[new_artifact] if new_artifact is not None else [],
-                new_trajectories=new_trajectories,
-                workspace=new_workspace,
-                activate_workspace=(
-                    result.workspace.activate if result.workspace is not None else True
-                ),
-                finish_claim=finish_claim,
-                next_moves=next_moves,
-                blocked_reason=blocker_reason,
-                blocker_evidence_refs=blocker_refs,
-                error=result.error,
-            ),
+            payload,
             actor="runtime",
             action_id=move.move_id,
-        )
-
-    def _last_move_was_low_information(self, trajectory_id: str) -> bool:
-        completed = sorted(
-            (
-                item
-                for item in self.state.moves.values()
-                if item.trajectory_id == trajectory_id
-                and item.mode == MoveMode.LEAD
-                and item.status.terminal
-            ),
-            key=lambda item: item.proposed_at,
-        )
-        if not completed:
-            return False
-        previous = completed[-1]
-        return any(
-            self.state.observations[item].metadata.get("kernel_signal") == "low_information"
-            for item in previous.observation_ids
-            if item in self.state.observations
         )

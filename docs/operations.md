@@ -9,9 +9,8 @@ flourite inspect latest
 flourite events latest
 flourite verify latest
 flourite resume latest
-flourite extend latest --additional-calls 12
 flourite export latest --mode diagnostic --output diagnostic.zip
-flourite arena --judges 4 "Task"
+flourite live latest
 ```
 
-Use `resume` for interrupted active runs and `extend` for completed sealed runs. Verify before either. Review `END_DEVICE_TEST_CHECKLIST.md` before important live use.
+Use `resume` for interrupted active runs. A satisfied, exhausted, blocked, stopped, or failed run is an honest terminal record rather than a second hidden execution path. Verify before important reuse or export. Review `END_DEVICE_TEST_CHECKLIST.md` before important live use.

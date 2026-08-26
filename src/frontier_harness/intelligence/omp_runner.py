@@ -156,7 +156,7 @@ class OmpMoveRunner:
             return MoveExecutionResult.model_validate_json(cache_path.read_text(encoding="utf-8"))
         execution_dir.mkdir(parents=True, exist_ok=True)
 
-        parent = self._current_legacy_artifact(state, move)
+        parent = self._current_artifact(state, move)
         workspace = self.adapter.open_call(
             call_id=move.move_id,
             call_kind=move.mode.value,
@@ -339,21 +339,20 @@ class OmpMoveRunner:
     def _write_sessions(self, sessions: dict[str, str]) -> None:
         atomic_write_text(self.sessions_path, json.dumps(sessions, indent=2, sort_keys=True))
 
-    def _current_legacy_artifact(self, state: RunState, move: Move) -> ArtifactRef | None:
+    def _current_artifact(self, state: RunState, move: Move) -> ArtifactRef | None:
         workspace = state.workspaces.get(move.based_on_workspace_id or "")
         if workspace is None:
             return None
         candidates = [
             state.artifacts[item]
             for item in workspace.artifact_head_ids
-            if item in state.artifacts
-            and state.artifacts[item].trajectory_id == move.trajectory_id
+            if item in state.artifacts and state.artifacts[item].trajectory_id == move.trajectory_id
         ]
         if not candidates:
             return None
-        return self._legacy_artifact(state, candidates[-1])
+        return self._adapter_artifact(state, candidates[-1])
 
-    def _legacy_artifact(self, state: RunState, artifact: Any) -> ArtifactRef:
+    def _adapter_artifact(self, state: RunState, artifact: Any) -> ArtifactRef:
         workspace = state.current_workspace
         return ArtifactRef(
             artifact_id=artifact.artifact_id,
@@ -361,7 +360,9 @@ class OmpMoveRunner:
             blob=artifact.content_ref,
             kind=str(artifact.metadata.get("kind", self.adapter.artifact_kind)),
             summary=workspace.summary if workspace is not None else "current artifact",
-            parent_artifact_id=(artifact.parent_artifact_ids[0] if artifact.parent_artifact_ids else None),
+            parent_artifact_id=(
+                artifact.parent_artifact_ids[0] if artifact.parent_artifact_ids else None
+            ),
             source_action_ids=[artifact.created_by_move_id],
             deliverables=artifact.deliverables,
             created_at=artifact.created_at,
@@ -370,33 +371,63 @@ class OmpMoveRunner:
     def _write_context(self, workspace: CallWorkspace, context: ContextFrame) -> None:
         context_dir = workspace.context_dir
         context_dir.mkdir(parents=True, exist_ok=True)
-        objective = context.objective_text
-        if context.amendments:
-            objective += "\n\n# Explicit amendments\n\n" + "\n\n".join(context.amendments)
-        atomic_write_text(context_dir / "objective.md", objective)
+        atomic_write_text(context_dir / "objective.md", self._objective_text(context))
         if context.workspace_text is not None:
             atomic_write_text(context_dir / "workspace.md", context.workspace_text)
+        sources = self._write_sources(workspace, context_dir)
+        self._write_observations(workspace, context)
+        artifacts = self._write_artifacts(workspace, context)
+        atomic_write_text(
+            context_dir / "index.json",
+            json.dumps(
+                self._context_index(context, sources=sources, artifacts=artifacts),
+                indent=2,
+                ensure_ascii=False,
+            ),
+        )
 
-        source_index: list[dict[str, str]] = []
+    @staticmethod
+    def _objective_text(context: ContextFrame) -> str:
+        if not context.amendments:
+            return context.objective_text
+        return (
+            context.objective_text
+            + "\n\n# Explicit amendments\n\n"
+            + "\n\n".join(context.amendments)
+        )
+
+    def _write_sources(
+        self,
+        workspace: CallWorkspace,
+        context_dir: Path,
+    ) -> list[dict[str, str]]:
+        index: list[dict[str, str]] = []
         source_dir = context_dir / "sources"
+        source_root = source_dir.resolve()
         for source in self.sources:
             destination = (source_dir / source.relative_path).resolve()
             try:
-                destination.relative_to(source_dir.resolve())
+                destination.relative_to(source_root)
             except ValueError as exc:
                 raise ValueError(f"source path escapes context: {source.relative_path}") from exc
             destination.parent.mkdir(parents=True, exist_ok=True)
             self.adapter.blobs.materialize(source.content_ref, destination)
-            source_index.append(
+            index.append(
                 {
                     "display_name": source.display_name,
                     "local_path": destination.relative_to(workspace.cwd).as_posix(),
                     "digest": source.content_ref.digest,
                 }
             )
+        return index
 
-        observations: list[dict[str, Any]] = []
-        evidence_dir = context_dir / "evidence"
+    def _write_observations(
+        self,
+        workspace: CallWorkspace,
+        context: ContextFrame,
+    ) -> list[dict[str, Any]]:
+        index: list[dict[str, Any]] = []
+        evidence_dir = workspace.context_dir / "evidence"
         for observation in context.observations:
             item = observation.model_dump(mode="json")
             if observation.raw_ref is not None:
@@ -404,41 +435,64 @@ class OmpMoveRunner:
                 destination = evidence_dir / f"{observation.observation_id}{suffix}"
                 self.adapter.blobs.materialize(observation.raw_ref, destination)
                 item["local_evidence_path"] = destination.relative_to(workspace.cwd).as_posix()
-            observations.append(item)
+            index.append(item)
         atomic_write_text(
-            context_dir / "observations.json",
-            json.dumps(observations, indent=2, ensure_ascii=False),
+            workspace.context_dir / "observations.json",
+            json.dumps(index, indent=2, ensure_ascii=False),
         )
-        artifact_index: list[dict[str, Any]] = []
-        artifacts_dir = context_dir / "artifacts"
+        return index
+
+    def _write_artifacts(
+        self,
+        workspace: CallWorkspace,
+        context: ContextFrame,
+    ) -> list[dict[str, Any]]:
+        index: list[dict[str, Any]] = []
+        artifacts_dir = workspace.context_dir / "artifacts"
         for artifact in context.artifact_heads:
             suffix = Path(artifact.content_ref.original_name or "artifact.bin").suffix or ".bin"
-            destination = (
-                artifacts_dir
-                / artifact.trajectory_id
-                / f"{artifact.artifact_id}{suffix}"
-            )
+            destination = artifacts_dir / artifact.trajectory_id / f"{artifact.artifact_id}{suffix}"
             destination.parent.mkdir(parents=True, exist_ok=True)
             self.adapter.blobs.materialize(artifact.content_ref, destination)
-            deliverables: list[str] = []
-            for deliverable_index, deliverable in enumerate(artifact.deliverables):
-                item_suffix = Path(deliverable.original_name or "deliverable.bin").suffix or ".bin"
-                item_path = (
-                    destination.parent
-                    / f"{artifact.artifact_id}-{deliverable_index}{item_suffix}"
-                )
-                self.adapter.blobs.materialize(deliverable, item_path)
-                deliverables.append(item_path.relative_to(workspace.cwd).as_posix())
             item = artifact.model_dump(mode="json")
             item["local_path"] = destination.relative_to(workspace.cwd).as_posix()
-            item["local_deliverables"] = deliverables
-            artifact_index.append(item)
-        index = {
+            item["local_deliverables"] = self._write_deliverables(
+                workspace,
+                artifact.artifact_id,
+                destination.parent,
+                artifact.deliverables,
+            )
+            index.append(item)
+        return index
+
+    def _write_deliverables(
+        self,
+        workspace: CallWorkspace,
+        artifact_id: str,
+        directory: Path,
+        deliverables: Sequence[Any],
+    ) -> list[str]:
+        paths: list[str] = []
+        for index, deliverable in enumerate(deliverables):
+            suffix = Path(deliverable.original_name or "deliverable.bin").suffix or ".bin"
+            path = directory / f"{artifact_id}-{index}{suffix}"
+            self.adapter.blobs.materialize(deliverable, path)
+            paths.append(path.relative_to(workspace.cwd).as_posix())
+        return paths
+
+    @staticmethod
+    def _context_index(
+        context: ContextFrame,
+        *,
+        sources: list[dict[str, str]],
+        artifacts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {
             "run_id": context.run_id,
             "mode": context.mode,
             "current_workspace_id": context.current_workspace_id,
             "workspace_summary": context.workspace_summary,
-            "artifact_heads": artifact_index,
+            "artifact_heads": artifacts,
             "trajectories": [item.model_dump(mode="json") for item in context.trajectories],
             "recent_moves": [
                 {
@@ -456,20 +510,14 @@ class OmpMoveRunner:
             "usage": context.usage.model_dump(mode="json"),
             "hard_envelope": context.envelope.model_dump(mode="json"),
             "capabilities": context.capabilities,
-            "sources": source_index,
+            "sources": sources,
             "generated_at": utc_now(),
         }
-        atomic_write_text(
-            context_dir / "index.json",
-            json.dumps(index, indent=2, ensure_ascii=False),
-        )
 
     def _prompt(self, move: Move, workspace: CallWorkspace, context: ContextFrame) -> str:
         objective_path = (workspace.context_dir / "objective.md").relative_to(workspace.cwd)
         index_path = (workspace.context_dir / "index.json").relative_to(workspace.cwd)
-        observations_path = (workspace.context_dir / "observations.json").relative_to(
-            workspace.cwd
-        )
+        observations_path = (workspace.context_dir / "observations.json").relative_to(workspace.cwd)
         expected_artifact = workspace.expected_artifact_path.relative_to(workspace.cwd)
         common = f"""You are executing one meaningful Flourite move for an exact user task.
 
@@ -485,7 +533,9 @@ ceremony, or merely proposing work you can perform now. Preserve inconvenient ev
 The typed final response is a concise durable boundary, not the work itself.
 """
         if move.mode in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
-            return common + f"""
+            return (
+                common
+                + f"""
 
 Act as the persistent Lead. Improve the live result directly. For a document artifact,
 write the current best artifact to `{expected_artifact}`. For a software artifact, modify
@@ -500,15 +550,21 @@ Open `branches` only when competing hypotheses or solution families make genuine
 different predictions; give each a concrete `fork_purpose`. Branching is optional, not
 a default display of effort.
 """
+            )
         if move.mode == MoveMode.NAVIGATE:
-            return common + """
+            return (
+                common
+                + """
 
 Act as a fresh-context Navigator. Do not edit the artifact and do not declare completion.
 Reconstruct the global shape: detect drift, repeated bets, missing solution families,
 misallocated compute, brittle assumptions, and the strongest next move. Return at least
 one concrete observation and normally a next move for the Lead.
 """
-        return common + """
+            )
+        return (
+            common
+            + """
 
 Act as an independent Challenger. Do not judge a description of the work: inspect the
 actual current artifact and decision-relevant evidence. Try to falsify the finish claim
@@ -519,6 +575,7 @@ you inspected; every claimed artifact head needs direct support. Mark
 objective is satisfied. If such a finding is the only criticism, also state direct
 support for the claim. Do not edit the artifact or prescribe a ritual.
 """
+        )
 
     def _convert(
         self,
@@ -530,132 +587,177 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
         output: ModelOutput,
         usage: ComputeUsage,
     ) -> MoveExecutionResult:
-        artifact_draft: ArtifactDraft | None = None
-        candidate: ArtifactRef | None = None
-        if move.mode in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
-            candidate = self.adapter.capture_candidate_artifact(
-                workspace,
-                summary=cast(LeadModelOutput, output).workspace_summary,
-                parent=parent,
-                source_action_ids=[move.move_id],
-            )
-            if candidate is not None and (
-                parent is None
-                or candidate.blob.digest != parent.blob.digest
-                or [item.digest for item in candidate.deliverables]
-                != [item.digest for item in parent.deliverables]
-            ):
-                artifact_draft = ArtifactDraft(
-                    content_ref=candidate.blob,
-                    parent_artifact_ids=[parent.artifact_id] if parent else [],
-                    deliverables=candidate.deliverables,
-                    metadata={
-                        "kind": candidate.kind,
-                        "legacy_version": candidate.version,
-                    },
-                )
-
-        source = {
-            MoveMode.LEAD: "lead",
-            MoveMode.NAVIGATE: "navigator",
-            MoveMode.CHALLENGE: "fresh-challenger",
-            MoveMode.ENVIRONMENT: "environment",
-        }[move.mode]
-        current_digest = parent.blob.digest if parent is not None else None
-        claim_artifacts = (
-            [
-                state.artifacts[item]
-                for item in state.finish_claim.artifact_head_ids
-                if item in state.artifacts
-            ]
-            if state.finish_claim is not None
-            else []
+        artifact, candidate = self._capture_artifact(move, workspace, parent, output)
+        claim_artifacts = self._claim_artifacts(state)
+        observations = self._model_observations(
+            move,
+            workspace,
+            output,
+            claim_artifacts=claim_artifacts,
         )
+        observations.extend(
+            self._artifact_observations(
+                move,
+                state,
+                candidate,
+                claim_artifacts=claim_artifacts,
+            )
+        )
+        return MoveExecutionResult(
+            observations=observations,
+            artifact=artifact,
+            workspace=self._workspace_result(move, state, workspace, output),
+            next_moves=self._directives(move, output),
+            finish=self._finish_result(output),
+            blocker=self._blocker_result(output),
+            usage=usage,
+        )
+
+    def _capture_artifact(
+        self,
+        move: Move,
+        workspace: CallWorkspace,
+        parent: ArtifactRef | None,
+        output: ModelOutput,
+    ) -> tuple[ArtifactDraft | None, ArtifactRef | None]:
+        if move.mode not in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
+            return None, None
+        candidate = self.adapter.capture_candidate_artifact(
+            workspace,
+            summary=cast(LeadModelOutput, output).workspace_summary,
+            parent=parent,
+            source_action_ids=[move.move_id],
+        )
+        if candidate is None or self._same_artifact(candidate, parent):
+            return None, candidate
+        return (
+            ArtifactDraft(
+                content_ref=candidate.blob,
+                parent_artifact_ids=[parent.artifact_id] if parent else [],
+                deliverables=candidate.deliverables,
+                metadata={"kind": candidate.kind, "legacy_version": candidate.version},
+            ),
+            candidate,
+        )
+
+    @staticmethod
+    def _same_artifact(candidate: ArtifactRef, parent: ArtifactRef | None) -> bool:
+        return parent is not None and (
+            candidate.blob.digest == parent.blob.digest
+            and [item.digest for item in candidate.deliverables]
+            == [item.digest for item in parent.deliverables]
+        )
+
+    @staticmethod
+    def _claim_artifacts(state: RunState) -> list[Any]:
+        if state.finish_claim is None:
+            return []
+        return [
+            state.artifacts[item]
+            for item in state.finish_claim.artifact_head_ids
+            if item in state.artifacts
+        ]
+
+    def _model_observations(
+        self,
+        move: Move,
+        workspace: CallWorkspace,
+        output: ModelOutput,
+        *,
+        claim_artifacts: Sequence[Any],
+    ) -> list[ObservationDraft]:
         claim_digests = {item.digest for item in claim_artifacts}
-        observations: list[ObservationDraft] = []
-        for model_observation in output.observations:
-            raw_ref = None
-            if model_observation.evidence_path:
-                evidence_path = self.adapter.resolve_declared_path(
-                    workspace, model_observation.evidence_path
-                )
-                raw_ref = self.adapter.blobs.put_file(
-                    evidence_path,
-                    original_name=evidence_path.name,
-                )
-            verdict = (
-                model_observation.verdict
-                if isinstance(model_observation, ModelChallengeObservation)
-                else None
+        return [
+            self._model_observation(
+                move,
+                workspace,
+                item,
+                claim_digests=claim_digests,
             )
-            bound_digest = current_digest if move.mode == MoveMode.CHALLENGE else None
-            if isinstance(model_observation, ModelChallengeObservation):
-                if (
-                    model_observation.artifact_digest is not None
-                    and model_observation.artifact_digest not in claim_digests
-                ):
-                    raise ValueError(
-                        "challenge observation references a digest outside the finish claim"
-                    )
-                if model_observation.artifact_digest is not None:
-                    bound_digest = model_observation.artifact_digest
-                elif len(claim_digests) == 1:
-                    bound_digest = next(iter(claim_digests))
-                else:
-                    bound_digest = None
-            observations.append(
-                ObservationDraft(
-                    kind=model_observation.kind,
-                    summary=model_observation.summary,
-                    source=source,
-                    raw_ref=raw_ref,
-                    artifact_digest=bound_digest,
-                    confidence=model_observation.confidence,
-                    challenge_verdict=verdict,
-                    metadata=(
-                        {"material_to_claim": model_observation.material_to_claim}
-                        if isinstance(model_observation, ModelChallengeObservation)
-                        else {}
-                    ),
-                )
-            )
+            for item in output.observations
+        ]
 
-        checked_artifacts = (
-            [self._legacy_artifact(state, item) for item in claim_artifacts]
-            if move.mode == MoveMode.CHALLENGE
-            else [candidate]
-            if candidate is not None
-            else []
+    def _model_observation(
+        self,
+        move: Move,
+        workspace: CallWorkspace,
+        model_observation: ModelObservation,
+        *,
+        claim_digests: set[str],
+    ) -> ObservationDraft:
+        raw_ref = None
+        if model_observation.evidence_path:
+            evidence_path = self.adapter.resolve_declared_path(
+                workspace, model_observation.evidence_path
+            )
+            raw_ref = self.adapter.blobs.put_file(
+                evidence_path,
+                original_name=evidence_path.name,
+            )
+        challenge = (
+            model_observation if isinstance(model_observation, ModelChallengeObservation) else None
         )
-        for checked_artifact in checked_artifacts:
+        bound_digest = self._challenge_digest(
+            challenge,
+            claim_digests=claim_digests,
+        )
+        return ObservationDraft(
+            kind=model_observation.kind,
+            summary=model_observation.summary,
+            source={
+                MoveMode.LEAD: "lead",
+                MoveMode.NAVIGATE: "navigator",
+                MoveMode.CHALLENGE: "fresh-challenger",
+                MoveMode.ENVIRONMENT: "environment",
+            }[move.mode],
+            raw_ref=raw_ref,
+            artifact_digest=bound_digest,
+            confidence=model_observation.confidence,
+            challenge_verdict=challenge.verdict if challenge is not None else None,
+            metadata=(
+                {"material_to_claim": challenge.material_to_claim} if challenge is not None else {}
+            ),
+        )
+
+    @staticmethod
+    def _challenge_digest(
+        challenge: ModelChallengeObservation | None,
+        *,
+        claim_digests: set[str],
+    ) -> str | None:
+        if challenge is None:
+            return None
+        if challenge.artifact_digest is not None and challenge.artifact_digest not in claim_digests:
+            raise ValueError("challenge observation references a digest outside the finish claim")
+        if challenge.artifact_digest is not None:
+            return challenge.artifact_digest
+        if len(claim_digests) == 1:
+            return next(iter(claim_digests))
+        return None
+
+    def _artifact_observations(
+        self,
+        move: Move,
+        state: RunState,
+        candidate: ArtifactRef | None,
+        *,
+        claim_artifacts: Sequence[Any],
+    ) -> list[ObservationDraft]:
+        if move.mode == MoveMode.CHALLENGE:
+            artifacts = [self._adapter_artifact(state, item) for item in claim_artifacts]
+        else:
+            artifacts = [candidate] if candidate is not None else []
+        observations: list[ObservationDraft] = []
+        for artifact in artifacts:
             try:
                 checks = (
-                    self.adapter.deterministic_checks(checked_artifact)
+                    self.adapter.deterministic_checks(artifact)
                     if move.mode == MoveMode.CHALLENGE
-                    else self.adapter.staged_checks(checked_artifact, stage="candidate")
-                    if candidate is not None
-                    else []
+                    else self.adapter.staged_checks(artifact, stage="candidate")
                 )
             except Exception as exc:
-                checks = []
-                observations.append(
-                    ObservationDraft(
-                        kind=(
-                            ObservationKind.CHALLENGE
-                            if move.mode == MoveMode.CHALLENGE
-                            else ObservationKind.ERROR
-                        ),
-                        summary=f"Artifact-native verification could not run: {type(exc).__name__}: {exc}",
-                        source="artifact-check",
-                        artifact_digest=checked_artifact.blob.digest,
-                        confidence=1.0,
-                        challenge_verdict=(
-                            ChallengeVerdict.UNCERTAIN
-                            if move.mode == MoveMode.CHALLENGE
-                            else None
-                        ),
-                    )
-                )
+                observations.append(self._check_failure(move, artifact, exc))
+                continue
             observations.extend(
                 self._check_observation(
                     check,
@@ -663,58 +765,72 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
                 )
                 for check in checks
             )
+        return observations
 
-        workspace_draft: WorkspaceDraft | None = None
-        if isinstance(output, LeadModelOutput):
-            path = self.adapter.resolve_declared_path(workspace, output.workspace_path)
-            workspace_document = path.read_text(encoding="utf-8")
-            workspace_draft = WorkspaceDraft(
-                document=workspace_document,
-                summary=output.workspace_summary,
-                activate=move.trajectory_id == state.root_trajectory_id,
-            )
+    @staticmethod
+    def _check_failure(
+        move: Move,
+        artifact: ArtifactRef,
+        error: Exception,
+    ) -> ObservationDraft:
+        challenge = move.mode == MoveMode.CHALLENGE
+        return ObservationDraft(
+            kind=ObservationKind.CHALLENGE if challenge else ObservationKind.ERROR,
+            summary=(
+                f"Artifact-native verification could not run: {type(error).__name__}: {error}"
+            ),
+            source="artifact-check",
+            artifact_digest=artifact.blob.digest,
+            confidence=1.0,
+            challenge_verdict=ChallengeVerdict.UNCERTAIN if challenge else None,
+        )
 
-        directives: list[MoveDirective] = []
-        for branch in output.branches:
-            directives.append(
-                MoveDirective(
-                    mode=branch.mode,
-                    intent=branch.intent,
-                    instructions=branch.instructions,
-                    trajectory_id=move.trajectory_id,
-                    fork_purpose=branch.fork_purpose,
-                )
-            )
+    def _workspace_result(
+        self,
+        move: Move,
+        state: RunState,
+        workspace: CallWorkspace,
+        output: ModelOutput,
+    ) -> WorkspaceDraft | None:
+        if not isinstance(output, LeadModelOutput):
+            return None
+        path = self.adapter.resolve_declared_path(workspace, output.workspace_path)
+        return WorkspaceDraft(
+            document=path.read_text(encoding="utf-8"),
+            summary=output.workspace_summary,
+            activate=move.trajectory_id == state.root_trajectory_id,
+        )
+
+    @staticmethod
+    def _directives(move: Move, output: ModelOutput) -> list[MoveDirective]:
+        items = [*output.branches]
         if output.next_move is not None:
-            directives.append(
-                MoveDirective(
-                    mode=output.next_move.mode,
-                    intent=output.next_move.intent,
-                    instructions=output.next_move.instructions,
-                    trajectory_id=move.trajectory_id,
-                    fork_purpose=output.next_move.fork_purpose,
-                )
+            items.append(output.next_move)
+        return [
+            MoveDirective(
+                mode=item.mode,
+                intent=item.intent,
+                instructions=item.instructions,
+                trajectory_id=move.trajectory_id,
+                fork_purpose=item.fork_purpose,
             )
-        finish = None
-        if output.finish is not None:
-            finish = FinishDraft(
-                satisfaction_claims=output.finish.satisfaction_claims,
-                residual_uncertainty=output.finish.residual_uncertainty,
-            )
-        blocker = (
-            BlockerDraft(reason=output.blocker.reason, evidence_refs=[])
-            if output.blocker is not None
-            else None
+            for item in items
+        ]
+
+    @staticmethod
+    def _finish_result(output: ModelOutput) -> FinishDraft | None:
+        if output.finish is None:
+            return None
+        return FinishDraft(
+            satisfaction_claims=output.finish.satisfaction_claims,
+            residual_uncertainty=output.finish.residual_uncertainty,
         )
-        return MoveExecutionResult(
-            observations=observations,
-            artifact=artifact_draft,
-            workspace=workspace_draft,
-            next_moves=directives,
-            finish=finish,
-            blocker=blocker,
-            usage=usage,
-        )
+
+    @staticmethod
+    def _blocker_result(output: ModelOutput) -> BlockerDraft | None:
+        if output.blocker is None:
+            return None
+        return BlockerDraft(reason=output.blocker.reason, evidence_refs=[])
 
     @staticmethod
     def _check_observation(
@@ -723,9 +839,7 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
         challenge: bool,
     ) -> ObservationDraft:
         verdict = (
-            ChallengeVerdict.CHALLENGES
-            if evidence.negative_result
-            else ChallengeVerdict.SUPPORTS
+            ChallengeVerdict.CHALLENGES if evidence.negative_result else ChallengeVerdict.SUPPORTS
         )
         return ObservationDraft(
             kind=ObservationKind.CHALLENGE if challenge else ObservationKind.TEST,

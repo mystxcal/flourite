@@ -18,10 +18,11 @@ from frontier_harness.control import (
 )
 from frontier_harness.engine import FrontierEngine
 from frontier_harness.errors import OperatorStop
-from frontier_harness.live import LiveDashboard
+from frontier_harness.live import KernelLiveDashboard
 from frontier_harness.models import WorkerEnvelope
 from frontier_harness.presentation import FLOURITE_THEME
 from frontier_harness.providers.fake import FakeProvider
+from frontier_harness.runtime.engine import KernelEngine
 
 
 class WorkerGate(FakeProvider):
@@ -188,18 +189,14 @@ def test_steer_is_admitted_once_after_inflight_work(tmp_path: Path, fake_config)
         events = engine.events()
         amended = [item for item in events if item.event_type == et.TASK_SOURCE_AMENDED]
         assert len(amended) == 1
-        action_done_seq = max(
-            item.seq for item in events if item.event_type == et.ACTION_COMPLETED
-        )
+        action_done_seq = max(item.seq for item in events if item.event_type == et.ACTION_COMPLETED)
         assert amended[0].seq > action_done_seq
         assert engine.state.metadata.get("steering_replan_pending") is None
     finally:
         engine.close()
 
 
-def test_pause_accepts_steer_then_resumes_without_losing_state(
-    tmp_path: Path, fake_config
-) -> None:
+def test_pause_accepts_steer_then_resumes_without_losing_state(tmp_path: Path, fake_config) -> None:
     provider = WorkerGate()
     engine = FrontierEngine.create(
         "Build an exact resumable answer.",
@@ -282,9 +279,10 @@ def test_control_receipt_reconciles_after_post_append_crash(tmp_path: Path, fake
         assert engine.control.commands()[0].status == CommandStatus.QUEUED
         assert asyncio.run(engine._control_boundary()) is False
         assert engine.control.commands()[0].status == CommandStatus.APPLIED
-        assert len(
-            [item for item in engine.events() if item.event_type == et.TASK_SOURCE_AMENDED]
-        ) == 1
+        assert (
+            len([item for item in engine.events() if item.event_type == et.TASK_SOURCE_AMENDED])
+            == 1
+        )
     finally:
         engine.close()
 
@@ -318,9 +316,7 @@ def test_nested_provider_work_is_projected_as_subagent_activity(
         asyncio.run(engine.execute())
         subagent_rows = [
             item
-            for item in engine.control.recent_activity(
-                limit=engine.control.MAX_ACTIVITY_ROWS
-            )
+            for item in engine.control.recent_activity(limit=engine.control.MAX_ACTIVITY_ROWS)
             if item.kind == "subagent"
         ]
         assert [(item.label, item.state, item.message) for item in subagent_rows[:3]] == [
@@ -335,7 +331,11 @@ def test_nested_provider_work_is_projected_as_subagent_activity(
 def test_live_dashboard_renders_dense_state_activity_and_controls(
     tmp_path: Path, fake_config
 ) -> None:
-    engine = FrontierEngine.create("Render the live operator surface.", config=fake_config())
+    engine = KernelEngine.create(
+        "Render the live operator surface.",
+        config=fake_config(),
+        adapter_name="generic",
+    )
     output = StringIO()
     console = Console(
         file=output,
@@ -353,7 +353,7 @@ def test_live_dashboard_renders_dense_state_activity_and_controls(
             message="model call started",
         )
         engine.control.enqueue(CommandKind.STEER, text="Retain the decisive evidence.")
-        dashboard = LiveDashboard(
+        dashboard = KernelLiveDashboard(
             run_dir=engine.run_dir,
             control=engine.control,
             console=console,
@@ -374,7 +374,11 @@ def test_live_dashboard_renders_dense_state_activity_and_controls(
 def test_live_dashboard_fits_a_narrow_pane_and_preserves_history_position(
     tmp_path: Path, fake_config
 ) -> None:
-    engine = FrontierEngine.create("Keep the live viewport usable.", config=fake_config())
+    engine = KernelEngine.create(
+        "Keep the live viewport usable.",
+        config=fake_config(),
+        adapter_name="generic",
+    )
     output = StringIO()
     console = Console(
         file=output,
@@ -392,7 +396,7 @@ def test_live_dashboard_fits_a_narrow_pane_and_preserves_history_position(
                 label=f"step-{index}",
                 message=f"activity {index}",
             )
-        dashboard = LiveDashboard(
+        dashboard = KernelLiveDashboard(
             run_dir=engine.run_dir,
             control=engine.control,
             console=console,
@@ -425,7 +429,11 @@ def test_live_dashboard_fits_a_narrow_pane_and_preserves_history_position(
 def test_live_dashboard_labels_a_dead_failed_controller_and_its_recovery(
     tmp_path: Path, fake_config
 ) -> None:
-    engine = FrontierEngine.create("Expose a recoverable failure.", config=fake_config())
+    engine = KernelEngine.create(
+        "Expose a recoverable failure.",
+        config=fake_config(),
+        adapter_name="generic",
+    )
     output = StringIO()
     console = Console(
         file=output,
@@ -443,8 +451,7 @@ def test_live_dashboard_labels_a_dead_failed_controller_and_its_recovery(
             detail="controller error",
         )
         state = engine.state.model_copy(deep=True)
-        state.runtime.bootstrap.error = "provider slice ended without a boundary"
-        dashboard = LiveDashboard(
+        dashboard = KernelLiveDashboard(
             run_dir=engine.run_dir,
             control=engine.control,
             console=console,
@@ -453,9 +460,7 @@ def test_live_dashboard_labels_a_dead_failed_controller_and_its_recovery(
         assert dashboard._effective_status(state, runtime) == "failed"
         console.print(dashboard._summary(state, runtime))
         rendered = output.getvalue()
-        assert "last error" in rendered
-        assert "provider slice ended without a boundary" in rendered
-        assert "press r" in rendered
+        assert "controller error" in rendered
 
         output.seek(0)
         output.truncate(0)
@@ -467,7 +472,7 @@ def test_live_dashboard_labels_a_dead_failed_controller_and_its_recovery(
         )
         console.print(dashboard._summary(state, runtime))
         rendered = output.getvalue()
-        assert "in progress" in rendered
-        assert "press r" not in rendered
+        assert dashboard._effective_status(state, runtime) == "running"
+        assert "recovering provider session" in rendered
     finally:
         engine.close()

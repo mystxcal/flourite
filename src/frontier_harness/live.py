@@ -10,6 +10,7 @@ import select
 import subprocess
 import sys
 import time
+from abc import ABC, abstractmethod
 from bisect import bisect_right
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,8 +27,6 @@ from rich.text import Text
 from .config import HarnessConfig
 from .control import CommandKind, RunControlPlane, RuntimeSnapshot, RuntimeStatus
 from .core.types import RunState as KernelRunState
-from .engine import FrontierEngine
-from .models import RunPhase, RunState
 from .presentation import brand, section_title
 from .runtime.engine import KernelEngine
 
@@ -145,7 +144,7 @@ def _short(value: str, limit: int) -> str:
     return clean if len(clean) <= limit else clean[: max(1, limit - 1)] + "…"
 
 
-class LiveDashboard:
+class LiveDashboard(ABC):
     """Full-screen, detachable view backed by durable run sidecars."""
 
     def __init__(
@@ -159,156 +158,44 @@ class LiveDashboard:
         self.control = control
         self.console = console
         self.config = HarnessConfig.model_validate_json(
-            (run_dir / FrontierEngine.CONFIG_FILE).read_text(encoding="utf-8")
+            (run_dir / KernelEngine.CONFIG_FILE).read_text(encoding="utf-8")
         )
         self.flash = "attached · controls are durable"
         self.stop_armed_until = 0.0
         self.activity_cursor: int | None = None
         self.activity_page_size = 1
 
-    def _state(self) -> Any:
-        return RunState.model_validate_json(
-            (self.run_dir / FrontierEngine.STATE_FILE).read_text(encoding="utf-8")
-        )
+    @abstractmethod
+    def _state(self) -> KernelRunState:
+        """Load the disposable projection rendered by this dashboard."""
 
     @staticmethod
-    def _terminal_label(state: Any) -> str | None:
-        if state.phase in {RunPhase.COMPLETE, RunPhase.FAILED}:
-            return str(state.phase.value)
-        return None
+    @abstractmethod
+    def _terminal_label(state: KernelRunState) -> str | None:
+        """Return a terminal label, if the run is terminal."""
 
     @staticmethod
-    def _effective_status(state: Any, runtime: RuntimeSnapshot) -> str:
-        if state.phase == RunPhase.COMPLETE:
-            return "complete"
-        if state.phase == RunPhase.FAILED:
-            return "failed"
-        if runtime.process_alive:
-            return runtime.status.value
-        if runtime.status == RuntimeStatus.FAILED:
-            return "failed"
-        if runtime.status == RuntimeStatus.STOPPED:
-            return "stopped"
-        return "resting"
+    @abstractmethod
+    def _effective_status(state: KernelRunState, runtime: RuntimeSnapshot) -> str:
+        """Resolve semantic and process state into one operator label."""
 
     @staticmethod
-    def _summary_row_count(state: Any) -> int:
-        return (
-            5
-            + int(bool(state.summit_active or state.discovery_records))
-            + int(bool(state.frontier_kernel))
-            + int(
-                bool(
-                    state.resource_state
-                    and state.resource_state.last_decision is not None
-                )
-            )
-            + int(bool(state.runtime.bootstrap.error))
-        )
+    @abstractmethod
+    def _summary_row_count(state: KernelRunState) -> int:
+        """Return the vertical size of the summary projection."""
 
-    def _summary(self, state: Any, runtime: RuntimeSnapshot) -> Table:
-        table = Table.grid(expand=True, padding=(0, 1))
-        table.add_column(style="flourite.muted", no_wrap=True)
-        table.add_column(style="flourite.ice")
-        table.add_column(style="flourite.muted", no_wrap=True)
-        table.add_column(style="flourite.ice", justify="right")
-        table.add_row(
-            "phase",
-            state.phase.value,
-            "runtime",
-            self._effective_status(state, runtime).replace("_", " "),
-        )
-        table.add_row(
-            "round",
-            str(state.round_index),
-            "elapsed",
-            _elapsed(runtime.started_at),
-        )
-        table.add_row(
-            "calls",
-            (
-                f"{state.usage.calls} used · {state.resource_state.active_call_limit} active · "
-                f"{state.resource_state.hard_call_limit} hard"
-                if state.resource_state and state.resource_state.mode == "adaptive"
-                else f"{state.usage.calls}/{self.config.run.budget.max_calls}"
-            ),
-            "model requests",
-            str(state.usage.model_requests),
-        )
-        table.add_row(
-            "tokens",
-            f"{state.usage.input_tokens:,} in · {state.usage.output_tokens:,} out",
-            "frontier",
-            f"{len(state.open_issues)} issues · {len(state.active_cruxes)} cruxes",
-        )
-        if state.summit_active or state.discovery_records:
-            table.add_row(
-                "summit",
-                f"{len(state.summit_lineages)} lineages",
-                "experiments",
-                (
-                    f"{sum(item.attempts for item in state.discovery_records.values())} tried · "
-                    f"{sum(item.productive_results for item in state.discovery_records.values())} productive"
-                ),
-            )
-        if state.frontier_kernel is not None:
-            table.add_row(
-                "frontier velocity",
-                (
-                    f"revision {state.frontier_kernel.revision} · "
-                    f"{state.frontier_kernel.stagnant_rounds} stagnant round(s)"
-                ),
-                "next",
-                _short(state.frontier_kernel.next_move or "—", 46),
-            )
-        if state.resource_state and state.resource_state.last_decision is not None:
-            decision = state.resource_state.last_decision
-            vector = decision.progress_vector
-            table.add_row(
-                "causal gradient",
-                (
-                    f"Q{vector.quality} · E{vector.epistemic} · "
-                    f"F{vector.feasibility} · X{vector.exploration} · R{vector.reliability}"
-                ),
-                "commitments",
-                str(decision.active_commitments),
-            )
-        table.add_row(
-            "controller", _short(runtime.detail or "—", 46), "pid", str(runtime.pid or "—")
-        )
-        if state.runtime.bootstrap.error:
-            table.add_row(
-                "last error",
-                _short(state.runtime.bootstrap.error, 46),
-                "recovery",
-                "in progress" if runtime.process_alive else "press r",
-            )
-        return table
+    @abstractmethod
+    def _summary(self, state: KernelRunState, runtime: RuntimeSnapshot) -> Table:
+        """Build the compact run summary."""
 
     @staticmethod
-    def _frontier(state: Any) -> Table:
-        table = Table(
-            box=box.SIMPLE,
-            show_edge=False,
-            expand=True,
-            padding=(0, 1),
-            header_style="flourite.blue",
-            border_style="flourite.line",
-        )
-        table.add_column("impact", width=8, no_wrap=True)
-        table.add_column("open frontier")
-        table.add_column("uncertainty", width=12, no_wrap=True)
-        if state.frontier_kernel is not None and state.frontier_kernel.bottleneck:
-            table.add_row(
-                "crux",
-                _short(state.frontier_kernel.bottleneck, 54),
-                f"rev {state.frontier_kernel.revision}",
-            )
-        for issue in state.open_issues[:8]:
-            table.add_row(issue.impact.value, _short(issue.title, 54), issue.uncertainty.value)
-        if not state.open_issues:
-            table.add_row("—", "no unresolved issue in the active frontier", "—")
-        return table
+    @abstractmethod
+    def _frontier(state: KernelRunState) -> Table:
+        """Build the live decision frontier."""
+
+    @abstractmethod
+    def _activity_limit(self, state: KernelRunState) -> int:
+        """Return the activity rows available at the current terminal size."""
 
     def _activity_rows(self, limit: int) -> list[Any]:
         rows = self.control.recent_activity(limit=self.control.MAX_ACTIVITY_ROWS)
@@ -378,15 +265,6 @@ class LiveDashboard:
             table.add_row("○", "—", "waiting", "activity appears as the controller works")
         return table
 
-    def _activity_limit(self, state: Any) -> int:
-        if self.console.width >= 110:
-            return max(1, self.console.height - 6)
-        summary_rows = self._summary_row_count(state)
-        frontier_rows = max(1, min(8, len(state.open_issues)))
-        command_rows = max(1, min(5, len(self.control.commands())))
-        fixed_rows = summary_rows + frontier_rows + command_rows + 14
-        return max(1, self.console.height - fixed_rows)
-
     def _commands(self) -> Table:
         table = Table.grid(expand=True, padding=(0, 1))
         table.add_column(width=8, style="flourite.dim", no_wrap=True)
@@ -424,9 +302,7 @@ class LiveDashboard:
             title=section_title("run state"),
             title_align="left",
             border_style=(
-                "flourite.error"
-                if runtime.status == RuntimeStatus.FAILED
-                else "flourite.line"
+                "flourite.error" if runtime.status == RuntimeStatus.FAILED else "flourite.line"
             ),
             box=box.ROUNDED,
         )
@@ -506,7 +382,7 @@ class LiveDashboard:
             keys.enable()
             live.start(refresh=True)
 
-    def _restart(self, state: Any, runtime: RuntimeSnapshot) -> None:
+    def _restart(self, state: KernelRunState, runtime: RuntimeSnapshot) -> None:
         terminal = self._terminal_label(state)
         if terminal is not None:
             self.flash = f"run is {terminal}"
@@ -557,68 +433,79 @@ class LiveDashboard:
                 key = keys.read(0.25)
                 if key is None:
                     continue
-                if key == "q":
+                if self._handle_key(key, live=live, keys=keys):
                     return
-                if key == "s":
-                    self._prompt_steer(live, keys)
-                    continue
-                if key in {"up", "k"}:
-                    self._scroll_activity(-1)
-                    continue
-                if key in {"down", "j"}:
-                    self._scroll_activity(1)
-                    continue
-                if key == "pageup":
-                    self._scroll_activity(-self.activity_page_size)
-                    continue
-                if key == "pagedown":
-                    self._scroll_activity(self.activity_page_size)
-                    continue
-                if key == "home":
-                    self._scroll_activity(-self.control.MAX_ACTIVITY_ROWS)
-                    continue
-                if key == "end":
-                    self.activity_cursor = None
-                    self.flash = "following live activity"
-                    continue
-                state = self._state()
-                runtime = self.control.runtime()
-                if key == "p":
-                    terminal = self._terminal_label(state)
-                    if terminal is not None:
-                        self.flash = f"run is {terminal}"
-                    elif runtime.process_alive and runtime.status == RuntimeStatus.PAUSED:
-                        try:
-                            self.control.enqueue(CommandKind.RESUME)
-                            self.flash = "resume queued"
-                        except ValueError as exc:
-                            self.flash = str(exc)
-                    elif runtime.process_alive:
-                        try:
-                            self.control.enqueue(CommandKind.PAUSE)
-                            self.flash = "pause queued · applies at the next safe boundary"
-                        except ValueError as exc:
-                            self.flash = str(exc)
-                    else:
-                        self.flash = "controller is resting · press r to restart"
-                elif key == "r":
-                    self._restart(state, runtime)
-                elif key == "x":
-                    terminal = self._terminal_label(state)
-                    if terminal is not None:
-                        self.flash = f"run is {terminal}"
-                        continue
-                    now = time.monotonic()
-                    if now <= self.stop_armed_until:
-                        try:
-                            self.control.enqueue(CommandKind.STOP)
-                            self.stop_armed_until = 0.0
-                            self.flash = "stop queued · durable state will remain resumable"
-                        except ValueError as exc:
-                            self.flash = str(exc)
-                    else:
-                        self.stop_armed_until = now + 3.0
-                        self.flash = "press x again within 3 seconds to stop"
+
+    def _handle_key(self, key: str, *, live: Live, keys: KeyReader) -> bool:
+        if key == "q":
+            return True
+        if key == "s":
+            self._prompt_steer(live, keys)
+            return False
+        if self._handle_scroll(key):
+            return False
+        state = self._state()
+        runtime = self.control.runtime()
+        if key == "p":
+            self._toggle_pause(state, runtime)
+        elif key == "r":
+            self._restart(state, runtime)
+        elif key == "x":
+            self._stop(state)
+        return False
+
+    def _handle_scroll(self, key: str) -> bool:
+        distance = {
+            "up": -1,
+            "k": -1,
+            "down": 1,
+            "j": 1,
+            "pageup": -self.activity_page_size,
+            "pagedown": self.activity_page_size,
+            "home": -self.control.MAX_ACTIVITY_ROWS,
+        }.get(key)
+        if distance is not None:
+            self._scroll_activity(distance)
+            return True
+        if key == "end":
+            self.activity_cursor = None
+            self.flash = "following live activity"
+            return True
+        return False
+
+    def _toggle_pause(self, state: KernelRunState, runtime: RuntimeSnapshot) -> None:
+        terminal = self._terminal_label(state)
+        if terminal is not None:
+            self.flash = f"run is {terminal}"
+        elif not runtime.process_alive:
+            self.flash = "controller is resting · press r to restart"
+        elif runtime.status == RuntimeStatus.PAUSED:
+            self._enqueue(CommandKind.RESUME, "resume queued")
+        else:
+            self._enqueue(
+                CommandKind.PAUSE,
+                "pause queued · applies at the next safe boundary",
+            )
+
+    def _stop(self, state: KernelRunState) -> None:
+        terminal = self._terminal_label(state)
+        if terminal is not None:
+            self.flash = f"run is {terminal}"
+            return
+        now = time.monotonic()
+        if now > self.stop_armed_until:
+            self.stop_armed_until = now + 3.0
+            self.flash = "press x again within 3 seconds to stop"
+            return
+        self.stop_armed_until = 0.0
+        self._enqueue(CommandKind.STOP, "stop queued · durable state will remain resumable")
+
+    def _enqueue(self, kind: CommandKind, success: str) -> None:
+        try:
+            self.control.enqueue(kind)
+            self.flash = success
+        except ValueError as exc:
+            self.flash = str(exc)
 
 
 class KernelLiveDashboard(LiveDashboard):
@@ -761,15 +648,12 @@ def open_live_dashboard(
     run_root: Path | None,
     console: Console,
 ) -> LiveDashboard:
-    run_dir = FrontierEngine.resolve_run_dir(run_ref, run_root=run_root)
-    manifest = json.loads((run_dir / FrontierEngine.MANIFEST_FILE).read_text(encoding="utf-8"))
+    run_dir = KernelEngine.resolve_run_dir(run_ref, run_root=run_root)
+    manifest = json.loads((run_dir / KernelEngine.MANIFEST_FILE).read_text(encoding="utf-8"))
+    if manifest.get("architecture") != KernelEngine.ARCHITECTURE:
+        raise ValueError("flourite live supports canonical kernel runs only")
     control = RunControlPlane(
-        run_dir / FrontierEngine.CONTROL_FILE,
+        run_dir / KernelEngine.CONTROL_FILE,
         str(manifest["run_id"]),
     )
-    dashboard_type = (
-        KernelLiveDashboard
-        if manifest.get("architecture") == KernelEngine.ARCHITECTURE
-        else LiveDashboard
-    )
-    return dashboard_type(run_dir=run_dir, control=control, console=console)
+    return KernelLiveDashboard(run_dir=run_dir, control=control, console=console)

@@ -37,6 +37,7 @@ from ..locking import RunLock
 from ..models import ArtifactRef
 from ..providers import OmpCodexProvider, build_provider
 from ..util import atomic_write_text, utc_now
+from .activity import ProviderActivity
 from .sources import StagedInput, load_sources, stage_sources
 
 
@@ -389,42 +390,15 @@ class KernelEngine:
                 self.control.mark_command(command.command_id, CommandStatus.REJECTED, str(exc))
 
     def _record_provider_activity(self, event: dict[str, object]) -> None:
-        event_type = str(event.get("type") or "provider")
-        label = "model"
-        message = "model activity"
-        state = "active"
-        action_id = None
-        if event_type == "session":
-            label = "session"
-            message = "model context opened"
-        elif event_type == "tool_execution_start":
-            label = str(event.get("toolName") or "tool")
-            intent = " ".join(str(event.get("intent") or "").split())
-            message = intent[:180] or "tool started"
-            action_id = str(event.get("toolCallId") or "") or None
-        elif event_type == "tool_execution_end":
-            label = str(event.get("toolName") or "tool")
-            failed = bool(event.get("isError"))
-            message = "tool failed" if failed else "tool completed"
-            state = "warn" if failed else "done"
-            action_id = str(event.get("toolCallId") or "") or None
-        elif event_type == "subagent_activity":
-            label = str(event.get("agent") or "subagent")
-            message = " ".join(str(event.get("message") or "reported progress").split())[:180]
-            candidate_state = str(event.get("state") or "active")
-            state = candidate_state if candidate_state in {"active", "done", "warn"} else "active"
-        elif event_type == "message_end":
-            label = "model"
-            message = "model returned a move boundary"
-            state = "done"
-        else:
+        activity = ProviderActivity.from_event(event)
+        if activity is None:
             return
         self.control.record_activity(
-            kind=f"provider.{event_type}",
-            label=label,
-            message=message,
-            state=state,
-            action_id=action_id,
+            kind=f"provider.{activity.kind}",
+            label=activity.label,
+            message=activity.message,
+            state=activity.state,
+            action_id=activity.action_id,
         )
 
     def _publish_events(self, *, after_seq: int) -> None:
@@ -501,7 +475,9 @@ class KernelEngine:
             blob=artifact.content_ref,
             kind=str(artifact.metadata.get("kind", self.adapter.artifact_kind)),
             summary=workspace.summary if workspace is not None else "current artifact",
-            parent_artifact_id=(artifact.parent_artifact_ids[0] if artifact.parent_artifact_ids else None),
+            parent_artifact_id=(
+                artifact.parent_artifact_ids[0] if artifact.parent_artifact_ids else None
+            ),
             source_action_ids=[artifact.created_by_move_id],
             deliverables=artifact.deliverables,
             created_at=artifact.created_at,

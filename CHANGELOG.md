@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Split typed move-result compilation from all-or-nothing state transition validation, so provider output cannot partially mutate canonical state.
+- Reduced the canonical runtime's maximum cyclomatic complexity from 85 to 15 and removed every canonical routine above 20 without changing the model-facing contract.
+- Rebuilt OMP execution around explicit call, attempt, trace, safe-event, and diagnostic components while preserving retries, usage accounting, and session continuity.
+- Made the public CLI and live dashboard canonical-only; the retired controller is now lazy-loaded solely by the hidden `legacy-run` comparison command.
+- Added adversarial aggregate-transition coverage for identity, ownership, lineage, digest, workspace, continuation, finish-claim, blocker, rollback, and exact replay invariants.
+
 ## 0.6.0 — 2026-08-24
 
 - Added `flourite live`, an attachable full-screen view of run phase, budget, frontier, sanitized model/tool activity, and operator-command receipts.

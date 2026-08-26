@@ -22,8 +22,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, NoReturn, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -37,8 +38,9 @@ from .base import (
     ProviderCallResult,
     ProviderDoctorResult,
     ProviderTraceSummary,
-    ToolCallSummary,
 )
+from .safe_events import safe_event as _safe_event
+from .trace import trace_summary as _trace_summary
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
@@ -157,279 +159,6 @@ class CodexAuth:
         return new_access
 
 
-def _safe_event(event: dict[str, Any]) -> dict[str, Any] | None:
-    """Keep diagnostic signal while dropping encrypted/provider replay payloads."""
-
-    def safe_label(value: Any, *, fallback: str) -> str:
-        label = " ".join(str(value or "").split())[:80]
-        return label or fallback
-
-    def argument_summary(value: Any, *, tool_name: str = "") -> dict[str, Any]:
-        keys = sorted(value) if isinstance(value, dict) else []
-        summary: dict[str, Any] = {
-            "sha256": sha256_text(canonical_json(value)),
-            "keys": keys,
-        }
-        if tool_name == "task" and isinstance(value, dict):
-            task_names: list[str] = []
-            for item in value.get("tasks", []):
-                if not isinstance(item, dict):
-                    continue
-                task_names.append(safe_label(item.get("name"), fallback="subagent"))
-            if task_names:
-                summary["task_names"] = list(dict.fromkeys(task_names))[:16]
-        return summary
-
-    def result_summary(value: Any) -> dict[str, Any]:
-        summary: dict[str, Any] = {"sha256": sha256_text(canonical_json(value))}
-        if not isinstance(value, dict):
-            return summary
-        content_summary: list[dict[str, Any]] = []
-        for block in value.get("content", []):
-            if not isinstance(block, dict):
-                continue
-            text = block.get("text")
-            item: dict[str, Any] = {"type": str(block.get("type") or "unknown")}
-            if isinstance(text, str):
-                item.update(
-                    {
-                        "bytes": len(text.encode()),
-                        "sha256": sha256_text(text),
-                    }
-                )
-            content_summary.append(item)
-        if content_summary:
-            summary["content"] = content_summary
-        details = value.get("details")
-        if not isinstance(details, dict):
-            return summary
-        safe_details: dict[str, Any] = {}
-        for key in ("wallTimeMs", "totalDurationMs", "usage", "async"):
-            if key in details:
-                safe_details[key] = details[key]
-        results = []
-        for item in details.get("results", []):
-            if not isinstance(item, dict):
-                continue
-            result_item = {
-                key: item[key]
-                for key in (
-                    "id",
-                    "agent",
-                    "agentSource",
-                    "modelRole",
-                    "resolvedModel",
-                    "requests",
-                    "tokens",
-                    "durationMs",
-                    "exitCode",
-                    "aborted",
-                    "truncated",
-                    "usage",
-                )
-                if key in item
-            }
-            if "output" in item:
-                result_item["outputSha256"] = sha256_text(str(item["output"]))
-            results.append(result_item)
-        if results:
-            safe_details["results"] = results
-        if safe_details:
-            summary["details"] = safe_details
-        return summary
-
-    event_type = event.get("type")
-    if event_type == "session":
-        return {key: event.get(key) for key in ("type", "version", "id", "timestamp", "cwd")}
-    if event_type == "custom_message" and event.get("customType") == "irc:incoming":
-        details = event.get("details")
-        if not isinstance(details, dict):
-            return None
-        raw_message = str(details.get("message") or "").strip().casefold()
-        if raw_message.startswith(("completed", "finished", "done")):
-            state, status_message = "done", "completed assigned work"
-        elif raw_message.startswith(("failed", "error")):
-            state, status_message = "warn", "reported a failure"
-        else:
-            state, status_message = "active", "reported progress"
-        return {
-            "type": "subagent_activity",
-            "agent": safe_label(details.get("from"), fallback="subagent"),
-            "state": state,
-            "message": status_message,
-        }
-    if event_type == "tool_execution_start":
-        arguments = event.get("args", {})
-        tool_name = str(event.get("toolName") or "")
-        return {
-            "type": event_type,
-            "toolCallId": event.get("toolCallId"),
-            "toolName": tool_name,
-            "arguments": argument_summary(arguments, tool_name=tool_name),
-            "intent": event.get("intent", ""),
-        }
-    if event_type == "tool_execution_end":
-        result = event.get("result", {})
-        return {
-            "type": event_type,
-            "toolCallId": event.get("toolCallId"),
-            "toolName": event.get("toolName"),
-            "result": result_summary(result),
-            "isError": bool(event.get("isError", False)),
-        }
-    if event_type != "message_end":
-        return None
-    message = event.get("message")
-    if not isinstance(message, dict) or message.get("role") != "assistant":
-        return None
-    content: list[dict[str, Any]] = []
-    for block in message.get("content", []):
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "text":
-            content.append({"type": "text", "text": block.get("text", "")})
-        elif block.get("type") == "thinking":
-            content.append({"type": "thinking", "thinking": block.get("thinking", "")})
-        elif block.get("type") == "toolCall":
-            arguments = block.get("arguments", {})
-            tool_name = str(block.get("name") or "")
-            content.append(
-                {
-                    "type": "toolCall",
-                    "id": block.get("id"),
-                    "name": tool_name,
-                    "arguments": argument_summary(arguments, tool_name=tool_name),
-                    "intent": block.get("intent", ""),
-                }
-            )
-    return {
-        "type": "message_end",
-        "message": {
-            "role": "assistant",
-            "content": content,
-            "usage": message.get("usage", {}),
-            "stopReason": message.get("stopReason"),
-            "model": message.get("model"),
-            "provider": message.get("provider"),
-            "responseId": message.get("responseId"),
-        },
-    }
-
-
-def _trace_summary(events: list[dict[str, Any]]) -> ProviderTraceSummary:
-    calls: dict[str, ToolCallSummary] = {}
-    model_turns = 0
-    stop_reason: str | None = None
-    for event in events:
-        event_type = event.get("type")
-        if event_type == "message_end":
-            message = event.get("message")
-            if not isinstance(message, dict):
-                continue
-            model_turns += 1
-            if isinstance(message.get("stopReason"), str):
-                stop_reason = str(message["stopReason"])
-            for block in message.get("content", []):
-                if not isinstance(block, dict) or block.get("type") != "toolCall":
-                    continue
-                call_id = str(block.get("id") or "")
-                if not call_id:
-                    continue
-                arguments = block.get("arguments", {})
-                argument_hash = (
-                    str(arguments.get("sha256"))
-                    if isinstance(arguments, dict) and arguments.get("sha256")
-                    else sha256_text(canonical_json(arguments))
-                )
-                calls[call_id] = ToolCallSummary(
-                    call_id=call_id,
-                    name=str(block.get("name") or "unknown"),
-                    intent=str(block.get("intent") or ""),
-                    arguments_sha256=argument_hash,
-                )
-        elif event_type == "tool_execution_start":
-            call_id = str(event.get("toolCallId") or "")
-            if not call_id:
-                continue
-            arguments = event.get("arguments", event.get("args", {}))
-            argument_hash = (
-                str(arguments.get("sha256"))
-                if isinstance(arguments, dict) and arguments.get("sha256")
-                else sha256_text(canonical_json(arguments))
-            )
-            current = calls.get(call_id)
-            calls[call_id] = ToolCallSummary(
-                call_id=call_id,
-                name=str(event.get("toolName") or (current.name if current else "unknown")),
-                intent=str(event.get("intent") or (current.intent if current else "")),
-                arguments_sha256=argument_hash,
-            )
-        elif event_type == "tool_execution_end":
-            call_id = str(event.get("toolCallId") or "")
-            if not call_id:
-                continue
-            current = calls.get(call_id) or ToolCallSummary(
-                call_id=call_id,
-                name=str(event.get("toolName") or "unknown"),
-            )
-            result = event.get("result", {})
-            details = result.get("details", {}) if isinstance(result, dict) else {}
-            duration = (
-                details.get("wallTimeMs", details.get("totalDurationMs"))
-                if isinstance(details, dict)
-                else None
-            )
-            nested_raw = details.get("usage", {}) if isinstance(details, dict) else {}
-            nested_calls = 0
-            nested_results = details.get("results", []) if isinstance(details, dict) else []
-            if isinstance(nested_results, list):
-                nested_calls = sum(
-                    int(item.get("requests", 0) or 0)
-                    for item in nested_results
-                    if isinstance(item, dict)
-                )
-            nested_usage = Usage(
-                model_requests=nested_calls,
-                input_tokens=int(nested_raw.get("input", 0) or 0)
-                if isinstance(nested_raw, dict)
-                else 0,
-                cached_input_tokens=int(nested_raw.get("cacheRead", 0) or 0)
-                if isinstance(nested_raw, dict)
-                else 0,
-                output_tokens=int(nested_raw.get("output", 0) or 0)
-                if isinstance(nested_raw, dict)
-                else 0,
-                reasoning_output_tokens=int(nested_raw.get("reasoningTokens", 0) or 0)
-                if isinstance(nested_raw, dict)
-                else 0,
-            )
-            calls[call_id] = current.model_copy(
-                update={
-                    "success": not bool(event.get("isError", False)),
-                    "duration_ms": float(duration) if isinstance(duration, (int, float)) else None,
-                    "result_sha256": (
-                        str(result.get("sha256"))
-                        if isinstance(result, dict) and result.get("sha256")
-                        else sha256_text(canonical_json(result))
-                    ),
-                    "nested_usage": nested_usage,
-                }
-            )
-    ordered = list(calls.values())
-    nested_usage = Usage()
-    for item in ordered:
-        nested_usage = nested_usage.plus(item.nested_usage)
-    return ProviderTraceSummary(
-        model_turns=model_turns + nested_usage.model_requests,
-        parent_model_turns=model_turns,
-        nested_model_turns=nested_usage.model_requests,
-        nested_usage=nested_usage,
-        tool_calls=ordered,
-        tool_errors=sum(item.success is False for item in ordered),
-        stop_reason=stop_reason,
-    )
-
-
 def _context_inventory(workspace: Path) -> dict[str, dict[str, int | str]]:
     """Hash the explicit model-facing context, never ambient host files."""
 
@@ -468,6 +197,146 @@ def _context_delta(
         "removed": removed,
         "unchanged": unchanged,
     }
+
+
+@dataclass(slots=True)
+class PreparedOmpCall:
+    request: ProviderCallRequest[Any]
+    effective_prompt: str
+    session_dir: Path
+    omp_cwd: Path
+    agent_dir: Path
+    overlay_path: Path
+    raw_events_path: Path
+    stderr_path: Path
+    manifest_path: Path
+    context_state_path: Path
+    context_inventory: dict[str, dict[str, int | str]]
+    manifest: dict[str, Any]
+    started: float
+    attempt_limit: int
+    session_resumable: bool
+
+    def duration(self) -> float:
+        return time.monotonic() - self.started
+
+
+@dataclass(slots=True)
+class OmpAttempt:
+    number: int
+    return_code: int | None
+    safe_command: list[str]
+    stderr: str = ""
+    events: list[dict[str, Any]] = field(default_factory=list)
+    final_message: dict[str, Any] | None = None
+    usage: Usage = field(default_factory=Usage)
+    thread_id: str | None = None
+    timed_out: bool = False
+
+    @property
+    def trace(self) -> ProviderTraceSummary:
+        return _trace_summary(self.events)
+
+    @property
+    def raw_final(self) -> str:
+        if self.final_message is None:
+            return ""
+        blocks = self.final_message.get("content", [])
+        return "\n".join(
+            str(block.get("text", ""))
+            for block in blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+
+
+@dataclass(slots=True)
+class OmpCallState:
+    thread_id: str | None
+    usage: Usage = field(default_factory=Usage)
+    last_safe_command: list[str] = field(default_factory=list)
+    validation_error: str | None = None
+    continuation_note: str | None = None
+    resumed_within_call: bool = False
+    events: list[dict[str, Any]] = field(default_factory=list)
+    stderr: list[str] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
+
+    def absorb(self, attempt: OmpAttempt) -> None:
+        self.last_safe_command = attempt.safe_command
+        self.thread_id = attempt.thread_id or self.thread_id
+        self.events.extend({"attempt": attempt.number, "event": event} for event in attempt.events)
+        self.stderr.append(f"--- attempt {attempt.number} ---\n{attempt.stderr}")
+        if not attempt.timed_out:
+            self.usage = self.usage.plus(attempt.usage)
+            self.usage.calls += 1
+
+    def trace(self) -> ProviderTraceSummary:
+        return _trace_summary([cast(dict[str, Any], item["event"]) for item in self.events])
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptDecision:
+    status: str
+    diagnostic_status: str
+    record: dict[str, Any]
+    retry: bool = False
+    response: BaseModel | None = None
+    error: str | None = None
+    continuation_note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorProbe:
+    """One immutable compatibility observation of the installed OMP transport."""
+
+    version: str | None
+    version_code: int
+    models_code: int
+    available_models: frozenset[str]
+    missing_models: tuple[str, ...]
+    missing_tools: tuple[str, ...]
+    configured_tool_count: int
+    contained: bool
+    sandbox_ready: bool
+
+    @property
+    def ok(self) -> bool:
+        return all(
+            (
+                self.version_code == 0,
+                self.models_code == 0,
+                bool(self.available_models),
+                not self.missing_models,
+                not self.missing_tools,
+                self.sandbox_ready,
+            )
+        )
+
+    def details(self) -> list[str]:
+        details = [
+            "ChatGPT OAuth is readable through the explicit OMP Codex transport.",
+            f"Codex catalog exposed {len(self.available_models)} compatible model(s).",
+            f"OMP accepted all {self.configured_tool_count} configured tool capability name(s).",
+            (
+                "Contained capability mode is active with a reduced tool and filesystem surface."
+                if self.contained
+                else "Trusted-host capability mode is active with yolo approval and the VM/VPS as the execution boundary."
+            ),
+            "The provider-facing system prompt remains empty; harness context is explicit per call.",
+        ]
+        if self.version_code != 0 or self.models_code != 0 or not self.available_models:
+            details.append("OMP could not resolve a usable openai-codex model catalog.")
+        if self.missing_models:
+            details.append(f"Configured model(s) are unavailable: {', '.join(self.missing_models)}")
+        if self.missing_tools:
+            details.append(
+                "Configured OMP tool(s) are unavailable: " + ", ".join(self.missing_tools)
+            )
+        if not self.sandbox_ready:
+            details.append(
+                "Bubblewrap is required while provider.capabilities.mode is 'contained'."
+            )
+        return details
 
 
 class OmpCodexProvider(ModelProvider):
@@ -544,81 +413,63 @@ class OmpCodexProvider(ModelProvider):
         if self._doctor_result is not None:
             return self._doctor_result
         if shutil.which(self.config.command) is None:
-            self._doctor_result = ProviderDoctorResult(
-                ok=False,
-                provider="omp-codex",
-                auth_mode="chatgpt",
-                details=["OMP is not installed. Install it, then rerun `flourite doctor`."],
+            self._doctor_result = self._doctor_failure(
+                "OMP is not installed. Install it, then rerun flourite doctor."
             )
             return self._doctor_result
         try:
-            token = self.auth.access_token()
-            version_code, version = await self._run_short(["--version"], token=token)
-            models_code, models_raw = await self._run_short(
-                ["models", "openai-codex", "--json", "--no-extensions"], token=token
-            )
-            models = json.loads(models_raw).get("models", []) if models_code == 0 else []
-            available = {
-                item.get("id")
-                for item in models
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            }
-            configured = {
-                (route.model or self.config.default_model).removeprefix("openai-codex/")
-                for route in (
-                    self.config.strong,
-                    self.config.worker,
-                    self.config.cheap,
-                )
-            }
-            missing = sorted(configured - available)
-            supported_tools = await self._supported_tools(token=token)
-            missing_tools = sorted(set(self.config.capabilities.tools) - supported_tools)
-            contained = self.config.capabilities.mode == "contained"
-            sandbox_ready = not contained or shutil.which("bwrap") is not None
-            ok = (
-                version_code == 0
-                and models_code == 0
-                and bool(available)
-                and not missing
-                and not missing_tools
-                and sandbox_ready
-            )
-            details = [
-                "ChatGPT OAuth is readable through the explicit OMP Codex transport.",
-                f"Codex catalog exposed {len(available)} compatible model(s).",
-                f"OMP accepted all {len(self.config.capabilities.tools)} configured tool capability name(s).",
-                (
-                    "Trusted-host capability mode is active with yolo approval and the VM/VPS as the execution boundary."
-                    if not contained
-                    else "Contained capability mode is active with a reduced tool and filesystem surface."
-                ),
-                "The provider-facing system prompt remains empty; harness context is explicit per call.",
-            ]
-            if version_code != 0 or models_code != 0 or not available:
-                details.append("OMP could not resolve a usable openai-codex model catalog.")
-            if missing:
-                details.append(f"Configured model(s) are unavailable: {', '.join(missing)}")
-            if missing_tools:
-                details.append(
-                    "Configured OMP tool(s) are unavailable: " + ", ".join(missing_tools)
-                )
-            if not sandbox_ready:
-                details.append(
-                    "Bubblewrap is required while provider.capabilities.mode is 'contained'."
-                )
+            probe = await self._doctor_probe()
         except (ProviderError, json.JSONDecodeError) as exc:
-            version = None
-            ok = False
-            details = [str(exc)]
+            self._doctor_result = self._doctor_failure(str(exc))
+            return self._doctor_result
         self._doctor_result = ProviderDoctorResult(
-            ok=ok,
+            ok=probe.ok,
             provider="omp-codex",
-            version=version if isinstance(version, str) else None,
+            version=probe.version,
             auth_mode="chatgpt",
-            details=details,
+            details=probe.details(),
         )
         return self._doctor_result
+
+    @staticmethod
+    def _doctor_failure(message: str) -> ProviderDoctorResult:
+        return ProviderDoctorResult(
+            ok=False,
+            provider="omp-codex",
+            auth_mode="chatgpt",
+            details=[message],
+        )
+
+    async def _doctor_probe(self) -> DoctorProbe:
+        token = self.auth.access_token()
+        version_code, version = await self._run_short(["--version"], token=token)
+        models_code, raw_models = await self._run_short(
+            ["models", "openai-codex", "--json", "--no-extensions"],
+            token=token,
+        )
+        models = json.loads(raw_models).get("models", []) if models_code == 0 else []
+        available = frozenset(
+            item["id"]
+            for item in models
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        )
+        configured = {
+            (route.model or self.config.default_model).removeprefix("openai-codex/")
+            for route in (self.config.strong, self.config.worker, self.config.cheap)
+        }
+        supported_tools = await self._supported_tools(token=token)
+        contained = self.config.capabilities.mode == "contained"
+        return DoctorProbe(
+            version=version if isinstance(version, str) else None,
+            version_code=version_code,
+            models_code=models_code,
+            available_models=available,
+            missing_models=tuple(sorted(configured - available)),
+            missing_tools=tuple(sorted(set(self.config.capabilities.tools) - supported_tools)),
+            configured_tool_count=len(self.config.capabilities.tools),
+            contained=contained,
+            sandbox_ready=not contained or shutil.which("bwrap") is not None,
+        )
 
     async def _supported_tools(self, *, token: str) -> set[str]:
         """Ask the installed OMP binary to validate the configured tool surface.
@@ -990,6 +841,35 @@ class OmpCodexProvider(ModelProvider):
         return stdout, stderr
 
     async def run(self, request: ProviderCallRequest[ResponseT]) -> ProviderCallResult[ResponseT]:
+        call = await self._prepare_call(request)
+        state = OmpCallState(thread_id=request.resume_thread_id)
+        for number in range(1, call.attempt_limit + 1):
+            attempt = await self._execute_attempt(call, state, number)
+            state.absorb(attempt)
+            decision = self._decide_attempt(call, attempt)
+            state.records.append(decision.record)
+            state.validation_error = decision.error
+            state.continuation_note = decision.continuation_note
+            self._write_call_diagnostics(
+                call,
+                state,
+                status=decision.diagnostic_status,
+                error=decision.error,
+            )
+            if decision.response is not None:
+                return cast(
+                    ProviderCallResult[ResponseT],
+                    self._successful_call(call, state, attempt, decision.response),
+                )
+            if decision.retry:
+                continue
+            self._raise_attempt_failure(call, state, attempt)
+        self._raise_schema_failure(call, state)
+
+    async def _prepare_call(
+        self,
+        request: ProviderCallRequest[Any],
+    ) -> PreparedOmpCall:
         doctor = await self.doctor()
         if not doctor.ok:
             raise ProviderError("; ".join(doctor.details))
@@ -997,6 +877,7 @@ class OmpCodexProvider(ModelProvider):
         request.output_path.parent.mkdir(parents=True, exist_ok=True)
         schema = request.response_model.model_json_schema()
         atomic_write_text(request.schema_path, canonical_json(schema))
+
         session_dir = (
             Path(
                 request.metadata.get(
@@ -1009,70 +890,146 @@ class OmpCodexProvider(ModelProvider):
         session_dir.mkdir(parents=True, exist_ok=True)
         context_inventory = _context_inventory(request.cwd.resolve())
         context_state_path = session_dir / "lead-context-state.json"
-        prior_inventory: dict[str, dict[str, int | str]] = {}
-        if request.resume_thread_id and context_state_path.exists():
-            try:
-                raw_previous = json.loads(context_state_path.read_text(encoding="utf-8"))
-                if isinstance(raw_previous, dict):
-                    prior_inventory = {
-                        str(path): cast(dict[str, int | str], value)
-                        for path, value in raw_previous.items()
-                        if isinstance(value, dict)
-                    }
-            except (OSError, json.JSONDecodeError):
-                prior_inventory = {}
-        context_delta = _context_delta(context_inventory, prior_inventory)
-        delta_note = ""
-        if request.resume_thread_id:
-            changed_paths = [*context_delta["added"], *context_delta["changed"]]
-            delta_note = (
-                "<frontier_context_delta>\n"
-                f"Changed or added since the last successful Lead epoch: "
-                f"{', '.join(changed_paths) if changed_paths else '(none)'}.\n"
-                f"Removed: {', '.join(context_delta['removed']) if context_delta['removed'] else '(none)'}.\n"
-                f"Unchanged explicit context files: {len(context_delta['unchanged'])}. "
-                "Their hashes match the prior epoch; do not reread them reflexively. "
-                "Use session memory, but reread any unchanged file when its exact content is load-bearing.\n"
-                "</frontier_context_delta>\n\n"
-            )
+        context_delta = _context_delta(
+            context_inventory,
+            self._prior_context(request, context_state_path),
+        )
+        effective_prompt = self._effective_prompt(
+            request,
+            schema=schema,
+            context_delta=context_delta,
+        )
+        omp_cwd = self._provider_cwd(request, session_dir)
+        omp_cwd.mkdir(parents=True, exist_ok=True)
+        agent_dir = session_dir / "agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        overlay_path = request.output_path.parent / "omp-runtime.json"
+        runtime_overlay = self._runtime_overlay(request)
+        atomic_write_text(
+            overlay_path,
+            json.dumps(runtime_overlay, indent=2, sort_keys=True),
+        )
+        manifest_path = request.output_path.parent / "context-manifest.json"
+        manifest = self._call_manifest(
+            request,
+            doctor_version=doctor.version,
+            context_inventory=context_inventory,
+            context_delta=context_delta,
+            effective_prompt=effective_prompt,
+            omp_cwd=omp_cwd,
+            runtime_overlay=runtime_overlay,
+        )
+        atomic_write_text(manifest_path, json.dumps(manifest, indent=2, sort_keys=True))
+        return PreparedOmpCall(
+            request=request,
+            effective_prompt=effective_prompt,
+            session_dir=session_dir,
+            omp_cwd=omp_cwd,
+            agent_dir=agent_dir,
+            overlay_path=overlay_path,
+            raw_events_path=request.output_path.parent / "provider-events.jsonl",
+            stderr_path=request.output_path.parent / "provider-stderr.log",
+            manifest_path=manifest_path,
+            context_state_path=context_state_path,
+            context_inventory=context_inventory,
+            manifest=manifest,
+            started=time.monotonic(),
+            attempt_limit=min(self.config.schema_attempts, request.max_provider_calls),
+            session_resumable=bool(request.preserve_session or request.resume_thread_id),
+        )
+
+    @staticmethod
+    def _prior_context(
+        request: ProviderCallRequest[Any],
+        context_state_path: Path,
+    ) -> dict[str, dict[str, int | str]]:
+        if not request.resume_thread_id or not context_state_path.exists():
+            return {}
+        try:
+            value = json.loads(context_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(path): cast(dict[str, int | str], item)
+            for path, item in value.items()
+            if isinstance(item, dict)
+        }
+
+    @staticmethod
+    def _effective_prompt(
+        request: ProviderCallRequest[Any],
+        *,
+        schema: dict[str, Any],
+        context_delta: dict[str, list[str]],
+    ) -> str:
+        delta_note = OmpCodexProvider._context_delta_note(request, context_delta)
         workspace_prefix = (
             f"<frontier_workspace>{request.cwd.resolve()}</frontier_workspace>\n"
             "Treat that explicit directory as the sole task workspace for this call. "
-            "Use the absolute paths in the prompt; do not infer files from the provider session directory.\n\n"
-            + delta_note
+            "Use the absolute paths in the prompt; do not infer files from the provider "
+            "session directory.\n\n" + delta_note
         )
-        boundary_suffix = (
+        boundary = (
             "\n\n<frontier_boundary>\nReturn exactly one JSON object and no Markdown. "
             "It must validate against this JSON Schema:\n"
             f"{canonical_json(schema)}\n</frontier_boundary>"
         )
-        effective_prompt = workspace_prefix + request.prompt + boundary_suffix
+        return workspace_prefix + request.prompt + boundary
+
+    @staticmethod
+    def _context_delta_note(
+        request: ProviderCallRequest[Any],
+        context_delta: dict[str, list[str]],
+    ) -> str:
+        if not request.resume_thread_id:
+            return ""
+        changed = [*context_delta["added"], *context_delta["changed"]]
+        return (
+            "<frontier_context_delta>\n"
+            "Changed or added since the last successful Lead epoch: "
+            f"{', '.join(changed) if changed else '(none)'}.\n"
+            f"Removed: {', '.join(context_delta['removed']) if context_delta['removed'] else '(none)'}.\n"
+            f"Unchanged explicit context files: {len(context_delta['unchanged'])}. "
+            "Their hashes match the prior epoch; do not reread them reflexively. "
+            "Use session memory, but reread any unchanged file when its exact content "
+            "is load-bearing.\n"
+            "</frontier_context_delta>\n\n"
+        )
+
+    @staticmethod
+    def _provider_cwd(request: ProviderCallRequest[Any], session_dir: Path) -> Path:
         if request.preserve_session or request.resume_thread_id:
-            omp_cwd = (
+            return (
                 Path(request.metadata.get("provider_lead_cwd", session_dir / "lead-workspace"))
                 .expanduser()
                 .resolve()
             )
-        else:
-            omp_cwd = request.cwd.resolve()
-        omp_cwd.mkdir(parents=True, exist_ok=True)
-        agent_dir = session_dir / "agent"
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        overlay_path = request.output_path.parent / "omp-runtime.json"
-        runtime_overlay = self._runtime_overlay(request)
-        atomic_write_text(overlay_path, json.dumps(runtime_overlay, indent=2, sort_keys=True))
-        raw_events_path = request.output_path.parent / "provider-events.jsonl"
-        stderr_path = request.output_path.parent / "provider-stderr.log"
-        manifest_path = request.output_path.parent / "context-manifest.json"
+        return request.cwd.resolve()
+
+    def _call_manifest(
+        self,
+        request: ProviderCallRequest[Any],
+        *,
+        doctor_version: str | None,
+        context_inventory: dict[str, dict[str, int | str]],
+        context_delta: dict[str, list[str]],
+        effective_prompt: str,
+        omp_cwd: Path,
+        runtime_overlay: dict[str, Any],
+    ) -> dict[str, Any]:
         route = self.config.route(request.role)
-        manifest = {
+        tools = self._tool_names(request)
+        return {
             "version": 2,
             "provider": "openai-codex",
             "transport": "omp-openai-codex-responses",
-            "transport_version": doctor.version,
+            "transport_version": doctor_version,
             "system_messages": [],
             "developer_messages": [],
-            "tools": self._tool_names(request),
+            "tools": tools,
             "context_files": context_inventory,
             "context_delta": context_delta,
             "capabilities": {
@@ -1089,9 +1046,9 @@ class OmpCodexProvider(ModelProvider):
                 "contract_sha256": sha256_text(
                     canonical_json(
                         {
-                            "tools": self._tool_names(request),
+                            "tools": tools,
                             "runtime_overlay": runtime_overlay,
-                            "transport_version": doctor.version,
+                            "transport_version": doctor_version,
                         }
                     )
                 ),
@@ -1106,7 +1063,9 @@ class OmpCodexProvider(ModelProvider):
                 "sha256": sha256_text(effective_prompt),
                 "bytes": len(effective_prompt.encode()),
             },
-            "schema_sha256": sha256_text(canonical_json(schema)),
+            "schema_sha256": sha256_text(
+                canonical_json(request.response_model.model_json_schema())
+            ),
             "images": [
                 {
                     "name": path.name,
@@ -1120,7 +1079,7 @@ class OmpCodexProvider(ModelProvider):
                 "rules": self.config.capabilities.discover_rules,
                 "skills": self.config.capabilities.discover_skills,
                 "extensions": self.config.capabilities.discover_extensions,
-                "lsp": "lsp" in self._tool_names(request),
+                "lsp": "lsp" in tools,
             },
             "sandbox": request.sandbox.value,
             "network_requested": request.network_access,
@@ -1130,290 +1089,376 @@ class OmpCodexProvider(ModelProvider):
             "max_provider_calls": request.max_provider_calls,
             "outcome": {"status": "running", "attempts": []},
         }
-        atomic_write_text(manifest_path, json.dumps(manifest, indent=2, sort_keys=True))
 
-        started = time.monotonic()
-        total_usage = Usage()
-        last_safe_command: list[str] = []
-        last_thread_id: str | None = request.resume_thread_id
-        validation_error: str | None = None
-        continuation_note: str | None = None
-        session_resumable = bool(request.preserve_session or request.resume_thread_id)
-        resumed_within_call = False
-        retained_events: list[dict[str, Any]] = []
-        retained_stderr: list[str] = []
-        attempt_records: list[dict[str, Any]] = []
+    async def _execute_attempt(
+        self,
+        call: PreparedOmpCall,
+        state: OmpCallState,
+        number: int,
+    ) -> OmpAttempt:
+        prompt = self._attempt_prompt(call.effective_prompt, state)
+        request = self._attempt_request(
+            call.request,
+            state,
+            session_resumable=call.session_resumable,
+        )
+        command, safe_command = self._command(
+            request,
+            effective_prompt=prompt,
+            session_dir=call.session_dir,
+            omp_cwd=call.omp_cwd,
+            overlay_path=call.overlay_path,
+        )
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._environment(
+                token=self.auth.access_token(),
+                agent_dir=call.agent_dir,
+            ),
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                self._stream_process(process, call.request.activity_callback),
+                timeout=self.config.timeout_seconds + 30,
+            )
+        except asyncio.CancelledError:
+            await self._terminate(process)
+            raise
+        except TimeoutError:
+            await self._terminate(process)
+            return OmpAttempt(
+                number=number,
+                return_code=process.returncode,
+                safe_command=safe_command,
+                thread_id=state.thread_id,
+                timed_out=True,
+            )
+        return self._decode_attempt(
+            number,
+            return_code=process.returncode,
+            safe_command=safe_command,
+            stdout=stdout,
+            stderr=stderr,
+            prior_thread_id=state.thread_id,
+        )
 
-        def write_diagnostics(*, status: str, error: str | None = None) -> None:
-            duration = time.monotonic() - started
-            manifest["outcome"] = {
-                "status": status,
-                "attempts": attempt_records,
-                "usage": total_usage.model_dump(mode="json"),
-                "wall_seconds": duration,
-                "error": error,
-            }
-            atomic_write_text(manifest_path, json.dumps(manifest, indent=2, sort_keys=True))
-            atomic_write_text(
-                raw_events_path,
-                "".join(canonical_json(event) + "\n" for event in retained_events),
+    @staticmethod
+    def _attempt_prompt(base: str, state: OmpCallState) -> str:
+        prompt = base
+        if state.continuation_note:
+            prompt += f"\n\n{state.continuation_note}"
+        if state.validation_error:
+            prompt += (
+                "\n\nYour previous boundary object was invalid. Return a corrected "
+                "JSON object only. Validation error: "
+                f"{state.validation_error[:2000]}"
             )
-            atomic_write_text(stderr_path, "\n".join(retained_stderr))
+        return prompt
 
-        attempt_limit = min(self.config.schema_attempts, request.max_provider_calls)
-        for attempt in range(1, attempt_limit + 1):
-            attempt_prompt = effective_prompt
-            if continuation_note:
-                attempt_prompt += f"\n\n{continuation_note}"
-            if validation_error:
-                attempt_prompt += (
-                    "\n\nYour previous boundary object was invalid. Return a corrected JSON object only. "
-                    f"Validation error: {validation_error[:2000]}"
-                )
-            if session_resumable and last_thread_id and last_thread_id != request.resume_thread_id:
-                attempt_request = request.model_copy(
-                    update={"resume_thread_id": last_thread_id, "preserve_session": True}
-                )
-                resumed_within_call = True
-            else:
-                attempt_request = request
-            command, safe_command = self._command(
-                attempt_request,
-                effective_prompt=attempt_prompt,
-                session_dir=session_dir,
-                omp_cwd=omp_cwd,
-                overlay_path=overlay_path,
+    @staticmethod
+    def _attempt_request(
+        request: ProviderCallRequest[Any],
+        state: OmpCallState,
+        *,
+        session_resumable: bool,
+    ) -> ProviderCallRequest[Any]:
+        if session_resumable and state.thread_id and state.thread_id != request.resume_thread_id:
+            state.resumed_within_call = True
+            return request.model_copy(
+                update={"resume_thread_id": state.thread_id, "preserve_session": True}
             )
-            last_safe_command = safe_command
-            token = self.auth.access_token()
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._environment(token=token, agent_dir=agent_dir),
-                start_new_session=True,
-            )
+        return request
+
+    def _decode_attempt(
+        self,
+        number: int,
+        *,
+        return_code: int | None,
+        safe_command: list[str],
+        stdout: bytes,
+        stderr: bytes,
+        prior_thread_id: str | None,
+    ) -> OmpAttempt:
+        events: list[dict[str, Any]] = []
+        final_message: dict[str, Any] | None = None
+        usage = Usage()
+        thread_id = prior_thread_id
+        for raw_line in stdout.splitlines():
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    self._stream_process(process, request.activity_callback),
-                    timeout=self.config.timeout_seconds + 30,
-                )
-            except asyncio.CancelledError:
-                await self._terminate(process)
-                raise
-            except TimeoutError as exc:
-                await self._terminate(process)
-                duration = time.monotonic() - started
-                total_usage.wall_seconds = duration
-                attempt_records.append(
-                    {"attempt": attempt, "status": "timeout", "return_code": process.returncode}
-                )
-                write_diagnostics(status="error", error="provider timeout")
-                raise ProviderCallError(
-                    f"OMP Codex call {request.call_id} timed out after {duration:.1f}s",
-                    usage=total_usage,
-                    raw_events_path=raw_events_path,
-                    stderr_path=stderr_path,
-                    command=safe_command,
-                    trace_summary=_trace_summary(
-                        [cast(dict[str, Any], item["event"]) for item in retained_events]
-                    ).model_dump(mode="json"),
-                    boundary_attempts=len(attempt_records),
-                    thread_id=last_thread_id,
-                ) from exc
-            stderr_text = stderr.decode(errors="replace")
-            retained_stderr.append(f"--- attempt {attempt} ---\n{stderr_text}")
-            safe_events: list[dict[str, Any]] = []
-            final_message: dict[str, Any] | None = None
-            attempt_usage = Usage()
-            for raw_line in stdout.splitlines():
-                try:
-                    event = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    continue
-                if event.get("type") == "session" and isinstance(event.get("id"), str):
-                    last_thread_id = event["id"]
-                safe_event = _safe_event(event)
-                if safe_event:
-                    safe_events.append({"attempt": attempt, "event": safe_event})
-                    if safe_event.get("type") == "message_end":
-                        message = cast(dict[str, Any], safe_event["message"])
-                        attempt_usage = attempt_usage.plus(self._usage(message, wall_seconds=0.0))
-                        if any(
-                            isinstance(block, dict) and block.get("type") == "text"
-                            for block in message.get("content", [])
-                        ):
-                            final_message = message
-            retained_events.extend(safe_events)
-            attempt_trace = _trace_summary(
-                [cast(dict[str, Any], item["event"]) for item in safe_events]
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "session" and isinstance(event.get("id"), str):
+                thread_id = event["id"]
+            safe_event = _safe_event(event)
+            if safe_event is None:
+                continue
+            events.append(safe_event)
+            if safe_event.get("type") == "message_end":
+                message = cast(dict[str, Any], safe_event["message"])
+                usage = usage.plus(self._usage(message, wall_seconds=0.0))
+                if self._has_text(message):
+                    final_message = message
+        trace = _trace_summary(events)
+        return OmpAttempt(
+            number=number,
+            return_code=return_code,
+            safe_command=safe_command,
+            stderr=stderr.decode(errors="replace"),
+            events=events,
+            final_message=final_message,
+            usage=usage.plus(trace.nested_usage),
+            thread_id=thread_id,
+        )
+
+    @staticmethod
+    def _has_text(message: dict[str, Any]) -> bool:
+        return any(
+            isinstance(block, dict) and block.get("type") == "text"
+            for block in message.get("content", [])
+        )
+
+    def _decide_attempt(
+        self,
+        call: PreparedOmpCall,
+        attempt: OmpAttempt,
+    ) -> AttemptDecision:
+        trace = attempt.trace
+        base = self._attempt_record(attempt)
+        if attempt.timed_out:
+            return AttemptDecision(
+                status="timeout",
+                diagnostic_status="error",
+                error="provider timeout",
+                record={**base, "status": "timeout"},
             )
-            attempt_usage = attempt_usage.plus(attempt_trace.nested_usage)
-            duration = time.monotonic() - started
-            total_usage = total_usage.plus(attempt_usage)
-            total_usage.calls += 1
-            if (
-                process.returncode == 0
-                and final_message is None
-                and session_resumable
-                and last_thread_id
-                and attempt < attempt_limit
-            ):
-                attempt_records.append(
-                    {
-                        "attempt": attempt,
-                        "status": "execution_slice_exhausted",
-                        "return_code": process.returncode,
-                        "thread_id": last_thread_id,
-                        "model_turns": attempt_trace.model_turns,
-                        "tool_calls": len(attempt_trace.tool_calls),
-                        "tool_errors": attempt_trace.tool_errors,
-                    }
-                )
-                continuation_note = (
-                    "The previous execution slice ended before you returned the required "
-                    "boundary object. Continue the same session and preserve all work already "
-                    "present in the explicit workspace. Do not restart research or open new "
-                    "delegations. Close the current small unit, verify the workspace, write the "
-                    "required artifact summary, and return the required JSON boundary now. "
-                    "Unfinished improvements belong in actions for later harness rounds."
-                )
-                validation_error = None
-                write_diagnostics(status="continuing")
-                continue
-            if process.returncode != 0 or final_message is None:
-                attempt_records.append(
-                    {
-                        "attempt": attempt,
-                        "status": "provider_error",
-                        "return_code": process.returncode,
-                        "model_turns": attempt_trace.model_turns,
-                        "tool_calls": len(attempt_trace.tool_calls),
-                        "tool_errors": attempt_trace.tool_errors,
-                    }
-                )
-                total_usage.wall_seconds = duration
-                write_diagnostics(status="error", error="provider process failed")
-                tail = stderr_text[-3000:].strip()
-                failure = (
-                    f"exited with {process.returncode}"
-                    if process.returncode != 0
-                    else "ended without a boundary response"
-                )
-                raise ProviderCallError(
-                    f"OMP Codex call {request.call_id} {failure}" + (f": {tail}" if tail else ""),
-                    usage=total_usage,
-                    raw_events_path=raw_events_path,
-                    stderr_path=stderr_path,
-                    command=safe_command,
-                    trace_summary=_trace_summary(
-                        [cast(dict[str, Any], item["event"]) for item in retained_events]
-                    ).model_dump(mode="json"),
-                    boundary_attempts=len(attempt_records),
-                    thread_id=last_thread_id,
-                )
-            text_blocks = [
-                str(block.get("text", ""))
-                for block in final_message.get("content", [])
-                if isinstance(block, dict) and block.get("type") == "text"
-            ]
-            raw_final = "\n".join(text_blocks).strip()
-            atomic_write_text(request.output_path, raw_final)
-            atomic_write_text(
-                request.output_path.with_name(
-                    f"{request.output_path.stem}.attempt-{attempt}{request.output_path.suffix}"
-                ),
-                raw_final,
+        if (
+            attempt.return_code == 0
+            and attempt.final_message is None
+            and call.session_resumable
+            and attempt.thread_id
+            and attempt.number < call.attempt_limit
+        ):
+            return AttemptDecision(
+                status="execution_slice_exhausted",
+                diagnostic_status="continuing",
+                retry=True,
+                continuation_note=self._slice_continuation(),
+                record={
+                    **base,
+                    "status": "execution_slice_exhausted",
+                    "thread_id": attempt.thread_id,
+                },
             )
-            stop_reason = (attempt_trace.stop_reason or "").casefold()
-            if stop_reason in {"length", "max_tokens", "token_limit", "output_limit"}:
-                validation_error = (
-                    f"provider stopped at its output limit ({attempt_trace.stop_reason}); "
-                    "the boundary is not accepted even if defaults make it schema-valid"
-                )
-                attempt_records.append(
-                    {
-                        "attempt": attempt,
-                        "status": "output_limit",
-                        "return_code": process.returncode,
-                        "output_sha256": sha256_text(raw_final),
-                        "stop_reason": attempt_trace.stop_reason,
-                        "model_turns": attempt_trace.model_turns,
-                        "tool_calls": len(attempt_trace.tool_calls),
-                        "tool_errors": attempt_trace.tool_errors,
-                    }
-                )
-                continuation_note = (
-                    "The previous response hit its output limit and is not an accepted boundary. "
-                    "Preserve the completed workspace work, compress commentary, and return the "
-                    "complete required JSON object now. Do not restart the task."
-                )
-                write_diagnostics(status="retrying", error=validation_error)
-                continue
-            try:
-                response = request.response_model.model_validate(_extract_json_object(raw_final))
-            except (ValidationError, ProviderError) as exc:
-                validation_error = str(exc)
-                attempt_records.append(
-                    {
-                        "attempt": attempt,
-                        "status": "schema_invalid",
-                        "return_code": process.returncode,
-                        "output_sha256": sha256_text(raw_final),
-                        "validation_error": validation_error[:2000],
-                        "model_turns": attempt_trace.model_turns,
-                        "tool_calls": len(attempt_trace.tool_calls),
-                        "tool_errors": attempt_trace.tool_errors,
-                    }
-                )
-                write_diagnostics(status="retrying", error=validation_error[:2000])
-                continue
-            attempt_records.append(
-                {
-                    "attempt": attempt,
-                    "status": "valid",
-                    "return_code": process.returncode,
+        if attempt.return_code != 0 or attempt.final_message is None:
+            return AttemptDecision(
+                status="provider_error",
+                diagnostic_status="error",
+                error="provider process failed",
+                record={**base, "status": "provider_error"},
+            )
+
+        raw_final = attempt.raw_final
+        self._write_attempt_output(call.request, attempt.number, raw_final)
+        stop_reason = (trace.stop_reason or "").casefold()
+        if stop_reason in {"length", "max_tokens", "token_limit", "output_limit"}:
+            error = (
+                f"provider stopped at its output limit ({trace.stop_reason}); "
+                "the boundary is not accepted even if defaults make it schema-valid"
+            )
+            return AttemptDecision(
+                status="output_limit",
+                diagnostic_status="retrying",
+                retry=True,
+                error=error,
+                continuation_note=self._output_continuation(),
+                record={
+                    **base,
+                    "status": "output_limit",
                     "output_sha256": sha256_text(raw_final),
-                    "model_turns": attempt_trace.model_turns,
-                    "tool_calls": len(attempt_trace.tool_calls),
-                    "tool_errors": attempt_trace.tool_errors,
-                }
+                    "stop_reason": trace.stop_reason,
+                },
             )
-            total_usage.wall_seconds = duration
-            write_diagnostics(status="success")
-            if request.preserve_session or request.resume_thread_id:
-                atomic_write_text(
-                    context_state_path,
-                    json.dumps(context_inventory, indent=2, sort_keys=True),
-                )
-            return ProviderCallResult(
-                call_id=request.call_id,
-                response=response,
-                usage=total_usage,
-                duration_seconds=duration,
-                return_code=0,
-                boundary_attempts=len(attempt_records),
-                thread_id=last_thread_id,
-                resumed=bool(request.resume_thread_id or resumed_within_call),
-                raw_events_path=raw_events_path,
-                stderr_path=stderr_path,
-                command=safe_command,
-                trace_summary=_trace_summary(
-                    [cast(dict[str, Any], item["event"]) for item in retained_events]
-                ),
+        try:
+            response = call.request.response_model.model_validate(_extract_json_object(raw_final))
+        except (ValidationError, ProviderError) as exc:
+            error = str(exc)
+            return AttemptDecision(
+                status="schema_invalid",
+                diagnostic_status="retrying",
+                retry=True,
+                error=error,
+                record={
+                    **base,
+                    "status": "schema_invalid",
+                    "output_sha256": sha256_text(raw_final),
+                    "validation_error": error[:2000],
+                },
             )
-        duration = time.monotonic() - started
-        total_usage.wall_seconds = duration
-        write_diagnostics(status="error", error=validation_error)
+        return AttemptDecision(
+            status="valid",
+            diagnostic_status="success",
+            response=response,
+            record={
+                **base,
+                "status": "valid",
+                "output_sha256": sha256_text(raw_final),
+            },
+        )
+
+    @staticmethod
+    def _attempt_record(attempt: OmpAttempt) -> dict[str, Any]:
+        trace = attempt.trace
+        return {
+            "attempt": attempt.number,
+            "return_code": attempt.return_code,
+            "model_turns": trace.model_turns,
+            "tool_calls": len(trace.tool_calls),
+            "tool_errors": trace.tool_errors,
+        }
+
+    @staticmethod
+    def _slice_continuation() -> str:
+        return (
+            "The previous execution slice ended before you returned the required "
+            "boundary object. Continue the same session and preserve all work already "
+            "present in the explicit workspace. Do not restart research or open new "
+            "delegations. Close the current small unit, verify the workspace, write the "
+            "required artifact summary, and return the required JSON boundary now. "
+            "Unfinished improvements belong in actions for later harness rounds."
+        )
+
+    @staticmethod
+    def _output_continuation() -> str:
+        return (
+            "The previous response hit its output limit and is not an accepted boundary. "
+            "Preserve the completed workspace work, compress commentary, and return the "
+            "complete required JSON object now. Do not restart the task."
+        )
+
+    @staticmethod
+    def _write_attempt_output(
+        request: ProviderCallRequest[Any],
+        number: int,
+        raw_final: str,
+    ) -> None:
+        atomic_write_text(request.output_path, raw_final)
+        atomic_write_text(
+            request.output_path.with_name(
+                f"{request.output_path.stem}.attempt-{number}{request.output_path.suffix}"
+            ),
+            raw_final,
+        )
+
+    @staticmethod
+    def _write_call_diagnostics(
+        call: PreparedOmpCall,
+        state: OmpCallState,
+        *,
+        status: str,
+        error: str | None,
+    ) -> None:
+        call.manifest["outcome"] = {
+            "status": status,
+            "attempts": state.records,
+            "usage": state.usage.model_dump(mode="json"),
+            "wall_seconds": call.duration(),
+            "error": error,
+        }
+        atomic_write_text(
+            call.manifest_path,
+            json.dumps(call.manifest, indent=2, sort_keys=True),
+        )
+        atomic_write_text(
+            call.raw_events_path,
+            "".join(canonical_json(event) + "\n" for event in state.events),
+        )
+        atomic_write_text(call.stderr_path, "\n".join(state.stderr))
+
+    def _successful_call(
+        self,
+        call: PreparedOmpCall,
+        state: OmpCallState,
+        attempt: OmpAttempt,
+        response: BaseModel,
+    ) -> ProviderCallResult[Any]:
+        duration = call.duration()
+        state.usage.wall_seconds = duration
+        self._write_call_diagnostics(call, state, status="success", error=None)
+        if call.session_resumable:
+            atomic_write_text(
+                call.context_state_path,
+                json.dumps(call.context_inventory, indent=2, sort_keys=True),
+            )
+        return ProviderCallResult(
+            call_id=call.request.call_id,
+            response=response,
+            usage=state.usage,
+            duration_seconds=duration,
+            return_code=0,
+            boundary_attempts=len(state.records),
+            thread_id=state.thread_id,
+            resumed=bool(call.request.resume_thread_id or state.resumed_within_call),
+            raw_events_path=call.raw_events_path,
+            stderr_path=call.stderr_path,
+            command=attempt.safe_command,
+            trace_summary=state.trace(),
+        )
+
+    def _raise_attempt_failure(
+        self,
+        call: PreparedOmpCall,
+        state: OmpCallState,
+        attempt: OmpAttempt,
+    ) -> NoReturn:
+        duration = call.duration()
+        state.usage.wall_seconds = duration
+        if attempt.timed_out:
+            message = f"OMP Codex call {call.request.call_id} timed out after {duration:.1f}s"
+        else:
+            tail = attempt.stderr[-3000:].strip()
+            failure = (
+                f"exited with {attempt.return_code}"
+                if attempt.return_code != 0
+                else "ended without a boundary response"
+            )
+            message = f"OMP Codex call {call.request.call_id} {failure}"
+            if tail:
+                message += f": {tail}"
         raise ProviderCallError(
-            f"OMP Codex output failed the boundary schema after {attempt_limit} attempt(s): {validation_error}",
-            usage=total_usage,
-            raw_events_path=raw_events_path,
-            stderr_path=stderr_path,
-            command=last_safe_command,
-            trace_summary=_trace_summary(
-                [cast(dict[str, Any], item["event"]) for item in retained_events]
-            ).model_dump(mode="json"),
-            boundary_attempts=len(attempt_records),
-            thread_id=last_thread_id,
+            message,
+            usage=state.usage,
+            raw_events_path=call.raw_events_path,
+            stderr_path=call.stderr_path,
+            command=attempt.safe_command,
+            trace_summary=state.trace().model_dump(mode="json"),
+            boundary_attempts=len(state.records),
+            thread_id=state.thread_id,
+        )
+
+    def _raise_schema_failure(
+        self,
+        call: PreparedOmpCall,
+        state: OmpCallState,
+    ) -> NoReturn:
+        state.usage.wall_seconds = call.duration()
+        self._write_call_diagnostics(
+            call,
+            state,
+            status="error",
+            error=state.validation_error,
+        )
+        raise ProviderCallError(
+            "OMP Codex output failed the boundary schema after "
+            f"{call.attempt_limit} attempt(s): {state.validation_error}",
+            usage=state.usage,
+            raw_events_path=call.raw_events_path,
+            stderr_path=call.stderr_path,
+            command=state.last_safe_command,
+            trace_summary=state.trace().model_dump(mode="json"),
+            boundary_attempts=len(state.records),
+            thread_id=state.thread_id,
         )

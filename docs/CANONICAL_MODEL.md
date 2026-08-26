@@ -101,7 +101,8 @@ The transition law is deliberately plain:
 ```text
 contextₜ = lens(O, Wₜ, Aₜ, relevant(Eₜ), Tₜ, recent(Mₜ), Uₜ)
 resultₜ  = intelligent_move(contextₜ, full_capability_plane)
-Xₜ₊₁    = atomic_reduce(Xₜ, resultₜ)
+eventₜ   = compile(resultₜ, exact live state)
+Xₜ₊₁    = atomic_transition(Xₜ, eventₜ)
 ```
 
 A result may contain:
@@ -114,9 +115,12 @@ A result may contain:
 - a finish claim or a genuine external blocker;
 - actual usage and failure residue.
 
-Those pieces are one semantic fact. `move.applied` commits all of them in a
-single ledger transaction. If validation or persistence fails, none becomes
-authoritative. Retrying the same move is idempotent.
+`MoveResultCompiler` turns the model/tool result into that one semantic fact;
+it does not mutate state. `AtomicMoveTransition` validates identity, ownership,
+lineage, digests, compare-and-swap, continuations, and terminal intent before
+performing one mutation. `move.applied` then commits the complete fact in a
+single ledger transaction. If compilation, validation, or persistence fails,
+nothing becomes authoritative. Retrying the same move is idempotent.
 
 This boundary is the core reliability primitive. Provider activity, tool calls,
 and transcripts are useful evidence, but none is progress until the resulting
@@ -215,8 +219,11 @@ reconstructible from the journal.
 | Component | Owns | Must not own |
 | --- | --- | --- |
 | `IntelligenceKernel` | Next legal move, stagnation response, completion transition, envelope truth | Provider mechanics or domain semantics |
-| `KernelJournal` + reducer | Atomic append, legal replay, derived state | Model judgment or I/O policy |
+| `MoveResultCompiler` | Translate one typed execution result into one complete transaction plan | Mutating run state |
+| `AtomicMoveTransition` | Aggregate invariants and all-or-nothing state mutation | Provider or model behavior |
+| `KernelJournal` + reducer | Atomic append, event dispatch, legal replay, derived state | Model judgment or I/O policy |
 | `OmpMoveRunner` | Context materialization, provider call, typed boundary, session recovery | Global state transitions |
+| OMP provider | Transport attempts, schema retry, safe telemetry, exact usage | Search policy or semantic progress |
 | Adapter | Artifact capture, direct checks, materialization, explicit apply | Universal search policy |
 | `KernelEngine` | Run lifecycle, commands, locks, activity, source staging | Deciding what an observation means |
 | Blob store | Immutable bytes and digest verification | Semantic authority |
@@ -226,9 +233,10 @@ The implementation maps directly to these boundaries:
 
 ```text
 src/frontier_harness/
-  core/          types · reducer · journal · intelligence kernel
-  intelligence/ context lens · OMP runner · typed result contracts
-  runtime/       lifecycle · commands · sources · materialization
+  core/          types · atomic transition · reducer · journal · intelligence kernel
+  intelligence/ context lens · OMP runner · result compiler · typed contracts
+  providers/     OMP transport · safe event projection · trace accounting
+  runtime/       lifecycle · commands · typed activity · sources · materialization
   adapters/      domain observation and artifact behavior
   live.py        disposable operator projection
 ```
@@ -243,8 +251,9 @@ src/frontier_harness/
 - a second completion path outside the canonical reducer;
 - hidden resource grants that can strand unused operator compute.
 
-The old controller remains loadable for historical runs and controlled
-comparison. New `flourite run` executions use this kernel.
+The old controller remains available only through the hidden `legacy-run`
+compatibility command for controlled comparisons. Ordinary commands neither
+import it nor branch through its state model.
 
 ## Open frontier
 
