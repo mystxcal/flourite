@@ -192,12 +192,12 @@ class ResourceGovernor:
         reserve = 1
         if self.release_expected:
             reserve += 1
-            repairs_used = int(state.metadata.get("repair_count", 0))
+            repairs_used = state.runtime.release.repair_count
             material_risk = (
                 state.current_artifact is None
                 or bool(state.release_blocking_obligations)
                 or bool(state.high_impact_open_issues)
-                or state.metadata.get("semantic_ci_passed") is not True
+                or state.runtime.verification.semantic_ci_passed is not True
                 or bool(
                     state.release
                     and (state.release.requires_repair or not state.release.releaseable)

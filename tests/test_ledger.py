@@ -22,6 +22,7 @@ def test_ledger_is_append_only_and_hash_chained(tmp_path: Path) -> None:
         assert count == 2
         assert second.previous_hash == first.event_hash
         assert last_hash == second.event_hash
+        assert first.event_schema_version == 2
 
         connection = sqlite3.connect(path)
         try:
@@ -31,6 +32,71 @@ def test_ledger_is_append_only_and_hash_chained(tmp_path: Path) -> None:
             connection.close()
     finally:
         ledger.close()
+
+
+def test_append_validation_failure_rolls_back_event(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite3"
+    ledger = EventLedger(path, "run_test")
+    try:
+        first = ledger.append("run.created", {"value": 1})
+
+        def reject(_: object) -> None:
+            raise ValueError("invalid transition")
+
+        with pytest.raises(ValueError, match="invalid transition"):
+            ledger.append("action.started", {"value": 2}, validate=reject)
+
+        assert ledger.count() == 1
+        assert ledger.last_event() == first
+        assert ledger.verify() == (1, first.event_hash)
+    finally:
+        ledger.close()
+
+
+def test_existing_v1_ledger_migrates_without_changing_hashes(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite3"
+    ledger = EventLedger(path, "run_test")
+    try:
+        first = ledger.append("run.created", {"value": 1})
+    finally:
+        ledger.close()
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("DROP TRIGGER events_no_update")
+        connection.execute("DROP TRIGGER events_no_delete")
+        connection.execute("UPDATE events SET event_schema_version = 1")
+        legacy_material = json.dumps(
+            {
+                "action_id": first.action_id,
+                "actor": first.actor,
+                "event_id": first.event_id,
+                "event_type": first.event_type,
+                "payload_hash": first.payload_hash,
+                "previous_hash": first.previous_hash,
+                "run_id": first.run_id,
+                "timestamp": first.timestamp,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        import hashlib
+
+        legacy_hash = hashlib.sha256(legacy_material.encode("utf-8")).hexdigest()
+        connection.execute("UPDATE events SET event_hash = ?", (legacy_hash,))
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened = EventLedger(path, "run_test")
+    try:
+        assert reopened.verify() == (1, legacy_hash)
+        event = reopened.last_event()
+        assert event is not None
+        assert event.event_schema_version == 1
+    finally:
+        reopened.close()
 
 
 def test_hash_verification_detects_payload_tampering(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ from .models import (
     BudgetContract,
     CandidateDelta,
     CandidateStatus,
+    CheckStageState,
     CompletionCase,
     Crux,
     DiscoveryRecord,
@@ -32,6 +33,7 @@ from .models import (
     ObligationStatus,
     Probe,
     ReleaseOutput,
+    ReleaseRecovery,
     ResourceState,
     RunPhase,
     RunState,
@@ -48,12 +50,172 @@ from .models import (
 
 
 class StateReducer:
+    _LEGACY_RUNTIME_KEYS = frozenset(
+        {
+            "processed_control_ids",
+            "steering_replan_pending",
+            "bootstrap_error",
+            "bootstrap_artifact_scope",
+            "bootstrap_independent_checkpoint_required",
+            "bootstrap_recovery_artifact",
+            "bootstrap_recovery_thread_id",
+            "bootstrap_recovery_error",
+            "frame_breaks",
+            "clean_synthesis_needed",
+            "checkpoint_error",
+            "extension_replan_pending",
+            "release_replan_pending",
+            "frontier_replan_pending",
+            "frontier_replan_fingerprints",
+            "remaining_uncertainty",
+            "release_gate_recommended",
+            "finalization_error",
+            "verification_replan_pending",
+            "verification_replan_decision",
+            "verification_dead_end",
+            "release_rejection_fingerprints",
+            "release_error",
+            "repair_completed",
+            "repair_count",
+            "repair_remaining_uncertainty",
+            "repair_error",
+            "semantic_ci_passed",
+            "semantic_ci_gaps",
+            "semantic_ci_deterministic_failures",
+            "semantic_ci_adjudication",
+            "extension_count",
+            "extension",
+            "control_status",
+            "control_detail",
+            "resource_decision",
+            "resource_extension_recommended",
+            "repair_loop_stop",
+            "release_reopened_obligations",
+            "release_recovery_history",
+            "output_path",
+            "deliverable_paths",
+            "deterministic_checks_run",
+            "deterministic_checks_passed",
+            "release_required",
+            "release_gate_run",
+            "release_gate_succeeded",
+            "release_report_releaseable",
+            "release_gate_passed",
+            "releaseable",
+            "release_finding_count",
+            "mutation_gate_passed",
+            "mutation_gate_block_reason",
+            "source_apply_blocked_reason",
+            "apply_result",
+            "patch_applied",
+        }
+    )
+
+    @classmethod
+    def _sync_legacy_metadata(cls, state: RunState) -> None:
+        """Maintain a derived read mirror while callers migrate to typed state."""
+
+        for key in cls._LEGACY_RUNTIME_KEYS:
+            state.metadata.pop(key, None)
+        for stage in state.runtime.verification.stages:
+            for suffix in ("artifact_digest", "failed", "failures"):
+                state.metadata.pop(f"{stage}_check_{suffix}", None)
+
+        bootstrap = state.runtime.bootstrap
+        control = state.runtime.control
+        verification = state.runtime.verification
+        planning = state.runtime.planning
+        release = state.runtime.release
+        resources = state.runtime.resources
+        extension = state.runtime.extension
+        completion = state.runtime.completion
+
+        state.metadata.update(
+            {
+                "bootstrap_artifact_scope": bootstrap.artifact_scope,
+                "processed_control_ids": list(control.processed_command_ids),
+                "control_status": control.status,
+                "control_detail": control.detail,
+                "verification_replan_pending": verification.replan_pending,
+                "semantic_ci_gaps": list(verification.semantic_ci_gaps),
+                "frontier_replan_fingerprints": list(
+                    planning.frontier_replan_fingerprints
+                ),
+                "clean_synthesis_needed": planning.clean_synthesis_needed,
+                "remaining_uncertainty": list(release.remaining_uncertainty),
+                "release_gate_recommended": release.gate_recommended,
+                "repair_count": release.repair_count,
+                "repair_completed": release.repair_completed,
+                "release_rejection_fingerprints": list(
+                    release.rejection_fingerprints
+                ),
+                "release_reopened_obligations": list(
+                    release.reopened_obligation_ids
+                ),
+                "release_recovery_history": [
+                    item.model_dump(mode="json") for item in release.recovery_history
+                ],
+                "extension_count": extension.count,
+            }
+        )
+        optional: dict[str, Any] = {
+            "bootstrap_error": bootstrap.error,
+            "bootstrap_recovery_artifact": bootstrap.recovery_artifact,
+            "bootstrap_recovery_thread_id": bootstrap.recovery_thread_id,
+            "bootstrap_recovery_error": bootstrap.recovery_error,
+            "checkpoint_error": planning.checkpoint_error,
+            "frontier_replan_pending": planning.frontier_replan_pending,
+            "verification_replan_decision": verification.replan_decision,
+            "semantic_ci_passed": verification.semantic_ci_passed,
+            "semantic_ci_adjudication": verification.adjudication,
+            "finalization_error": release.finalization_error,
+            "release_error": release.release_error,
+            "repair_error": release.repair_error,
+            "release_replan_pending": (
+                release.replan_pending.model_dump(mode="json")
+                if release.replan_pending
+                else None
+            ),
+            "resource_decision": resources.decision,
+            "repair_loop_stop": resources.repair_loop_stop,
+            "extension": extension.last_event,
+        }
+        for key, value in optional.items():
+            if value is not None:
+                state.metadata[key] = value
+        if bootstrap.independent_checkpoint_required:
+            state.metadata["bootstrap_independent_checkpoint_required"] = True
+        if control.steering_replan_pending:
+            state.metadata["steering_replan_pending"] = True
+        if planning.frame_breaks:
+            state.metadata["frame_breaks"] = list(planning.frame_breaks)
+        if extension.replan_pending:
+            state.metadata["extension_replan_pending"] = True
+        if verification.dead_end:
+            state.metadata["verification_dead_end"] = list(verification.dead_end)
+        if verification.deterministic_failures:
+            state.metadata["semantic_ci_deterministic_failures"] = list(
+                verification.deterministic_failures
+            )
+        if release.repair_remaining_uncertainty:
+            state.metadata["repair_remaining_uncertainty"] = list(
+                release.repair_remaining_uncertainty
+            )
+        if resources.extension_recommended:
+            state.metadata["resource_extension_recommended"] = True
+        for stage, result in verification.stages.items():
+            state.metadata[f"{stage}_check_artifact_digest"] = result.artifact_digest
+            state.metadata[f"{stage}_check_failed"] = result.failed
+            state.metadata[f"{stage}_check_failures"] = list(result.failures)
+        for key, value in completion.model_dump(mode="json", exclude_none=True).items():
+            state.metadata[key] = value
+
     @staticmethod
     def _remember_control_event(state: RunState, payload: dict[str, Any]) -> None:
         command_id = payload.get("command_id")
         if not command_id:
             return
-        processed = state.metadata.setdefault("processed_control_ids", [])
+        processed = state.runtime.control.processed_command_ids
         if command_id not in processed:
             processed.append(command_id)
 
@@ -66,6 +228,8 @@ class StateReducer:
         return state
 
     def apply(self, state: RunState | None, event: LedgerEvent) -> RunState:
+        if event.event_type not in et.EVENT_TYPES:
+            raise ValueError(f"Unsupported event type: {event.event_type}")
         payload = event.payload
         if event.event_type == et.RUN_CREATED:
             if state is not None:
@@ -87,30 +251,30 @@ class StateReducer:
                 raise ValueError("task source amendment before source capture")
             amendment = payload["amendment"]
             state.task_source.amendments.append(TaskAmendment.model_validate(amendment))
-            state.metadata["steering_replan_pending"] = True
+            state.runtime.control.steering_replan_pending = True
             self._remember_control_event(state, payload)
         elif event.event_type == et.BOOTSTRAP_STARTED:
             state.phase = RunPhase.BOOTSTRAPPING
         elif event.event_type == et.BOOTSTRAP_FAILED:
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
-            state.metadata["bootstrap_error"] = payload.get("error", "bootstrap failed")
+            state.runtime.bootstrap.error = payload.get("error", "bootstrap failed")
             if payload.get("recovery_artifact"):
-                state.metadata["bootstrap_recovery_artifact"] = payload["recovery_artifact"]
+                state.runtime.bootstrap.recovery_artifact = payload["recovery_artifact"]
             if payload.get("provider_thread_id"):
-                state.metadata["bootstrap_recovery_thread_id"] = payload["provider_thread_id"]
+                state.runtime.bootstrap.recovery_thread_id = payload["provider_thread_id"]
             if payload.get("recovery_capture_error"):
-                state.metadata["bootstrap_recovery_error"] = payload["recovery_capture_error"]
+                state.runtime.bootstrap.recovery_error = payload["recovery_capture_error"]
             state.phase = RunPhase.CREATED
         elif event.event_type == et.BOOTSTRAP_COMPLETED:
-            state.metadata.pop("bootstrap_error", None)
-            state.metadata["bootstrap_artifact_scope"] = payload.get(
+            state.runtime.bootstrap.error = None
+            state.runtime.bootstrap.artifact_scope = payload.get(
                 "artifact_scope", "targeted"
             )
             if payload.get("independent_checkpoint_required"):
-                state.metadata["bootstrap_independent_checkpoint_required"] = True
-            state.metadata.pop("bootstrap_recovery_artifact", None)
-            state.metadata.pop("bootstrap_recovery_thread_id", None)
-            state.metadata.pop("bootstrap_recovery_error", None)
+                state.runtime.bootstrap.independent_checkpoint_required = True
+            state.runtime.bootstrap.recovery_artifact = None
+            state.runtime.bootstrap.recovery_thread_id = None
+            state.runtime.bootstrap.recovery_error = None
             state.contract = GoalContract.model_validate(payload["contract"])
             if payload.get("task_charter"):
                 charter = TaskCharter.model_validate(payload["task_charter"])
@@ -170,9 +334,9 @@ class StateReducer:
             state.stop_requested = bool(payload.get("stop_requested", False))
             state.stop_reason = payload.get("stop_reason")
             state.phase = RunPhase.ACTIVE
-            state.metadata.pop("bootstrap_error", None)
+            state.runtime.bootstrap.error = None
             if payload.get("frame_break"):
-                state.metadata.setdefault("frame_breaks", []).append(payload["frame_break"])
+                state.runtime.planning.frame_breaks.append(payload["frame_break"])
         elif event.event_type == et.ACTION_SELECTED:
             selected = payload.get("selected", {})
             dominated = payload.get("dominated", {})
@@ -355,19 +519,19 @@ class StateReducer:
             if payload.get("completed_round_index") is not None:
                 state.round_index = int(payload["completed_round_index"])
             if payload.get("frame_break"):
-                state.metadata.setdefault("frame_breaks", []).append(payload["frame_break"])
-            state.metadata["clean_synthesis_needed"] = bool(
+                state.runtime.planning.frame_breaks.append(payload["frame_break"])
+            state.runtime.planning.clean_synthesis_needed = bool(
                 payload.get("clean_synthesis_needed", False)
             )
-            state.metadata.pop("checkpoint_error", None)
-            state.metadata.pop("extension_replan_pending", None)
-            state.metadata.pop("steering_replan_pending", None)
-            state.metadata.pop("bootstrap_independent_checkpoint_required", None)
-            state.metadata.pop("release_replan_pending", None)
-            state.metadata.pop("frontier_replan_pending", None)
+            state.runtime.planning.checkpoint_error = None
+            state.runtime.extension.replan_pending = False
+            state.runtime.control.steering_replan_pending = False
+            state.runtime.bootstrap.independent_checkpoint_required = False
+            state.runtime.release.replan_pending = None
+            state.runtime.planning.frontier_replan_pending = None
         elif event.event_type == et.CHECKPOINT_FAILED:
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
-            state.metadata["checkpoint_error"] = payload.get("error", "checkpoint failed")
+            state.runtime.planning.checkpoint_error = payload.get("error", "checkpoint failed")
         elif event.event_type == et.ROUND_COMPLETED:
             state.round_index = int(payload["round_index"])
         elif event.event_type == et.FINALIZATION_STARTED:
@@ -378,8 +542,8 @@ class StateReducer:
             state.final_artifact = artifact
             state.artifact_history.append(artifact)
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
-            state.metadata["remaining_uncertainty"] = payload.get("remaining_uncertainty", [])
-            state.metadata["release_gate_recommended"] = bool(
+            state.runtime.release.remaining_uncertainty = payload.get("remaining_uncertainty", [])
+            state.runtime.release.gate_recommended = bool(
                 payload.get("release_gate_recommended", True)
             )
             if payload.get("artifact_spine"):
@@ -393,10 +557,12 @@ class StateReducer:
             if payload.get("lead_session"):
                 state.lead_session = LeadSessionState.model_validate(payload["lead_session"])
             state.phase = RunPhase.RELEASE
-            state.metadata.pop("finalization_error", None)
+            state.runtime.release.finalization_error = None
         elif event.event_type == et.FINALIZATION_FAILED:
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
-            state.metadata["finalization_error"] = payload.get("error", "final synthesis failed")
+            state.runtime.release.finalization_error = payload.get(
+                "error", "final synthesis failed"
+            )
         elif event.event_type in {et.DETERMINISTIC_CHECK_COMPLETED, et.EVIDENCE_RECORDED}:
             evidence = EvidenceRecord.model_validate(payload["evidence"])
             state.evidence[evidence.evidence_id] = evidence
@@ -404,25 +570,29 @@ class StateReducer:
             stage = str(payload["stage"])
             failed = bool(payload.get("failed", False))
             artifact_digest = payload.get("artifact_digest")
-            state.metadata[f"{stage}_check_artifact_digest"] = artifact_digest
-            state.metadata[f"{stage}_check_failed"] = failed
-            state.metadata[f"{stage}_check_failures"] = list(payload.get("failures", []))
+            state.runtime.verification.stages[stage] = CheckStageState(
+                artifact_digest=artifact_digest,
+                failed=failed,
+                failures=list(payload.get("failures", [])),
+            )
             if stage in {"preflight", "candidate"}:
-                state.metadata["verification_replan_pending"] = any(
-                    state.metadata.get(f"{candidate}_check_artifact_digest") == artifact_digest
-                    and state.metadata.get(f"{candidate}_check_failed") is True
+                state.runtime.verification.replan_pending = any(
+                    (candidate_stage := state.runtime.verification.stages.get(candidate))
+                    is not None
+                    and candidate_stage.artifact_digest == artifact_digest
+                    and candidate_stage.failed
                     for candidate in ("preflight", "candidate")
                 )
-                if not state.metadata["verification_replan_pending"]:
-                    state.metadata.pop("verification_dead_end", None)
+                if not state.runtime.verification.replan_pending:
+                    state.runtime.verification.dead_end = []
         elif event.event_type == et.CHECK_REPLAN_DECIDED:
             decision = str(payload["decision"])
-            state.metadata["verification_replan_pending"] = False
-            state.metadata["verification_replan_decision"] = decision
+            state.runtime.verification.replan_pending = False
+            state.runtime.verification.replan_decision = decision
             if decision == "corrective_actions":
-                state.metadata.pop("verification_dead_end", None)
+                state.runtime.verification.dead_end = []
             else:
-                state.metadata["verification_dead_end"] = list(
+                state.runtime.verification.dead_end = list(
                     payload.get("failures", [])
                 )
             # A semantic stop cannot overrule failed executable acceptance.
@@ -433,21 +603,23 @@ class StateReducer:
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
             fingerprint = payload.get("rejection_fingerprint")
             if fingerprint:
-                fingerprints = state.metadata.setdefault("release_rejection_fingerprints", [])
+                fingerprints = state.runtime.release.rejection_fingerprints
                 fingerprints.append(fingerprint)
-            state.metadata.pop("release_error", None)
+            state.runtime.release.release_error = None
         elif event.event_type == et.RELEASE_FAILED:
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
-            state.metadata["release_error"] = payload.get("error", "release challenge failed")
+            state.runtime.release.release_error = payload.get(
+                "error", "release challenge failed"
+            )
         elif event.event_type == et.REPAIR_COMPLETED:
             artifact = ArtifactRef.model_validate(payload["artifact"])
             state.current_artifact = artifact
             state.final_artifact = artifact
             state.artifact_history.append(artifact)
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
-            state.metadata["repair_completed"] = True
-            state.metadata["repair_count"] = int(state.metadata.get("repair_count", 0)) + 1
-            state.metadata["repair_remaining_uncertainty"] = payload.get(
+            state.runtime.release.repair_completed = True
+            state.runtime.release.repair_count += 1
+            state.runtime.release.repair_remaining_uncertainty = payload.get(
                 "remaining_uncertainty", []
             )
             if payload.get("artifact_spine"):
@@ -456,10 +628,10 @@ class StateReducer:
                 state.completion_case = CompletionCase.model_validate(payload["completion_case"])
             if payload.get("lead_session"):
                 state.lead_session = LeadSessionState.model_validate(payload["lead_session"])
-            state.metadata.pop("repair_error", None)
+            state.runtime.release.repair_error = None
         elif event.event_type == et.REPAIR_FAILED:
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
-            state.metadata["repair_error"] = payload.get("error", "repair failed")
+            state.runtime.release.repair_error = payload.get("error", "repair failed")
         elif event.event_type == et.TASK_CHARTER_UPDATED:
             charter = TaskCharter.model_validate(payload["task_charter"])
             state.task_charter = charter
@@ -511,14 +683,16 @@ class StateReducer:
                 SemanticRegressionFinding.model_validate(item)
                 for item in payload.get("findings", [])
             ]
-            state.metadata["semantic_ci_passed"] = bool(payload.get("passed", False))
-            state.metadata["semantic_ci_gaps"] = list(payload.get("completion_gaps", []))
+            state.runtime.verification.semantic_ci_passed = bool(payload.get("passed", False))
+            state.runtime.verification.semantic_ci_gaps = list(
+                payload.get("completion_gaps", [])
+            )
             if "deterministic_failures" in payload:
-                state.metadata["semantic_ci_deterministic_failures"] = list(
+                state.runtime.verification.deterministic_failures = list(
                     payload.get("deterministic_failures", [])
                 )
             if payload.get("adjudication"):
-                state.metadata["semantic_ci_adjudication"] = payload["adjudication"]
+                state.runtime.verification.adjudication = payload["adjudication"]
         elif event.event_type == et.COMPLETION_CASE_BUILT:
             state.completion_case = CompletionCase.model_validate(payload["completion_case"])
         elif event.event_type == et.RUN_EXTENDED:
@@ -533,70 +707,52 @@ class StateReducer:
             state.resource_state = None
             if state.contract is not None and payload.get("new_budget"):
                 state.contract.budget = BudgetContract.model_validate(payload["new_budget"])
-            state.metadata["semantic_ci_passed"] = False
-            state.metadata["semantic_ci_gaps"] = [
+            state.runtime.verification.semantic_ci_passed = False
+            state.runtime.verification.semantic_ci_gaps = [
                 "run extension requires fresh synthesis and release evidence"
             ]
-            state.metadata.pop("semantic_ci_deterministic_failures", None)
-            state.metadata.pop("semantic_ci_adjudication", None)
-            state.metadata["extension_replan_pending"] = True
-            for key in (
-                "output_path",
-                "deliverable_paths",
-                "deterministic_checks_run",
-                "deterministic_checks_passed",
-                "release_required",
-                "release_gate_run",
-                "release_gate_succeeded",
-                "release_report_releaseable",
-                "release_gate_passed",
-                "releaseable",
-                "release_finding_count",
-                "repair_completed",
-                "repair_count",
-                "release_rejection_fingerprints",
-                "mutation_gate_passed",
-                "mutation_gate_block_reason",
-                "source_apply_blocked_reason",
-                "apply_result",
-            ):
-                state.metadata.pop(key, None)
-            state.metadata.pop("resource_decision", None)
-            state.metadata.pop("resource_extension_recommended", None)
-            state.metadata.pop("repair_loop_stop", None)
-            state.metadata["extension_count"] = int(state.metadata.get("extension_count", 0)) + 1
-            state.metadata["extension"] = payload
+            state.runtime.verification.deterministic_failures = []
+            state.runtime.verification.adjudication = None
+            state.runtime.extension.replan_pending = True
+            state.runtime.completion = type(state.runtime.completion)()
+            state.runtime.release.repair_completed = False
+            state.runtime.release.repair_count = 0
+            state.runtime.release.rejection_fingerprints = []
+            state.runtime.resources.decision = None
+            state.runtime.resources.extension_recommended = False
+            state.runtime.resources.repair_loop_stop = None
+            state.runtime.extension.count += 1
+            state.runtime.extension.last_event = payload
         elif event.event_type == et.RUN_PAUSED:
-            state.metadata["control_status"] = "paused"
-            state.metadata["control_detail"] = payload.get("detail", "operator paused")
+            state.runtime.control.status = "paused"
+            state.runtime.control.detail = payload.get("detail", "operator paused")
             self._remember_control_event(state, payload)
         elif event.event_type == et.RUN_RESUMED:
-            state.metadata["control_status"] = "running"
-            state.metadata["control_detail"] = payload.get("detail", "operator resumed")
+            state.runtime.control.status = "running"
+            state.runtime.control.detail = payload.get("detail", "operator resumed")
             self._remember_control_event(state, payload)
         elif event.event_type == et.RUN_STOPPED:
-            state.metadata["control_status"] = "stopped"
-            state.metadata["control_detail"] = payload.get("detail", "operator stopped")
+            state.runtime.control.status = "stopped"
+            state.runtime.control.detail = payload.get("detail", "operator stopped")
             self._remember_control_event(state, payload)
         elif event.event_type in {et.RESOURCE_INITIALIZED, et.RESOURCE_DECIDED}:
             state.resource_state = ResourceState.model_validate(payload["resource_state"])
             if event.event_type == et.RESOURCE_DECIDED:
-                state.metadata["resource_decision"] = payload.get("decision", {})
-                if payload.get("decision", {}).get("extension_recommended"):
-                    state.metadata["resource_extension_recommended"] = True
-                else:
-                    state.metadata.pop("resource_extension_recommended", None)
+                state.runtime.resources.decision = payload.get("decision", {})
+                state.runtime.resources.extension_recommended = bool(
+                    payload.get("decision", {}).get("extension_recommended")
+                )
         elif event.event_type == et.REPAIR_LOOP_STOPPED:
-            state.metadata["repair_loop_stop"] = payload
+            state.runtime.resources.repair_loop_stop = payload
         elif event.event_type == et.FRONTIER_REPLAN_REQUESTED:
             fingerprint = str(payload["fingerprint"])
-            history = state.metadata.setdefault("frontier_replan_fingerprints", [])
+            history = state.runtime.planning.frontier_replan_fingerprints
             if fingerprint not in history:
                 history.append(fingerprint)
-            state.metadata["frontier_replan_pending"] = payload
+            state.runtime.planning.frontier_replan_pending = payload
         elif event.event_type == et.RELEASE_RECOVERY_REQUESTED:
-            recovery = payload["recovery"]
-            route = str(recovery["route"])
+            recovery = ReleaseRecovery.model_validate(payload["recovery"])
+            route = recovery.route.value
             reopened: list[str] = []
             for obligation in state.obligations.values():
                 if not obligation.release_blocking or obligation.status not in {
@@ -615,7 +771,7 @@ class StateReducer:
                 obligation.evidence_references = []
                 obligation.artifact_location = ""
                 obligation.resolution = None
-                obligation.residual_uncertainty = str(recovery["reason"])
+                obligation.residual_uncertainty = recovery.reason
                 obligation.reopen_condition = "Fresh scoped evidence after causal recovery"
                 obligation.updated_seq = event.seq
                 reopened.append(obligation.obligation_id)
@@ -626,14 +782,14 @@ class StateReducer:
             state.pending_action_ids = []
             state.completion_case = None
             state.semantic_regression_findings = []
-            state.metadata["semantic_ci_passed"] = False
-            state.metadata["semantic_ci_gaps"] = [
+            state.runtime.verification.semantic_ci_passed = False
+            state.runtime.verification.semantic_ci_gaps = [
                 "release evidence invalidated an upstream commitment"
             ]
-            state.metadata["release_replan_pending"] = recovery
-            state.metadata["release_reopened_obligations"] = reopened
-            history = state.metadata.setdefault("release_recovery_history", [])
-            history.append(recovery)
+            state.runtime.release.replan_pending = recovery
+            state.runtime.release.reopened_obligation_ids = reopened
+            recovery_history = state.runtime.release.recovery_history
+            recovery_history.append(recovery)
         elif event.event_type == et.RUN_COMPLETED:
             state.phase = RunPhase.COMPLETE
             state.stop_requested = True
@@ -658,14 +814,25 @@ class StateReducer:
             )
             for key in completion_keys:
                 if key in payload:
-                    state.metadata[key] = payload[key]
+                    if key == "repair_completed":
+                        state.runtime.release.repair_completed = bool(payload[key])
+                    else:
+                        setattr(state.runtime.completion, key, payload[key])
         elif event.event_type == et.RUN_FAILED:
             state.phase = RunPhase.FAILED
             state.stop_requested = True
             state.stop_reason = payload.get("error", "run failed")
         elif event.event_type == et.PATCH_APPLIED:
-            state.metadata["patch_applied"] = payload
+            state.runtime.completion.patch_applied = payload
+        elif event.event_type in et.OBSERVATION_ONLY_EVENT_TYPES:
+            pass
+        else:
+            # EVENT_TYPES and this dispatch are deliberately separate. The
+            # explicit failure makes a newly declared event impossible to
+            # replay as a silent no-op.
+            raise ValueError(f"Event type has no state projection: {event.event_type}")
 
+        self._sync_legacy_metadata(state)
         state.last_event_seq = event.seq
         state.last_event_hash = event.event_hash
         return state
@@ -717,9 +884,17 @@ def state_summary(state: RunState) -> dict[str, Any]:
         ],
         "pending_action_ids": state.pending_action_ids,
         "verification": {
-            "replan_pending": bool(state.metadata.get("verification_replan_pending")),
-            "preflight_failures": list(state.metadata.get("preflight_check_failures", [])),
-            "candidate_failures": list(state.metadata.get("candidate_check_failures", [])),
+            "replan_pending": state.runtime.verification.replan_pending,
+            "preflight_failures": list(
+                state.runtime.verification.stages.get(
+                    "preflight", CheckStageState()
+                ).failures
+            ),
+            "candidate_failures": list(
+                state.runtime.verification.stages.get(
+                    "candidate", CheckStageState()
+                ).failures
+            ),
         },
         "task_source_digest": state.task_source.digest if state.task_source else None,
         "task_charter": state.task_charter.model_dump(mode="json") if state.task_charter else None,

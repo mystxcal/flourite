@@ -58,3 +58,67 @@ RESOURCE_DECIDED = "resource.decided"
 REPAIR_LOOP_STOPPED = "repair.loop_stopped"
 FRONTIER_REPLAN_REQUESTED = "frontier.replan_requested"
 RELEASE_RECOVERY_REQUESTED = "release.recovery_requested"
+
+# This is the compatibility boundary for ledger replay. Adding an event is an
+# architectural change: it must be named here and handled explicitly by the
+# state projector (even when the event is intentionally observation-only).
+EVENT_TYPES = frozenset(
+    {
+        RUN_CREATED,
+        BOOTSTRAP_STARTED,
+        BOOTSTRAP_COMPLETED,
+        BOOTSTRAP_FAILED,
+        ACTION_SELECTED,
+        ACTION_STARTED,
+        ACTION_COMPLETED,
+        ACTION_FAILED,
+        CHECKPOINT_STARTED,
+        CHECKPOINT_COMPLETED,
+        CHECKPOINT_FAILED,
+        ROUND_COMPLETED,
+        FINALIZATION_STARTED,
+        FINAL_SYNTHESIZED,
+        FINALIZATION_FAILED,
+        DETERMINISTIC_CHECK_COMPLETED,
+        CHECK_STAGE_COMPLETED,
+        CHECK_REPLAN_DECIDED,
+        EVIDENCE_RECORDED,
+        RELEASE_COMPLETED,
+        RELEASE_FAILED,
+        REPAIR_COMPLETED,
+        REPAIR_FAILED,
+        RUN_COMPLETED,
+        RUN_FAILED,
+        PATCH_APPLIED,
+        TASK_SOURCE_CAPTURED,
+        TASK_SOURCE_AMENDED,
+        TASK_CHARTER_UPDATED,
+        REFRAME_ADMITTED,
+        REFRAME_REJECTED,
+        LEAD_SESSION_UPDATED,
+        LEAD_RECONSTRUCTION,
+        ARTIFACT_SPINE_UPDATED,
+        OBLIGATIONS_UPDATED,
+        CRUXES_UPDATED,
+        SUBSTRATE_UPDATED,
+        OVERLAYS_UPDATED,
+        INSTRUMENT_UPDATED,
+        SUMMIT_ACTIVATED,
+        SUMMIT_ARCHIVE_UPDATED,
+        ACTION_CONTRACTED,
+        ACTION_RECEIPTED,
+        SEMANTIC_REGRESSION_COMPLETED,
+        COMPLETION_CASE_BUILT,
+        RUN_EXTENDED,
+        RUN_PAUSED,
+        RUN_RESUMED,
+        RUN_STOPPED,
+        RESOURCE_INITIALIZED,
+        RESOURCE_DECIDED,
+        REPAIR_LOOP_STOPPED,
+        FRONTIER_REPLAN_REQUESTED,
+        RELEASE_RECOVERY_REQUESTED,
+    }
+)
+
+OBSERVATION_ONLY_EVENT_TYPES = frozenset({REFRAME_ADMITTED, REFRAME_REJECTED})

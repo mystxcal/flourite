@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ from .ids import new_id
 from .util import canonical_json, sha256_text, utc_now
 
 GENESIS_HASH = "0" * 64
+CURRENT_EVENT_SCHEMA_VERSION = 2
 
 
 class LedgerEvent(BaseModel):
@@ -29,6 +30,7 @@ class LedgerEvent(BaseModel):
     payload_hash: str
     previous_hash: str
     event_hash: str
+    event_schema_version: int = 1
 
 
 class EventLedger:
@@ -93,6 +95,17 @@ class EventLedger:
             END;
             """
         )
+        columns = {
+            str(row["name"])
+            for row in self._connection.execute("PRAGMA table_info(events)").fetchall()
+        }
+        if "event_schema_version" not in columns:
+            # Existing ledgers predate explicit envelope versioning. Version 1
+            # retains their original hash material exactly; new writes use v2.
+            self._connection.execute(
+                "ALTER TABLE events ADD COLUMN event_schema_version "
+                "INTEGER NOT NULL DEFAULT 1"
+            )
 
     def close(self) -> None:
         self._connection.close()
@@ -116,6 +129,7 @@ class EventLedger:
         *,
         actor: str = "runtime",
         action_id: str | None = None,
+        validate: Callable[[LedgerEvent], None] | None = None,
     ) -> LedgerEvent:
         normalized = self._normalize_payload(payload)
         payload_json = canonical_json(normalized)
@@ -130,25 +144,25 @@ class EventLedger:
                 (self.run_id,),
             ).fetchone()
             previous_hash = row["event_hash"] if row else GENESIS_HASH
-            event_material = canonical_json(
-                {
-                    "event_id": event_id,
-                    "run_id": self.run_id,
-                    "timestamp": timestamp,
-                    "event_type": event_type,
-                    "actor": actor,
-                    "action_id": action_id,
-                    "payload_hash": payload_hash,
-                    "previous_hash": previous_hash,
-                }
+            event_material = self._event_material(
+                event_id=event_id,
+                run_id=self.run_id,
+                timestamp=timestamp,
+                event_type=event_type,
+                actor=actor,
+                action_id=action_id,
+                payload_hash=payload_hash,
+                previous_hash=previous_hash,
+                event_schema_version=CURRENT_EVENT_SCHEMA_VERSION,
             )
             event_hash = sha256_text(event_material)
             cursor = self._connection.execute(
                 """
                 INSERT INTO events(
                     event_id, run_id, timestamp, event_type, actor, action_id,
-                    payload_json, payload_hash, previous_hash, event_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload_json, payload_hash, previous_hash, event_hash,
+                    event_schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -161,29 +175,61 @@ class EventLedger:
                     payload_hash,
                     previous_hash,
                     event_hash,
+                    CURRENT_EVENT_SCHEMA_VERSION,
                 ),
             )
             if cursor.lastrowid is None:
                 raise LedgerIntegrityError("SQLite did not return an event sequence")
             seq = int(cursor.lastrowid)
+            event = LedgerEvent(
+                seq=seq,
+                event_id=event_id,
+                run_id=self.run_id,
+                timestamp=timestamp,
+                event_type=event_type,
+                actor=actor,
+                action_id=action_id,
+                payload=normalized,
+                payload_hash=payload_hash,
+                previous_hash=previous_hash,
+                event_hash=event_hash,
+                event_schema_version=CURRENT_EVENT_SCHEMA_VERSION,
+            )
+            if validate is not None:
+                validate(event)
             self._connection.execute("COMMIT")
         except BaseException:
             self._connection.execute("ROLLBACK")
             raise
 
-        return LedgerEvent(
-            seq=seq,
-            event_id=event_id,
-            run_id=self.run_id,
-            timestamp=timestamp,
-            event_type=event_type,
-            actor=actor,
-            action_id=action_id,
-            payload=normalized,
-            payload_hash=payload_hash,
-            previous_hash=previous_hash,
-            event_hash=event_hash,
-        )
+        return event
+
+    @staticmethod
+    def _event_material(
+        *,
+        event_id: str,
+        run_id: str,
+        timestamp: str,
+        event_type: str,
+        actor: str,
+        action_id: str | None,
+        payload_hash: str,
+        previous_hash: str,
+        event_schema_version: int,
+    ) -> str:
+        material: dict[str, Any] = {
+            "event_id": event_id,
+            "run_id": run_id,
+            "timestamp": timestamp,
+            "event_type": event_type,
+            "actor": actor,
+            "action_id": action_id,
+            "payload_hash": payload_hash,
+            "previous_hash": previous_hash,
+        }
+        if event_schema_version >= 2:
+            material["event_schema_version"] = event_schema_version
+        return canonical_json(material)
 
     def events(self, *, after_seq: int = 0) -> Iterator[LedgerEvent]:
         rows = self._connection.execute(
@@ -203,6 +249,7 @@ class EventLedger:
                 payload_hash=row["payload_hash"],
                 previous_hash=row["previous_hash"],
                 event_hash=row["event_hash"],
+                event_schema_version=row["event_schema_version"],
             )
 
     def last_event(self) -> LedgerEvent | None:
@@ -246,17 +293,16 @@ class EventLedger:
                 raise LedgerIntegrityError(
                     f"Hash-chain break at event {event.seq} ({event.event_id})"
                 )
-            material = canonical_json(
-                {
-                    "event_id": event.event_id,
-                    "run_id": event.run_id,
-                    "timestamp": event.timestamp,
-                    "event_type": event.event_type,
-                    "actor": event.actor,
-                    "action_id": event.action_id,
-                    "payload_hash": event.payload_hash,
-                    "previous_hash": event.previous_hash,
-                }
+            material = EventLedger._event_material(
+                event_id=event.event_id,
+                run_id=event.run_id,
+                timestamp=event.timestamp,
+                event_type=event.event_type,
+                actor=event.actor,
+                action_id=event.action_id,
+                payload_hash=event.payload_hash,
+                previous_hash=event.previous_hash,
+                event_schema_version=event.event_schema_version,
             )
             expected_event_hash = sha256_text(material)
             if expected_event_hash != event.event_hash:

@@ -731,8 +731,10 @@ def test_semantic_failure_blocks_mutation_even_when_release_gate_is_disabled(
         config=fake_config(run={"release_gate": "never"}),
     )
     try:
-        engine.state.metadata["semantic_ci_passed"] = False
-        engine.state.metadata["semantic_ci_gaps"] = ["missing obligation evidence"]
+        engine.state.runtime.verification.semantic_ci_passed = False
+        engine.state.runtime.verification.semantic_ci_gaps = [
+            "missing obligation evidence"
+        ]
         decision = engine._evaluate_mutation_gate(
             checks=[],
             release_required=False,

@@ -1280,6 +1280,106 @@ class EvidenceRecord(StrictModel):
     artifact_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class BootstrapRuntimeState(StrictModel):
+    error: str | None = None
+    artifact_scope: ArtifactScope = "targeted"
+    independent_checkpoint_required: bool = False
+    recovery_artifact: dict[str, Any] | None = None
+    recovery_thread_id: str | None = None
+    recovery_error: str | None = None
+
+
+class ControlRuntimeState(StrictModel):
+    status: Literal["running", "paused", "stopped"] = "running"
+    detail: str = ""
+    processed_command_ids: list[str] = Field(default_factory=list)
+    steering_replan_pending: bool = False
+
+
+class CheckStageState(StrictModel):
+    artifact_digest: str | None = None
+    failed: bool = False
+    failures: list[str] = Field(default_factory=list)
+
+
+class VerificationRuntimeState(StrictModel):
+    stages: dict[str, CheckStageState] = Field(default_factory=dict)
+    replan_pending: bool = False
+    replan_decision: str | None = None
+    dead_end: list[str] = Field(default_factory=list)
+    semantic_ci_passed: bool | None = None
+    semantic_ci_gaps: list[str] = Field(default_factory=list)
+    deterministic_failures: list[str] = Field(default_factory=list)
+    adjudication: dict[str, Any] | None = None
+
+
+class PlanningRuntimeState(StrictModel):
+    checkpoint_error: str | None = None
+    clean_synthesis_needed: bool = False
+    frame_breaks: list[dict[str, Any]] = Field(default_factory=list)
+    frontier_replan_pending: dict[str, Any] | None = None
+    frontier_replan_fingerprints: list[str] = Field(default_factory=list)
+
+
+class ReleaseRuntimeState(StrictModel):
+    finalization_error: str | None = None
+    release_error: str | None = None
+    repair_error: str | None = None
+    repair_completed: bool = False
+    repair_count: int = 0
+    repair_remaining_uncertainty: list[str] = Field(default_factory=list)
+    remaining_uncertainty: list[str] = Field(default_factory=list)
+    gate_recommended: bool = True
+    rejection_fingerprints: list[str] = Field(default_factory=list)
+    replan_pending: ReleaseRecovery | None = None
+    reopened_obligation_ids: list[str] = Field(default_factory=list)
+    recovery_history: list[ReleaseRecovery] = Field(default_factory=list)
+
+
+class ResourceRuntimeState(StrictModel):
+    decision: dict[str, Any] | None = None
+    extension_recommended: bool = False
+    repair_loop_stop: dict[str, Any] | None = None
+
+
+class ExtensionRuntimeState(StrictModel):
+    count: int = 0
+    replan_pending: bool = False
+    last_event: dict[str, Any] | None = None
+
+
+class CompletionRuntimeState(StrictModel):
+    output_path: str | None = None
+    deliverable_paths: list[str] = Field(default_factory=list)
+    deterministic_checks_run: int | None = None
+    deterministic_checks_passed: bool | None = None
+    release_required: bool | None = None
+    release_gate_run: bool | None = None
+    release_gate_succeeded: bool | None = None
+    release_report_releaseable: bool | None = None
+    release_gate_passed: bool | None = None
+    releaseable: bool | None = None
+    release_finding_count: int | None = None
+    mutation_gate_passed: bool | None = None
+    mutation_gate_block_reason: str | None = None
+    source_apply_blocked_reason: str | None = None
+    apply_result: dict[str, Any] | None = None
+    patch_applied: dict[str, Any] | None = None
+
+
+class RunRuntimeState(StrictModel):
+    """Typed operational state formerly hidden in RunState.metadata."""
+
+    bootstrap: BootstrapRuntimeState = Field(default_factory=BootstrapRuntimeState)
+    control: ControlRuntimeState = Field(default_factory=ControlRuntimeState)
+    verification: VerificationRuntimeState = Field(default_factory=VerificationRuntimeState)
+    planning: PlanningRuntimeState = Field(default_factory=PlanningRuntimeState)
+    release: ReleaseRuntimeState = Field(default_factory=ReleaseRuntimeState)
+    resources: ResourceRuntimeState = Field(default_factory=ResourceRuntimeState)
+    extension: ExtensionRuntimeState = Field(default_factory=ExtensionRuntimeState)
+    completion: CompletionRuntimeState = Field(default_factory=CompletionRuntimeState)
+
+
 class RunState(StrictModel):
     run_id: str
     phase: RunPhase = RunPhase.CREATED
@@ -1324,6 +1424,10 @@ class RunState(StrictModel):
     release: ReleaseOutput | None = None
     last_event_seq: int = 0
     last_event_hash: str = ""
+    runtime: RunRuntimeState = Field(default_factory=RunRuntimeState)
+    # Creation metadata and a temporary read-compatibility mirror. Runtime
+    # logic must use ``runtime``; this field can disappear after the next
+    # snapshot compatibility boundary.
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property

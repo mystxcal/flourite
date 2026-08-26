@@ -195,7 +195,7 @@ class LiveDashboard:
                     and state.resource_state.last_decision is not None
                 )
             )
-            + int(bool(state.metadata.get("bootstrap_error")))
+            + int(bool(state.runtime.bootstrap.error))
         )
 
     def _summary(self, state: RunState, runtime: RuntimeSnapshot) -> Table:
@@ -268,10 +268,10 @@ class LiveDashboard:
         table.add_row(
             "controller", _short(runtime.detail or "—", 46), "pid", str(runtime.pid or "—")
         )
-        if state.metadata.get("bootstrap_error"):
+        if state.runtime.bootstrap.error:
             table.add_row(
                 "last error",
-                _short(str(state.metadata["bootstrap_error"]), 46),
+                _short(state.runtime.bootstrap.error, 46),
                 "recovery",
                 "in progress" if runtime.process_alive else "press r",
             )

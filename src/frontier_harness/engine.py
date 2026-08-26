@@ -66,6 +66,7 @@ from .errors import (
     ProviderError,
     RunNotFoundError,
 )
+from .execution import RunJournal
 from .ids import new_id
 from .ledger import EventLedger, LedgerEvent
 from .locking import RunLock
@@ -245,6 +246,7 @@ class FrontierEngine:
     SEAL_FILE = "seal.json"
     EXTENSION_INTENT_FILE = "extension.intent.json"
     CONTROL_FILE = "control.sqlite3"
+    _detached_state: RunState
 
     def __init__(
         self,
@@ -263,12 +265,15 @@ class FrontierEngine:
         self.config = config
         self.provider = provider
         self.adapter = adapter
-        self.ledger = ledger
         self.blobs = blobs
-        self.state = state
         self.sources = sources
         self.on_event = on_event
-        self.reducer = StateReducer()
+        self.journal = RunJournal(
+            ledger=ledger,
+            snapshot_path=run_dir / self.STATE_FILE,
+            max_event_payload_bytes=config.runtime.max_event_payload_bytes,
+            state=state,
+        )
         self.scheduler = ActionScheduler(config.frontier)
         self.summit_archive = SummitArchive(
             max_lineages=config.summit.max_archive_lineages,
@@ -302,6 +307,31 @@ class FrontierEngine:
             evidence_limit=config.runtime.evidence_per_capsule,
             artifact_char_limit=config.runtime.capsule_artifact_char_limit,
         )
+
+    @property
+    def state(self) -> RunState:
+        if "journal" not in self.__dict__:
+            # A few pure unit tests construct a detached engine shell to probe
+            # scheduling logic without I/O. Production engines always own a
+            # RunJournal.
+            return self._detached_state
+        return self.journal.state
+
+    @state.setter
+    def state(self, value: RunState) -> None:
+        if hasattr(self, "journal"):
+            raise AttributeError("Run state is owned by RunJournal")
+        self._detached_state = value
+
+    @property
+    def ledger(self) -> EventLedger:
+        """Compatibility view for legacy readers and audit exporters.
+
+        Authoritative writes are intentionally unavailable through Flourite's
+        own engine paths; all of them pass through RunJournal.
+        """
+
+        return self.journal.compatibility_ledger
 
     # ------------------------------------------------------------------
     # Construction and loading
@@ -510,7 +540,7 @@ class FrontierEngine:
         )
         event_snapshot = ledger.verified_events()
         state = StateReducer().replay(event_snapshot)
-        extension = state.metadata.get("extension")
+        extension = state.runtime.extension.last_event
         if isinstance(extension, dict) and extension.get("new_budget"):
             # The extension event is authoritative even if a process ended
             # between appending it and replacing the config snapshot.
@@ -547,7 +577,7 @@ class FrontierEngine:
         return await self.provider.doctor()
 
     def events(self) -> list[LedgerEvent]:
-        return list(self.ledger.events())
+        return list(self.journal.events())
 
     async def extend(
         self,
@@ -572,9 +602,7 @@ class FrontierEngine:
         intent_path = self.run_dir / self.EXTENSION_INTENT_FILE
         with self.lock:
             self._refresh_state_from_ledger()
-            if self.state.phase == RunPhase.ACTIVE and self.state.metadata.get(
-                "extension_replan_pending"
-            ):
+            if self.state.phase == RunPhase.ACTIVE and self.state.runtime.extension.replan_pending:
                 intent_path.unlink(missing_ok=True)
             elif self.state.phase != RunPhase.COMPLETE:
                 raise FrontierError("Only a completed run can be extended")
@@ -626,12 +654,12 @@ class FrontierEngine:
                     seal_blob = self.blobs.put_file(
                         seal_path,
                         media_type="application/json",
-                        original_name=f"seal-before-extension-{int(self.state.metadata.get('extension_count', 0)) + 1}.json",
+                        original_name=f"seal-before-extension-{self.state.runtime.extension.count + 1}.json",
                     )
                     history_dir = self.run_dir / "seal-history"
                     history_dir.mkdir(parents=True, exist_ok=True)
                     history_name = (
-                        f"seal-{int(self.state.metadata.get('extension_count', 0)) + 1:03d}.json"
+                        f"seal-{self.state.runtime.extension.count + 1:03d}.json"
                     )
                     atomic_write_text(
                         history_dir / history_name,
@@ -689,10 +717,10 @@ class FrontierEngine:
                 )
             if self.state.final_artifact is None:
                 raise FrontierError("Run has no final software artifact")
-            if self.state.metadata.get("mutation_gate_passed") is not True:
-                reason = self.state.metadata.get(
-                    "mutation_gate_block_reason",
-                    "the run has no affirmative mutation-gate decision",
+            if self.state.runtime.completion.mutation_gate_passed is not True:
+                reason = (
+                    self.state.runtime.completion.mutation_gate_block_reason
+                    or "the run has no affirmative mutation-gate decision"
                 )
                 raise FrontierError(f"Refusing to apply final patch: {reason}")
 
@@ -710,7 +738,7 @@ class FrontierEngine:
 
     def close(self) -> None:
         self.control.close()
-        self.ledger.close()
+        self.journal.close()
 
     def __enter__(self) -> FrontierEngine:
         return self
@@ -722,6 +750,8 @@ class FrontierEngine:
     # Durable state and integrity
     # ------------------------------------------------------------------
     def _save_state(self) -> None:
+        # Kept as a compatibility shim for callers that explicitly request a
+        # snapshot refresh. RunJournal owns normal snapshot writes.
         atomic_write_text(
             self.run_dir / self.STATE_FILE,
             json.dumps(self.state.model_dump(mode="json"), indent=2, ensure_ascii=False),
@@ -730,13 +760,7 @@ class FrontierEngine:
     def _refresh_state_from_ledger(self) -> None:
         """Reconstruct the authoritative projection after acquiring the run lock."""
 
-        replayed = self.reducer.replay(self.ledger.verified_events())
-        if replayed.run_id != self.state.run_id:
-            raise LedgerIntegrityError(
-                f"Loaded run {self.state.run_id}, but the ledger reconstructs {replayed.run_id}"
-            )
-        self.state = replayed
-        self._save_state()
+        self.journal.refresh(expected_run_id=self.state.run_id)
 
     def _append(
         self,
@@ -746,28 +770,19 @@ class FrontierEngine:
         actor: str = "runtime",
         action_id: str | None = None,
     ) -> LedgerEvent:
-        encoded_size = len(canonical_json(payload).encode("utf-8"))
-        if encoded_size > self.config.runtime.max_event_payload_bytes:
-            raise ValueError(
-                f"Event payload is {encoded_size:,} bytes, above the configured "
-                f"{self.config.runtime.max_event_payload_bytes:,}-byte boundary; externalize it as a blob"
-            )
-        event = self.ledger.append(
+        event = self.journal.append(
             event_type,
             payload,
             actor=actor,
             action_id=action_id,
         )
-        self.state = self.reducer.apply(self.state, event)
-        self._save_state()
         self.observer.ledger_event(event, self.state)
         if self.on_event:
             self.on_event(event, self.state)
         return event
 
     def _processed_control_ids(self) -> set[str]:
-        value = self.state.metadata.get("processed_control_ids", [])
-        return {str(item) for item in value} if isinstance(value, list) else set()
+        return set(self.state.runtime.control.processed_command_ids)
 
     def _admit_steering(self, command_id: str, text: str) -> None:
         amendment = TaskAmendment(
@@ -925,7 +940,7 @@ class FrontierEngine:
         return steered
 
     def _write_seal(self) -> None:
-        count, last_hash = self.ledger.verify()
+        count, last_hash = self.journal.verify()
         final_digest = self.state.final_artifact.blob.digest if self.state.final_artifact else None
         state_hash = sha256_text(canonical_json(self.state.model_dump(mode="json")))
         atomic_write_text(
@@ -957,10 +972,9 @@ class FrontierEngine:
                 yield from FrontierEngine._blob_dicts(child)
 
     def verify_integrity(self) -> dict[str, Any]:
-        events = self.ledger.verified_events()
+        events, replayed = self.journal.verified_projection()
         event_count = len(events)
         last_hash = events[-1].event_hash if events else "0" * 64
-        replayed = self.reducer.replay(events)
         if replayed.model_dump(mode="json") != self.state.model_dump(mode="json"):
             raise LedgerIntegrityError("In-memory state differs from ledger replay")
 
@@ -1168,7 +1182,7 @@ class FrontierEngine:
             if index not in {item[0] for item in selected}
         ]
         created: list[tuple[IssueDraft, Issue]] = []
-        next_seq = self.ledger.count() + 1
+        next_seq = self.journal.count() + 1
         for _, draft in selected:
             normalized = normalize_key(draft.local_key)
             if not normalized:
@@ -1400,7 +1414,7 @@ class FrontierEngine:
     ) -> tuple[list[Issue], dict[str, str], list[str]]:
         upserts: list[Issue] = []
         ignored: list[str] = []
-        next_seq = self.ledger.count() + 1
+        next_seq = self.journal.count() + 1
         projected: dict[str, Issue] = {
             key: value.model_copy(deep=True) for key, value in self.state.issues.items()
         }
@@ -2117,7 +2131,7 @@ class FrontierEngine:
                 obligation_drafts,
                 existing=(),
                 capacity=max(32, len(obligation_drafts)),
-                created_seq=self.ledger.count() + 1,
+                created_seq=self.journal.count() + 1,
                 charter=charter,
                 human_evidence_available=self.config.cognition.human_evidence_available,
             )
@@ -2151,7 +2165,7 @@ class FrontierEngine:
                 existing=(),
                 active_limit=self.config.cognition.max_active_cruxes,
                 total_limit=max(8, self.config.cognition.max_active_cruxes * 4),
-                created_seq=self.ledger.count() + 1,
+                created_seq=self.journal.count() + 1,
             )
 
             reasons = ceiling_trigger_reasons(output.ceiling_scan)
@@ -3316,7 +3330,7 @@ class FrontierEngine:
                     baseline_objective=baseline_objective,
                     objective=objective,
                     negative_result=envelope.negative_result,
-                    event_seq=self.ledger.count() + 1,
+                    event_seq=self.journal.count() + 1,
                 )
             discovery_upserts = cast(
                 list[DiscoveryRecord],
@@ -3427,7 +3441,7 @@ class FrontierEngine:
                     baseline_objective=baseline_objective,
                     objective=None,
                     negative_result=False,
-                    event_seq=self.ledger.count() + 1,
+                    event_seq=self.journal.count() + 1,
                 )
                 failed_discovery = cast(
                     list[DiscoveryRecord],
@@ -3465,13 +3479,10 @@ class FrontierEngine:
             self._close_workspace(workspace)
 
     def _fresh_frontier_keeper(self) -> bool:
-        if any(
-            self.state.metadata.get(key)
-            for key in (
-                "bootstrap_independent_checkpoint_required",
-                "frontier_replan_pending",
-                "release_replan_pending",
-            )
+        if (
+            self.state.runtime.bootstrap.independent_checkpoint_required
+            or self.state.runtime.planning.frontier_replan_pending
+            or self.state.runtime.release.replan_pending
         ):
             return True
         mode = self.config.cognition.frontier_keeper
@@ -3498,9 +3509,7 @@ class FrontierEngine:
         )
 
     async def _checkpoint(self, action_ids: Sequence[str], round_index: int) -> bool:
-        repairing_verification = bool(
-            self.state.metadata.get("verification_replan_pending")
-        )
+        repairing_verification = self.state.runtime.verification.replan_pending
         if not self._can_call():
             return False
         call_id = new_id("call")
@@ -3545,27 +3554,27 @@ class FrontierEngine:
                     + ". Do not propose another local mutation on them. Reopen the causal "
                     "model through a reframe, reconstruction, ceiling audit, or mechanism graft."
                 )
-            if self.state.metadata.get("bootstrap_independent_checkpoint_required"):
+            if self.state.runtime.bootstrap.independent_checkpoint_required:
                 checkpoint_notes += (
                     "\nIndependent stage gate: the construction Lead produced a whole-artifact "
                     "or release-scope bootstrap. Audit its load-bearing architecture before "
                     "hardening it. If a representative slice could still falsify the direction, "
                     "schedule that discriminator rather than polishing or extending the whole."
                 )
-            if replan := self.state.metadata.get("frontier_replan_pending"):
+            if replan := self.state.runtime.planning.frontier_replan_pending:
                 checkpoint_notes += (
                     "\nPlanner deadlock: the prior action slate produced no executable action. "
                     "Do not repeat, rename, or defer the same slate. Preserve the unresolved debt "
                     "and propose a materially executable route, or identify a genuine external "
                     f"blocker. Scheduler evidence: {canonical_json(replan)}"
                 )
-            if recovery := self.state.metadata.get("release_replan_pending"):
+            if recovery := self.state.runtime.release.replan_pending:
                 checkpoint_notes += (
                     "\nRelease evidence falsified an upstream commitment. Treat this as causal "
                     "evidence, not a repair checklist. Explicitly revise every matching Artifact "
                     "Spine invariant, reopen dependent obligations and cruxes, and schedule the "
                     "typed recovery route at the earliest failed boundary. Recovery evidence: "
-                    f"{canonical_json(recovery)}"
+                    f"{canonical_json(recovery.model_dump(mode='json'))}"
                 )
             capsule = self._capsules.populate(
                 workspace,
@@ -3583,7 +3592,7 @@ class FrontierEngine:
                 lens_purpose="checkpoint",
             )
             synthesis_interval = self.config.frontier.clean_synthesis_every_rounds
-            force_clean = bool(self.state.metadata.get("clean_synthesis_needed")) or bool(
+            force_clean = self.state.runtime.planning.clean_synthesis_needed or bool(
                 synthesis_interval
                 and round_index > 0
                 and round_index % synthesis_interval == 0
@@ -3748,7 +3757,7 @@ class FrontierEngine:
             projected_obligations, obligation_notes = apply_obligation_updates(
                 self.state.obligations if adaptive_mode else {},
                 output.obligation_updates if adaptive_mode else [],
-                updated_seq=self.ledger.count() + 1,
+                updated_seq=self.journal.count() + 1,
             )
             new_obligations, obligation_keymap, obligation_admission = instantiate_obligations(
                 output.new_obligations if adaptive_mode else [],
@@ -3758,7 +3767,7 @@ class FrontierEngine:
                     len(projected_obligations)
                     + len(output.new_obligations if adaptive_mode else []),
                 ),
-                created_seq=self.ledger.count() + 1,
+                created_seq=self.journal.count() + 1,
                 charter=charter,
                 human_evidence_available=self.config.cognition.human_evidence_available,
             )
@@ -3772,13 +3781,13 @@ class FrontierEngine:
             projected_cruxes, crux_notes = apply_crux_updates(
                 self.state.cruxes if adaptive_mode else {},
                 output.crux_updates if adaptive_mode else [],
-                updated_seq=self.ledger.count() + 1,
+                updated_seq=self.journal.count() + 1,
                 active_limit=self.config.cognition.max_active_cruxes,
             )
             projected_cruxes, obligation_recompile_notes = reactivate_cruxes_for_open_obligations(
                 projected_cruxes,
                 projected_obligations,
-                updated_seq=self.ledger.count() + 1,
+                updated_seq=self.journal.count() + 1,
                 active_limit=self.config.cognition.max_active_cruxes,
             )
             crux_notes.extend(obligation_recompile_notes)
@@ -3788,7 +3797,7 @@ class FrontierEngine:
                 existing=projected_cruxes.values(),
                 active_limit=self.config.cognition.max_active_cruxes,
                 total_limit=max(8, self.config.cognition.max_active_cruxes * 4),
-                created_seq=self.ledger.count() + 1,
+                created_seq=self.journal.count() + 1,
             )
             projected_cruxes.update({item.crux_id: item for item in new_cruxes})
             active_now = [
@@ -3809,7 +3818,7 @@ class FrontierEngine:
                 )
                 for item in dormant[: self.config.cognition.max_active_cruxes - len(active_now)]:
                     item.status = CruxStatus.ACTIVE
-                    item.updated_seq = self.ledger.count() + 1
+                    item.updated_seq = self.journal.count() + 1
                     crux_notes.append(f"promoted dormant crux: {item.crux_id}")
             crux_keymap = self._crux_local_keys(projected_cruxes.values())
             crux_upserts = cast(
@@ -4159,14 +4168,14 @@ class FrontierEngine:
             )
             self._record_staged_checks(stage="preflight")
             self._record_staged_checks(stage="candidate")
-            if repairing_verification and self.state.metadata.get(
-                "verification_replan_pending"
-            ):
+            if repairing_verification and self.state.runtime.verification.replan_pending:
                 corrective_actions = bool(self.state.pending_action_ids)
+                preflight = self.state.runtime.verification.stages.get("preflight")
+                candidate = self.state.runtime.verification.stages.get("candidate")
                 failures = unique_preserving_order(
                     [
-                        *self.state.metadata.get("preflight_check_failures", []),
-                        *self.state.metadata.get("candidate_check_failures", []),
+                        *(preflight.failures if preflight else []),
+                        *(candidate.failures if candidate else []),
                     ]
                 )
                 self._append(
@@ -4213,7 +4222,7 @@ class FrontierEngine:
 
     async def _advance_frontier(self) -> str:
         while not self.state.stop_requested:
-            if failures := self.state.metadata.get("verification_dead_end"):
+            if failures := self.state.runtime.verification.dead_end:
                 raise FrontierError(
                     "Staged verification remained failed after a corrective Lead checkpoint, "
                     "and no corrective action was proposed: " + "; ".join(failures)
@@ -4222,7 +4231,7 @@ class FrontierEngine:
                 if not await self._checkpoint([], self.state.round_index):
                     return "operator steering admitted but replanning checkpoint failed"
                 continue
-            if self.state.metadata.get("verification_replan_pending"):
+            if self.state.runtime.verification.replan_pending:
                 if not await self._checkpoint([], self.state.round_index):
                     return "staged verification failed and its corrective checkpoint could not run"
                 continue
@@ -4409,7 +4418,7 @@ class FrontierEngine:
                 for item in self.state.obligations.values()
             )
             or any(item.status == CruxStatus.ACTIVE for item in self.state.cruxes.values())
-            or self.state.metadata.get("semantic_ci_gaps")
+            or self.state.runtime.verification.semantic_ci_gaps
         )
 
     async def _replan_dead_frontier(
@@ -4449,7 +4458,7 @@ class FrontierEngine:
                 }
             )
         )
-        if fingerprint in self.state.metadata.get("frontier_replan_fingerprints", []):
+        if fingerprint in self.state.runtime.planning.frontier_replan_fingerprints:
             return False
         self._append(
             et.FRONTIER_REPLAN_REQUESTED,
@@ -4738,7 +4747,7 @@ class FrontierEngine:
         failures = list(
             deterministic_failures
             if deterministic_failures is not None
-            else self.state.metadata.get("semantic_ci_deterministic_failures", [])
+            else self.state.runtime.verification.deterministic_failures
         )
         self._append(
             et.SEMANTIC_REGRESSION_COMPLETED,
@@ -4817,7 +4826,8 @@ class FrontierEngine:
         artifact = self.state.current_artifact
         if artifact is None:
             return []
-        prior_digest = self.state.metadata.get(f"{stage}_check_artifact_digest")
+        prior_stage = self.state.runtime.verification.stages.get(stage)
+        prior_digest = prior_stage.artifact_digest if prior_stage else None
         if prior_digest == artifact.blob.digest:
             return []
         evidence = self.adapter.staged_checks(artifact, stage=stage)
@@ -4858,8 +4868,8 @@ class FrontierEngine:
         high_floor = bool(contract and contract.quality_floor in {"very_high", "frontier"})
         check_failed = any(item.negative_result for item in checks)
         unresolved_high = bool(self.state.high_impact_open_issues)
-        semantic_ci_failed = self.state.metadata.get("semantic_ci_passed") is False
-        completion_gaps = bool(self.state.metadata.get("semantic_ci_gaps"))
+        semantic_ci_failed = self.state.runtime.verification.semantic_ci_passed is False
+        completion_gaps = bool(self.state.runtime.verification.semantic_ci_gaps)
         continuity_degraded = (
             self.config.cognition.mode == "adaptive"
             and self.state.lead_session.status == LeadContinuityStatus.DEGRADED
@@ -5017,9 +5027,9 @@ class FrontierEngine:
         checks: Sequence[EvidenceRecord],
     ) -> None:
         if release is None or not self._release_can_adjudicate_model_semantic_findings(
-            semantic_ci_passed=self.state.metadata.get("semantic_ci_passed") is True,
-            completion_gaps=self.state.metadata.get("semantic_ci_gaps", []),
-            deterministic_failures=self.state.metadata.get("semantic_ci_deterministic_failures"),
+            semantic_ci_passed=self.state.runtime.verification.semantic_ci_passed is True,
+            completion_gaps=self.state.runtime.verification.semantic_ci_gaps,
+            deterministic_failures=self.state.runtime.verification.deterministic_failures,
             checks=checks,
             release=release,
         ):
@@ -5056,8 +5066,8 @@ class FrontierEngine:
         release_succeeded = release is not None
         release_gate_passed = not release_required
         block_reason: str | None = None
-        semantic_ci_passed = self.state.metadata.get("semantic_ci_passed") is True
-        completion_case_passed = not bool(self.state.metadata.get("semantic_ci_gaps"))
+        semantic_ci_passed = self.state.runtime.verification.semantic_ci_passed is True
+        completion_case_passed = not bool(self.state.runtime.verification.semantic_ci_gaps)
 
         if not checks_passed:
             block_reason = (
@@ -5111,12 +5121,12 @@ class FrontierEngine:
         final_output: FinalOutput,
         checks: list[EvidenceRecord],
     ) -> tuple[list[EvidenceRecord], ReleaseOutput | None, MutationGateDecision]:
-        repairs_used = int(self.state.metadata.get("repair_count", 0))
-        repair_completed = repairs_used > 0 or bool(self.state.metadata.get("repair_completed"))
+        repairs_used = self.state.runtime.release.repair_count
+        repair_completed = repairs_used > 0 or self.state.runtime.release.repair_completed
         release_required = (
             self._should_release(final_output, checks)
             or self.state.release is not None
-            or bool(self.state.metadata.get("release_error"))
+            or bool(self.state.runtime.release.release_error)
             or repair_completed
         )
         release = self.state.release if release_required else None
@@ -5137,7 +5147,7 @@ class FrontierEngine:
         self._apply_release_adjudication(release, checks)
         recovery = self._release_recovery(release) if release is not None else None
 
-        rejection_history = list(self.state.metadata.get("release_rejection_fingerprints", []))
+        rejection_history = list(self.state.runtime.release.rejection_fingerprints)
         rejection_fingerprints = set(rejection_history)
         repeated_current_rejection = False
         if release is not None and self._release_needs_repair(release):
@@ -5187,7 +5197,7 @@ class FrontierEngine:
                 )
                 break
             repair_completed = True
-            repairs_used = int(self.state.metadata.get("repair_count", repairs_used + 1))
+            repairs_used = self.state.runtime.release.repair_count
             after_digest = (
                 self.state.final_artifact.blob.digest if self.state.final_artifact else None
             )
@@ -5278,8 +5288,8 @@ class FrontierEngine:
                 goal_contract=self.state.contract,
                 task_source=self.state.task_source,
                 semantic_ci={
-                    "passed": self.state.metadata.get("semantic_ci_passed"),
-                    "completion_gaps": self.state.metadata.get("semantic_ci_gaps", []),
+                    "passed": self.state.runtime.verification.semantic_ci_passed,
+                    "completion_gaps": self.state.runtime.verification.semantic_ci_gaps,
                     "findings": [
                         item.model_dump(mode="json")
                         for item in self.state.semantic_regression_findings
@@ -5308,7 +5318,7 @@ class FrontierEngine:
                         self.state.task_source.digest if self.state.task_source else None
                     ),
                     "completion_case_present": self.state.completion_case is not None,
-                    "semantic_ci_passed": self.state.metadata.get("semantic_ci_passed"),
+                    "semantic_ci_passed": self.state.runtime.verification.semantic_ci_passed,
                 },
             )
             output = result.response
@@ -5494,8 +5504,8 @@ class FrontierEngine:
                 extra_notes=notes,
                 task_source=self.state.task_source,
                 semantic_ci={
-                    "passed": self.state.metadata.get("semantic_ci_passed"),
-                    "completion_gaps": self.state.metadata.get("semantic_ci_gaps", []),
+                    "passed": self.state.runtime.verification.semantic_ci_passed,
+                    "completion_gaps": self.state.runtime.verification.semantic_ci_gaps,
                     "findings": [
                         item.model_dump(mode="json")
                         for item in self.state.semantic_regression_findings
@@ -5698,7 +5708,7 @@ class FrontierEngine:
                 continue
             checks = self._record_deterministic_checks()
             _, release, decision = await self._run_release_tail(final_output, checks)
-            if self.state.metadata.get("release_replan_pending"):
+            if self.state.runtime.release.replan_pending:
                 self.observer.set_runtime(
                     RuntimeStatus.RUNNING,
                     phase=self.state.phase.value,
@@ -5800,7 +5810,7 @@ class FrontierEngine:
                     return self.adapter.materialize_final(
                         self.state.final_artifact, output_path.expanduser().resolve()
                     )
-                existing = self.state.metadata.get("output_path")
+                existing = self.state.runtime.completion.output_path
                 if existing and Path(existing).exists():
                     return Path(existing)
                 if self.state.final_artifact is None:
@@ -5822,7 +5832,7 @@ class FrontierEngine:
             self._recover_interrupted_actions()
             self._ensure_resource_state()
             try:
-                if self.state.metadata.get("control_status") in {"paused", "stopped"}:
+                if self.state.runtime.control.status in {"paused", "stopped"}:
                     self._append(
                         et.RUN_RESUMED,
                         {"detail": "new controller process resumed durable state"},
@@ -5833,22 +5843,20 @@ class FrontierEngine:
                     await self._bootstrap()
                     steered_before_bootstrap = False
 
-                if self.state.metadata.get(
-                    "bootstrap_independent_checkpoint_required"
-                ) and not await self._checkpoint([], self.state.round_index):
+                if self.state.runtime.bootstrap.independent_checkpoint_required and not await self._checkpoint([], self.state.round_index):
                     raise FrontierError(
                         "A full-scope bootstrap required an independent architecture "
                         "checkpoint, but that checkpoint failed"
                     )
 
                 if (
-                    steered_before_bootstrap or self.state.metadata.get("steering_replan_pending")
+                    steered_before_bootstrap or self.state.runtime.control.steering_replan_pending
                 ) and not await self._checkpoint([], self.state.round_index):
                     raise FrontierError(
                         "Operator steering was admitted, but its required checkpoint failed"
                     )
 
-                if self.state.metadata.get("extension_replan_pending"):
+                if self.state.runtime.extension.replan_pending:
                     intent_path.unlink(missing_ok=True)
                     if not await self._checkpoint([], self.state.round_index):
                         raise FrontierError(
@@ -5880,14 +5888,14 @@ class FrontierEngine:
                         artifact_path="",
                         summary=self.state.final_artifact.summary,
                         remaining_uncertainty=list(
-                            self.state.metadata.get("remaining_uncertainty", [])
+                            self.state.runtime.release.remaining_uncertainty
                         ),
                         release_gate_recommended=bool(
-                            self.state.metadata.get("release_gate_recommended", True)
+                            self.state.runtime.release.gate_recommended
                         ),
                     )
                     _, release, decision = await self._run_release_tail(dummy, checks)
-                    if self.state.metadata.get("release_replan_pending"):
+                    if self.state.runtime.release.replan_pending:
                         if not await self._checkpoint([], self.state.round_index):
                             raise FrontierError(
                                 "Resumed release evidence reopened an upstream commitment, "

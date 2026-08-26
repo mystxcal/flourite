@@ -443,7 +443,7 @@ def test_live_dashboard_labels_a_dead_failed_controller_and_its_recovery(
             detail="controller error",
         )
         state = engine.state.model_copy(deep=True)
-        state.metadata["bootstrap_error"] = "provider slice ended without a boundary"
+        state.runtime.bootstrap.error = "provider slice ended without a boundary"
         dashboard = LiveDashboard(
             run_dir=engine.run_dir,
             control=engine.control,

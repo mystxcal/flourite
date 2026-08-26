@@ -255,7 +255,7 @@ def test_completion_reserve_tracks_real_release_risk() -> None:
     allocator = governor(release_expected=True)
 
     assert allocator.completion_reserve(run) == 4
-    run.metadata["repair_count"] = 3
+    run.runtime.release.repair_count = 3
     assert allocator.completion_reserve(run) == 2
 
 

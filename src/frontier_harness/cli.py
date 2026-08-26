@@ -838,10 +838,10 @@ def status(
             "semantic CI",
             (
                 "passed · fresh-release adjudicated"
-                if state.metadata.get("semantic_ci_passed")
-                and state.metadata.get("semantic_ci_adjudication")
+                if state.runtime.verification.semantic_ci_passed
+                and state.runtime.verification.adjudication
                 else "passed"
-                if state.metadata.get("semantic_ci_passed")
+                if state.runtime.verification.semantic_ci_passed
                 else "pending/not passed"
             ),
         )
@@ -849,8 +849,8 @@ def status(
             "current artifact",
             state.current_artifact.artifact_id if state.current_artifact else "none",
         )
-        table.add_row("output", str(state.metadata.get("output_path", "not materialized")))
-        deliverables = state.metadata.get("deliverable_paths", [])
+        table.add_row("output", state.runtime.completion.output_path or "not materialized")
+        deliverables = state.runtime.completion.deliverable_paths
         if deliverables:
             table.add_row("deliverables", "\n".join(str(item) for item in deliverables))
         console.print(table)
