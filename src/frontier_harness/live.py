@@ -25,9 +25,11 @@ from rich.text import Text
 
 from .config import HarnessConfig
 from .control import CommandKind, RunControlPlane, RuntimeSnapshot, RuntimeStatus
+from .core.types import RunState as KernelRunState
 from .engine import FrontierEngine
 from .models import RunPhase, RunState
 from .presentation import brand, section_title
+from .runtime.engine import KernelEngine
 
 
 class KeyReader:
@@ -164,13 +166,19 @@ class LiveDashboard:
         self.activity_cursor: int | None = None
         self.activity_page_size = 1
 
-    def _state(self) -> RunState:
+    def _state(self) -> Any:
         return RunState.model_validate_json(
             (self.run_dir / FrontierEngine.STATE_FILE).read_text(encoding="utf-8")
         )
 
     @staticmethod
-    def _effective_status(state: RunState, runtime: RuntimeSnapshot) -> str:
+    def _terminal_label(state: Any) -> str | None:
+        if state.phase in {RunPhase.COMPLETE, RunPhase.FAILED}:
+            return str(state.phase.value)
+        return None
+
+    @staticmethod
+    def _effective_status(state: Any, runtime: RuntimeSnapshot) -> str:
         if state.phase == RunPhase.COMPLETE:
             return "complete"
         if state.phase == RunPhase.FAILED:
@@ -184,7 +192,7 @@ class LiveDashboard:
         return "resting"
 
     @staticmethod
-    def _summary_row_count(state: RunState) -> int:
+    def _summary_row_count(state: Any) -> int:
         return (
             5
             + int(bool(state.summit_active or state.discovery_records))
@@ -198,7 +206,7 @@ class LiveDashboard:
             + int(bool(state.runtime.bootstrap.error))
         )
 
-    def _summary(self, state: RunState, runtime: RuntimeSnapshot) -> Table:
+    def _summary(self, state: Any, runtime: RuntimeSnapshot) -> Table:
         table = Table.grid(expand=True, padding=(0, 1))
         table.add_column(style="flourite.muted", no_wrap=True)
         table.add_column(style="flourite.ice")
@@ -278,7 +286,7 @@ class LiveDashboard:
         return table
 
     @staticmethod
-    def _frontier(state: RunState) -> Table:
+    def _frontier(state: Any) -> Table:
         table = Table(
             box=box.SIMPLE,
             show_edge=False,
@@ -370,7 +378,7 @@ class LiveDashboard:
             table.add_row("○", "—", "waiting", "activity appears as the controller works")
         return table
 
-    def _activity_limit(self, state: RunState) -> int:
+    def _activity_limit(self, state: Any) -> int:
         if self.console.width >= 110:
             return max(1, self.console.height - 6)
         summary_rows = self._summary_row_count(state)
@@ -475,8 +483,9 @@ class LiveDashboard:
 
     def _prompt_steer(self, live: Live, keys: KeyReader) -> None:
         state = self._state()
-        if state.phase in {RunPhase.COMPLETE, RunPhase.FAILED}:
-            self.flash = f"run is {state.phase.value} · it cannot be steered"
+        terminal = self._terminal_label(state)
+        if terminal is not None:
+            self.flash = f"run is {terminal} · it cannot be steered"
             return
         live.stop()
         keys.restore()
@@ -497,9 +506,10 @@ class LiveDashboard:
             keys.enable()
             live.start(refresh=True)
 
-    def _restart(self, state: RunState, runtime: RuntimeSnapshot) -> None:
-        if state.phase in {RunPhase.COMPLETE, RunPhase.FAILED}:
-            self.flash = f"run is {state.phase.value}"
+    def _restart(self, state: Any, runtime: RuntimeSnapshot) -> None:
+        terminal = self._terminal_label(state)
+        if terminal is not None:
+            self.flash = f"run is {terminal}"
             return
         if runtime.process_alive:
             if runtime.status == RuntimeStatus.PAUSED:
@@ -574,8 +584,9 @@ class LiveDashboard:
                 state = self._state()
                 runtime = self.control.runtime()
                 if key == "p":
-                    if state.phase in {RunPhase.COMPLETE, RunPhase.FAILED}:
-                        self.flash = f"run is {state.phase.value}"
+                    terminal = self._terminal_label(state)
+                    if terminal is not None:
+                        self.flash = f"run is {terminal}"
                     elif runtime.process_alive and runtime.status == RuntimeStatus.PAUSED:
                         try:
                             self.control.enqueue(CommandKind.RESUME)
@@ -593,8 +604,9 @@ class LiveDashboard:
                 elif key == "r":
                     self._restart(state, runtime)
                 elif key == "x":
-                    if state.phase in {RunPhase.COMPLETE, RunPhase.FAILED}:
-                        self.flash = f"run is {state.phase.value}"
+                    terminal = self._terminal_label(state)
+                    if terminal is not None:
+                        self.flash = f"run is {terminal}"
                         continue
                     now = time.monotonic()
                     if now <= self.stop_armed_until:
@@ -609,6 +621,140 @@ class LiveDashboard:
                         self.flash = "press x again within 3 seconds to stop"
 
 
+class KernelLiveDashboard(LiveDashboard):
+    """The same operator surface projected from the phase-free kernel."""
+
+    def _state(self) -> KernelRunState:
+        return KernelRunState.model_validate_json(
+            (self.run_dir / KernelEngine.STATE_FILE).read_text(encoding="utf-8")
+        )
+
+    @staticmethod
+    def _terminal_label(state: KernelRunState) -> str | None:
+        return state.status.value if state.status.terminal else None
+
+    @staticmethod
+    def _effective_status(state: KernelRunState, runtime: RuntimeSnapshot) -> str:
+        if state.status.terminal:
+            return state.status.value
+        if runtime.process_alive:
+            return runtime.status.value
+        if runtime.status == RuntimeStatus.FAILED:
+            return "failed"
+        if runtime.status == RuntimeStatus.STOPPED:
+            return "stopped"
+        if state.status.value == "paused":
+            return "paused"
+        return "resting"
+
+    @staticmethod
+    def _summary_row_count(state: KernelRunState) -> int:
+        return 7 + int(state.finish_claim is not None) + int(bool(state.terminal_reason))
+
+    def _summary(self, state: KernelRunState, runtime: RuntimeSnapshot) -> Table:
+        table = Table.grid(expand=True, padding=(0, 1))
+        table.add_column(style="flourite.muted", no_wrap=True)
+        table.add_column(style="flourite.ice")
+        table.add_column(style="flourite.muted", no_wrap=True)
+        table.add_column(style="flourite.ice", justify="right")
+        proposed = sum(item.status.value == "proposed" for item in state.moves.values())
+        running = len(state.active_move_ids)
+        envelope = state.objective.envelope
+        model_turns = str(state.usage.model_turns)
+        if envelope.max_model_turns is not None:
+            model_turns += f"/{envelope.max_model_turns}"
+        table.add_row(
+            "state",
+            state.status.value,
+            "runtime",
+            self._effective_status(state, runtime).replace("_", " "),
+        )
+        table.add_row("elapsed", _elapsed(runtime.started_at), "model turns", model_turns)
+        table.add_row(
+            "tokens",
+            f"{state.usage.input_tokens:,} in · {state.usage.output_tokens:,} out",
+            "tools",
+            str(state.usage.tool_calls),
+        )
+        table.add_row(
+            "moves",
+            f"{running} running · {proposed} queued · {len(state.moves)} total",
+            "observations",
+            str(len(state.observations)),
+        )
+        table.add_row(
+            "trajectories",
+            f"{len(state.trajectories)} live/history",
+            "artifacts",
+            str(len(state.artifacts)),
+        )
+        table.add_row(
+            "current",
+            _short(
+                state.current_workspace.summary
+                if state.current_workspace is not None
+                else "establishing the first live result",
+                58,
+            ),
+            "workspace",
+            state.current_workspace_id or "—",
+        )
+        table.add_row(
+            "controller",
+            _short(runtime.detail or "—", 46),
+            "pid",
+            str(runtime.pid or "—"),
+        )
+        if state.finish_claim is not None:
+            table.add_row(
+                "finish claim",
+                _short(" · ".join(state.finish_claim.satisfaction_claims), 58),
+                "challenge",
+                "verified" if state.status.value == "satisfied" else "pending",
+            )
+        if state.terminal_reason:
+            table.add_row("reason", _short(state.terminal_reason, 58), "", "")
+        return table
+
+    @staticmethod
+    def _frontier(state: KernelRunState) -> Table:
+        table = Table(
+            box=box.SIMPLE,
+            show_edge=False,
+            expand=True,
+            padding=(0, 1),
+            header_style="flourite.blue",
+            border_style="flourite.line",
+        )
+        table.add_column("state", width=10, no_wrap=True)
+        table.add_column("live trajectory / next move")
+        table.add_column("head", width=18, no_wrap=True)
+        rows = 0
+        for trajectory in state.trajectories.values():
+            table.add_row(
+                trajectory.status.value,
+                _short(trajectory.purpose, 62),
+                trajectory.artifact_head_id or "—",
+            )
+            rows += 1
+        for move in state.moves.values():
+            if move.status.value != "proposed":
+                continue
+            table.add_row("queued", _short(move.intent, 62), move.mode.value)
+            rows += 1
+        if not rows:
+            table.add_row("—", "reconstructing the next decision", "—")
+        return table
+
+    def _activity_limit(self, state: KernelRunState) -> int:
+        if self.console.width >= 110:
+            return max(1, self.console.height - 6)
+        frontier_rows = max(1, min(8, len(state.trajectories) + 2))
+        command_rows = max(1, min(5, len(self.control.commands())))
+        fixed_rows = self._summary_row_count(state) + frontier_rows + command_rows + 14
+        return max(1, self.console.height - fixed_rows)
+
+
 def open_live_dashboard(
     run_ref: str,
     *,
@@ -621,4 +767,9 @@ def open_live_dashboard(
         run_dir / FrontierEngine.CONTROL_FILE,
         str(manifest["run_id"]),
     )
-    return LiveDashboard(run_dir=run_dir, control=control, console=console)
+    dashboard_type = (
+        KernelLiveDashboard
+        if manifest.get("architecture") == KernelEngine.ARCHITECTURE
+        else LiveDashboard
+    )
+    return dashboard_type(run_dir=run_dir, control=control, console=console)

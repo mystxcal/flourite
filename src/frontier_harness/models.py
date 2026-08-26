@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
+from .core.types import ContentRef as BlobRef
+
 ArtifactScope = Literal["targeted", "sequence", "whole_artifact", "release"]
 
 
@@ -251,14 +253,6 @@ class DiscoveryOperator(StrEnum):
     MUTATE = "mutate"
     CROSSOVER = "crossover"
     REVIVE = "revive"
-
-
-class BlobRef(StrictModel):
-    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    size: int = Field(ge=0)
-    media_type: str = "application/octet-stream"
-    relative_path: str
-    original_name: str | None = None
 
 
 class ArtifactRef(StrictModel):

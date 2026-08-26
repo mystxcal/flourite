@@ -54,6 +54,7 @@ from .presentation import (
     print_brand,
 )
 from .providers import build_provider
+from .runtime.engine import KernelEngine
 from .util import atomic_write_text
 
 app = typer.Typer(
@@ -248,6 +249,26 @@ def _read_task(task: str | None, task_file: Path | None) -> str:
     return cast(str, typer.prompt("Task"))
 
 
+def _kernel_overrides(
+    *,
+    adapter: str,
+    run_root: Path | None,
+    max_wall_seconds: float | None,
+    max_model_turns: int | None,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {"run": {"adapter": adapter}}
+    if run_root is not None:
+        data["run"]["run_root"] = str(run_root)
+    kernel: dict[str, Any] = {}
+    if max_wall_seconds is not None:
+        kernel["max_wall_seconds"] = max_wall_seconds
+    if max_model_turns is not None:
+        kernel["max_model_turns"] = max_model_turns
+    if kernel:
+        data["kernel"] = kernel
+    return data
+
+
 def _print_run_header(engine: FrontierEngine, *, mode: str, compact: bool = False) -> None:
     print_brand(console, compact=compact)
     table = key_value_table(title=mode)
@@ -327,6 +348,50 @@ def _open_control(run_ref: str, *, run_root: Path | None = None) -> tuple[Path, 
         run_dir / FrontierEngine.CONTROL_FILE,
         str(manifest["run_id"]),
     )
+
+
+def _is_kernel_run(run_dir: Path) -> bool:
+    try:
+        manifest = json.loads((run_dir / KernelEngine.MANIFEST_FILE).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    return str(manifest.get("architecture") or "") == KernelEngine.ARCHITECTURE
+
+
+def _resume_kernel(
+    run_ref: str,
+    *,
+    run_root: Path | None,
+    output: Path | None,
+    quiet: bool,
+) -> None:
+    try:
+        engine = KernelEngine.load(run_ref, run_root=run_root)
+    except (FrontierError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    try:
+        if engine.state.status.value == "paused":
+            engine.control.enqueue(CommandKind.RESUME)
+        if not quiet:
+            print_brand(console, compact=True)
+            table = key_value_table(title="resume")
+            table.add_row("run", engine.state.run_id)
+            table.add_row("kernel", KernelEngine.ARCHITECTURE)
+            table.add_row("state", engine.state.status.value)
+            console.print(table)
+        state = asyncio.run(engine.execute())
+        path = engine.materialize_current(output) if state.current_workspace is not None else None
+        console.print(
+            path
+            if quiet
+            else phase_line(
+                state.status.value,
+                str(path or state.terminal_reason or engine.run_dir),
+                state="done" if state.status.value == "satisfied" else "warn",
+            )
+        )
+    finally:
+        engine.close()
 
 
 def _extend_engine(
@@ -467,6 +532,170 @@ def run(
         console.print(path)
 
 
+@app.command("kernel-run", hidden=True)
+def kernel_run(
+    task: Annotated[str | None, typer.Argument(help="Task text; omit to read stdin.")] = None,
+    task_file: Annotated[
+        Path | None, typer.Option("--task-file", help="Read the task from a UTF-8 file.")
+    ] = None,
+    adapter: Annotated[
+        str,
+        typer.Option(
+            "--adapter", "-a", help="generic, research, formal, decision, creative, or software"
+        ),
+    ] = "generic",
+    workspace: Annotated[
+        Path | None,
+        typer.Option("--workspace", "-w", help="Source Git repository for software work."),
+    ] = None,
+    source: Annotated[
+        list[Path] | None,
+        typer.Option("--source", "-s", help="Explicit source file or directory; repeatable."),
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Materialize the current best here.")
+    ] = None,
+    config_path: Annotated[
+        Path | None, typer.Option("--config", "-c", help="TOML configuration file.")
+    ] = None,
+    run_root: Annotated[
+        Path | None, typer.Option("--run-root", help="Directory for durable runs.")
+    ] = None,
+    max_wall_seconds: Annotated[
+        float | None, typer.Option("--max-wall-seconds", min=30)
+    ] = None,
+    max_model_turns: Annotated[
+        int | None, typer.Option("--max-model-turns", min=1)
+    ] = None,
+    quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
+) -> None:
+    """Run the phase-free intelligence kernel (redesign preview)."""
+
+    task_text = _read_task(task, task_file)
+    config = load_config(
+        config_path,
+        overrides=_kernel_overrides(
+            adapter=adapter,
+            run_root=run_root,
+            max_wall_seconds=max_wall_seconds,
+            max_model_turns=max_model_turns,
+        ),
+    )
+    if adapter == "software" and workspace is None:
+        raise typer.BadParameter("--workspace is required for the software adapter")
+    engine = KernelEngine.create(
+        task_text,
+        config=config,
+        adapter_name=adapter,
+        workspace=workspace,
+        source_paths=source or [],
+    )
+    if not quiet:
+        print_brand(console, compact=True)
+        table = key_value_table(title="new kernel run")
+        table.add_row("run", engine.state.run_id)
+        table.add_row("adapter", adapter)
+        table.add_row("state", str(engine.run_dir))
+        console.print(table)
+    try:
+        state = asyncio.run(engine.execute())
+        path = engine.materialize_current(output) if state.current_workspace is not None else None
+        if quiet:
+            console.print(path or engine.run_dir)
+        else:
+            console.print(
+                phase_line(
+                    state.status.value,
+                    str(path or state.terminal_reason or engine.run_dir),
+                    state="done" if state.status.value == "satisfied" else "warn",
+                )
+            )
+    finally:
+        engine.close()
+
+
+@app.command("kernel-resume", hidden=True)
+def kernel_resume(
+    run_ref: Annotated[str, typer.Argument(help="Run id or directory.")],
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Materialize the current best here.")
+    ] = None,
+    run_root: Annotated[Path | None, typer.Option("--run-root")] = None,
+) -> None:
+    """Resume a phase-free kernel run."""
+
+    engine = KernelEngine.load(run_ref, run_root=run_root)
+    try:
+        state = asyncio.run(engine.execute())
+        path = engine.materialize_current(output) if state.current_workspace is not None else None
+        console.print(
+            phase_line(
+                state.status.value,
+                str(path or state.terminal_reason or engine.run_dir),
+                state="done" if state.status.value == "satisfied" else "warn",
+            )
+        )
+    finally:
+        engine.close()
+
+
+@app.command("kernel-status", hidden=True)
+def kernel_status(
+    run_ref: Annotated[str, typer.Argument(help="Run id or directory.")],
+    run_root: Annotated[Path | None, typer.Option("--run-root")] = None,
+) -> None:
+    """Inspect a phase-free kernel run."""
+
+    engine = KernelEngine.load(run_ref, run_root=run_root)
+    try:
+        _print_kernel_status(engine, as_json=False)
+    finally:
+        engine.close()
+
+
+def _print_kernel_status(engine: KernelEngine, *, as_json: bool) -> None:
+    state = engine.state
+    if as_json:
+        console.print_json(json.dumps(state.model_dump(mode="json")))
+        return
+    table = key_value_table(title=state.run_id)
+    runtime = engine.control.runtime()
+    controller = (
+        runtime.status.value.replace("_", " ")
+        if runtime.process_alive
+        else state.status.value
+        if state.status.terminal
+        else "resting"
+    )
+    table.add_row("state", state.status.value)
+    table.add_row("controller", f"{controller} · {runtime.detail or '—'}")
+    table.add_row("workspace", state.current_workspace_id or "not yet established")
+    table.add_row("trajectories", str(len(state.trajectories)))
+    table.add_row("artifacts", str(len(state.artifacts)))
+    table.add_row(
+        "moves",
+        f"{len(state.active_move_ids)} running · "
+        f"{sum(item.status.value == 'proposed' for item in state.moves.values())} queued · "
+        f"{len(state.moves)} total",
+    )
+    table.add_row("observations", str(len(state.observations)))
+    table.add_row("model turns", str(state.usage.model_turns))
+    table.add_row(
+        "tokens",
+        f"{state.usage.input_tokens:,} in · {state.usage.output_tokens:,} out",
+    )
+    if state.current_workspace is not None:
+        table.add_row("current", state.current_workspace.summary)
+    if state.finish_claim is not None:
+        table.add_row(
+            "finish claim",
+            "verified" if state.status.value == "satisfied" else "awaiting direct challenge",
+        )
+    if state.terminal_reason:
+        table.add_row("reason", state.terminal_reason)
+    console.print(table)
+
+
 @app.command()
 def arena(
     task: Annotated[str | None, typer.Argument(help="Task text; omit to read stdin.")] = None,
@@ -596,7 +825,7 @@ def resume(
     """Resume an interrupted run from its immutable ledger."""
 
     try:
-        _, control = _open_control(run_ref, run_root=run_root)
+        run_dir, control = _open_control(run_ref, run_root=run_root)
     except (FrontierError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     try:
@@ -612,6 +841,14 @@ def resume(
             )
     finally:
         control.close()
+    if _is_kernel_run(run_dir):
+        _resume_kernel(
+            run_ref,
+            run_root=run_root,
+            output=output,
+            quiet=quiet,
+        )
+        return
     try:
         engine = FrontierEngine.load(
             run_ref,
@@ -638,14 +875,20 @@ def steer(
     try:
         run_dir, control = _open_control(run_ref, run_root=run_root)
         try:
-            phase = str(
-                json.loads((run_dir / FrontierEngine.STATE_FILE).read_text(encoding="utf-8")).get(
-                    "phase", "created"
-                )
+            state_data = json.loads(
+                (run_dir / FrontierEngine.STATE_FILE).read_text(encoding="utf-8")
             )
-            if phase in {"complete", "failed"}:
+            state_label = str(state_data.get("status") or state_data.get("phase") or "created")
+            if state_label in {
+                "complete",
+                "satisfied",
+                "exhausted",
+                "blocked",
+                "stopped",
+                "failed",
+            }:
                 raise FrontierError(
-                    f"The run is {phase}; extend or create a run before steering it"
+                    f"The run is {state_label}; create a run before steering it"
                 )
             command = control.enqueue(CommandKind.STEER, text=guidance)
         finally:
@@ -772,7 +1015,15 @@ def status(
 ) -> None:
     """Show compact run state without making a model call."""
 
-    engine = FrontierEngine.load(run_ref, run_root=run_root)
+    run_dir = FrontierEngine.resolve_run_dir(run_ref, run_root=run_root)
+    if _is_kernel_run(run_dir):
+        kernel_engine = KernelEngine.load(run_dir)
+        try:
+            _print_kernel_status(kernel_engine, as_json=as_json)
+        finally:
+            kernel_engine.close()
+        return
+    engine = FrontierEngine.load(run_dir)
     try:
         state = engine.state
         if as_json:
@@ -1001,7 +1252,27 @@ def verify(
 ) -> None:
     """Verify the ledger hash chain, completion seal, and every referenced blob."""
 
-    engine = FrontierEngine.load(run_ref, run_root=run_root)
+    run_dir = FrontierEngine.resolve_run_dir(run_ref, run_root=run_root)
+    if _is_kernel_run(run_dir):
+        kernel_engine = KernelEngine.load(run_dir)
+        try:
+            with kernel_engine.lock:
+                count, tip = kernel_engine.verify()
+            console.print_json(
+                json.dumps(
+                    {
+                        "architecture": KernelEngine.ARCHITECTURE,
+                        "events": count,
+                        "ledger_tip": tip,
+                        "state": "verified",
+                        "blobs": "verified",
+                    }
+                )
+            )
+        finally:
+            kernel_engine.close()
+        return
+    engine = FrontierEngine.load(run_dir)
     try:
         with engine.lock:
             engine._refresh_state_from_ledger()
@@ -1018,7 +1289,16 @@ def list_events(
 ) -> None:
     """Print the immutable event stream as JSON Lines."""
 
-    engine = FrontierEngine.load(run_ref, run_root=run_root)
+    run_dir = FrontierEngine.resolve_run_dir(run_ref, run_root=run_root)
+    if _is_kernel_run(run_dir):
+        kernel_engine = KernelEngine.load(run_dir)
+        try:
+            for event in kernel_engine.journal.events():
+                console.print(json.dumps(event.model_dump(mode="json"), ensure_ascii=False))
+        finally:
+            kernel_engine.close()
+        return
+    engine = FrontierEngine.load(run_dir)
     try:
         for event in engine.events():
             console.print(json.dumps(event.model_dump(mode="json"), ensure_ascii=False))
@@ -1061,7 +1341,16 @@ def apply_patch(
 
     if not yes and not typer.confirm("Apply the final patch to the original source repository?"):
         raise typer.Abort()
-    engine = FrontierEngine.load(run_ref, run_root=run_root)
+    run_dir = FrontierEngine.resolve_run_dir(run_ref, run_root=run_root)
+    if _is_kernel_run(run_dir):
+        kernel_engine = KernelEngine.load(run_dir)
+        try:
+            result = kernel_engine.apply_current_explicit()
+            console.print_json(json.dumps(result))
+        finally:
+            kernel_engine.close()
+        return
+    engine = FrontierEngine.load(run_dir)
     try:
         result = engine.apply_final_patch()
         console.print_json(json.dumps(result))

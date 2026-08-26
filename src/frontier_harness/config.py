@@ -303,6 +303,18 @@ class SummitPolicy(StrictModel):
         return self
 
 
+class KernelPolicy(StrictModel):
+    """Hard envelope and compact-state settings for the phase-free kernel."""
+
+    max_wall_seconds: float | None = Field(default=None, gt=0)
+    max_input_tokens: int | None = Field(default=None, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0)
+    max_model_turns: int | None = Field(default=None, gt=0)
+    max_cost_usd: float | None = Field(default=None, gt=0)
+    max_parallel: int = Field(default=1, ge=1, le=32)
+    max_event_payload_bytes: int = Field(default=256_000, ge=10_000)
+
+
 class HarnessConfig(StrictModel):
     run: RunPolicy = Field(default_factory=RunPolicy)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -312,6 +324,7 @@ class HarnessConfig(StrictModel):
     resource: ResourcePolicy = Field(default_factory=ResourcePolicy)
     cognition: CognitionPolicy = Field(default_factory=CognitionPolicy)
     summit: SummitPolicy = Field(default_factory=SummitPolicy)
+    kernel: KernelPolicy = Field(default_factory=KernelPolicy)
 
     @model_validator(mode="after")
     def validate_reserve_and_batch(self) -> HarnessConfig:
@@ -387,6 +400,14 @@ synthesis_reserve_calls = 4       # legacy/static mode only
 # max_input_tokens = 500000
 # max_output_tokens = 60000
 # max_wall_seconds = 7200
+
+[kernel]
+# max_wall_seconds = 43200          # optional operator-owned hard envelope
+max_parallel = 1                    # search widens only when the task needs it
+# max_input_tokens = 1000000
+# max_output_tokens = 100000
+# max_model_turns = 1000
+# max_cost_usd = 100
 
 [provider]
 kind = "omp-codex"

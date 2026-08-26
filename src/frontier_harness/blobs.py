@@ -6,7 +6,7 @@ import mimetypes
 from pathlib import Path
 
 from .errors import LedgerIntegrityError
-from .models import BlobRef
+from .core.types import ContentRef
 from .util import atomic_write_bytes, sha256_bytes
 
 
@@ -26,7 +26,7 @@ class BlobStore:
         *,
         media_type: str = "application/octet-stream",
         original_name: str | None = None,
-    ) -> BlobRef:
+    ) -> ContentRef:
         digest = sha256_bytes(data)
         path = self._path_for(digest)
         if not path.exists():
@@ -35,7 +35,7 @@ class BlobStore:
             existing = path.read_bytes()
             if len(existing) != len(data) or sha256_bytes(existing) != digest:
                 raise LedgerIntegrityError(f"Blob collision or corruption at {path}")
-        return BlobRef(
+        return ContentRef(
             digest=digest,
             size=len(data),
             media_type=media_type,
@@ -49,7 +49,7 @@ class BlobStore:
         *,
         media_type: str = "text/plain; charset=utf-8",
         original_name: str | None = None,
-    ) -> BlobRef:
+    ) -> ContentRef:
         return self.put_bytes(
             text.encode("utf-8"), media_type=media_type, original_name=original_name
         )
@@ -60,7 +60,7 @@ class BlobStore:
         *,
         media_type: str | None = None,
         original_name: str | None = None,
-    ) -> BlobRef:
+    ) -> ContentRef:
         if not source.is_file():
             raise FileNotFoundError(source)
         guessed = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
@@ -70,7 +70,7 @@ class BlobStore:
             original_name=original_name or source.name,
         )
 
-    def path(self, ref: BlobRef) -> Path:
+    def path(self, ref: ContentRef) -> Path:
         expected = self._path_for(ref.digest)
         expected_relative = expected.relative_to(self.root).as_posix()
         if ref.relative_path != expected_relative:
@@ -79,24 +79,24 @@ class BlobStore:
             )
         return expected
 
-    def read_bytes(self, ref: BlobRef) -> bytes:
+    def read_bytes(self, ref: ContentRef) -> bytes:
         path = self.path(ref)
         data = path.read_bytes()
         if sha256_bytes(data) != ref.digest or len(data) != ref.size:
             raise LedgerIntegrityError(f"Blob failed integrity verification: {ref.digest}")
         return data
 
-    def read_text(self, ref: BlobRef) -> str:
+    def read_text(self, ref: ContentRef) -> str:
         return self.read_bytes(ref).decode("utf-8")
 
-    def materialize(self, ref: BlobRef, destination: Path, *, overwrite: bool = True) -> Path:
+    def materialize(self, ref: ContentRef, destination: Path, *, overwrite: bool = True) -> Path:
         data = self.read_bytes(ref)
         if destination.exists() and not overwrite:
             raise FileExistsError(destination)
         atomic_write_bytes(destination, data, mode=0o600)
         return destination
 
-    def verify(self, ref: BlobRef) -> None:
+    def verify(self, ref: ContentRef) -> None:
         path = self.path(ref)
         if not path.exists():
             raise LedgerIntegrityError(f"Missing blob: {ref.digest}")
