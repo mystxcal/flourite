@@ -248,81 +248,13 @@ continues to use the `frontier_harness` import.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    SOURCE["Immutable<br/>Task Source"] --> CHARTER["Revisable<br/>Task Charter"]
-    OPERATOR["Live operator<br/>view + controls"] --> INBOX[("Durable<br/>control inbox")]
-    INBOX -->|safe-boundary steer| SOURCE
+<p align="center">
+  <a href="docs/CANONICAL_MODEL.md">
+    <img src="assets/flourite-canonical-architecture.svg" alt="Flourite canonical architecture: fixed authority, evolving semantic crystal, intelligence loop, release membrane, executable ownership, and lossless foundation" width="100%">
+  </a>
+</p>
 
-    subgraph CONTROL["Sparse control loop"]
-        LEAD["Persistent Lead"]
-        ARTIFACT["Current artifact<br/>+ Artifact Spine"]
-        FRONTIER["Active cruxes<br/>+ candidate deltas"]
-        GOVERNOR{"Evidence-driven<br/>resource governor"}
-        TOPOLOGY{"Need another<br/>context?"}
-
-        LEAD --> ARTIFACT
-        ARTIFACT --> FRONTIER
-        FRONTIER --> GOVERNOR
-        GOVERNOR -->|earned horizon| TOPOLOGY
-    end
-
-    CHARTER --> LEAD
-    OPERATOR -->|hard envelope| GOVERNOR
-
-    subgraph EXECUTION["Temporary execution"]
-        CAPABILITIES["Full trusted capability plane<br/>reason · code · shell · search · media"]
-        WORKER["Sol specialist"]
-        INSTRUMENT["Validated<br/>instrument"]
-        SUMMIT["Experimental frontier<br/>develop · falsify · mutate · cross"]
-        OBJECTIVE["Domain objective<br/>runtime measurement"]
-    end
-
-    CAPABILITIES --> LEAD
-    TOPOLOGY -->|independent question| WORKER
-    TOPOLOGY -->|weak feedback| INSTRUMENT
-    TOPOLOGY -->|credible ceiling risk| SUMMIT
-    CAPABILITIES --> WORKER
-    CAPABILITIES --> INSTRUMENT
-    CAPABILITIES --> SUMMIT
-    SUMMIT --> OBJECTIVE
-
-    WORKER --> RECEIPT["Action receipts"]
-    CAPABILITIES --> RECEIPT
-    INSTRUMENT --> RECEIPT
-    SUMMIT --> RECEIPT
-    OBJECTIVE --> RECEIPT
-
-    RECEIPT --> CHECKPOINT["Lead checkpoint<br/>admit · reject · reopen"]
-    CHECKPOINT --> ARTIFACT
-    CHECKPOINT --> LEDGER[("Hash-chained<br/>evidence ledger")]
-    ARTIFACT -->|version reference| LEDGER
-    LEDGER --> REDUCER["Deterministic<br/>state reducer"]
-    REDUCER --> STATE["Explicit<br/>run state"]
-    STATE --> FRONTIER
-    STATE --> LEAD
-    LEDGER -. reconstructs .-> LEAD
-    LEDGER --> BLOBS[("Content-addressed<br/>artifacts + traces")]
-    LEDGER -. compact state .-> OPERATOR
-    CAPABILITIES -. sanitized activity .-> OPERATOR
-
-    ARTIFACT --> PROOF["Semantic CI<br/>+ Completion Case"]
-    PROOF --> CHALLENGE{"Fresh release<br/>challenge"}
-    CHALLENGE -->|material issue| FRONTIER
-    CHALLENGE -->|survives| SEALED["Sealed result"]
-
-    classDef anchor fill:#201735,color:#f8f7ff,stroke:#a998ff,stroke-width:2px;
-    classDef active fill:#122436,color:#eefaff,stroke:#52d9ff,stroke-width:1.5px;
-    classDef evidence fill:#171f2d,color:#edf5ff,stroke:#668dff,stroke-width:1.5px;
-    classDef gate fill:#251d35,color:#f8f3ff,stroke:#b783ff,stroke-width:1.5px;
-    classDef sealed fill:#102b28,color:#ecfffb,stroke:#55e6c1,stroke-width:2px;
-
-    class SOURCE,CHARTER,ARTIFACT,OPERATOR anchor;
-    class LEAD,FRONTIER,GOVERNOR,TOPOLOGY,CAPABILITIES,WORKER,INSTRUMENT,SUMMIT,OBJECTIVE active;
-    class INBOX,RECEIPT,CHECKPOINT,LEDGER,REDUCER,STATE,BLOBS evidence;
-    class PROOF,CHALLENGE gate;
-    class SEALED sealed;
-```
+<p align="center"><sub><a href="docs/CANONICAL_MODEL.md">Read the canonical model</a> · <a href="docs/flourite-canonical-architecture.mmd">Edit the Mermaid source</a></sub></p>
 
 The normal path is deliberately sparse:
 

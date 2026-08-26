@@ -12,80 +12,13 @@ Everything else is substrate, an optional capability, or an interface.
 
 ## The whole object
 
-```mermaid
-flowchart TB
-    OP["Operator<br/>task · amendments · hard envelope"]
+<p align="center">
+  <a href="../assets/flourite-canonical-architecture.svg">
+    <img src="../assets/flourite-canonical-architecture.svg" alt="Flourite canonical architecture" width="100%">
+  </a>
+</p>
 
-    subgraph ANCHOR["Fixed anchor"]
-        TS["Immutable Task Source"]
-        TC["Revisable traced interpretation"]
-        TS --> TC
-    end
-
-    subgraph LIVE["One evolving run state"]
-        A["One authoritative artifact"]
-        S["Artifact Spine<br/>mechanism · decisions · revisable commitments"]
-        O["Release obligations<br/>what must become true"]
-        F["Decision frontier<br/>bottleneck · cruxes · live and eliminated families"]
-        E["Scoped evidence<br/>what was actually observed"]
-        A --- S
-        O --- F
-        F --- E
-    end
-
-    MAP["Loss-aware frontier map<br/>task · spine · kernel · debt · evidence"]
-    Q["Choose the highest-value<br/>discriminative question"]
-    V["Question-specific context lens<br/>map · zoom · open"]
-    M{"Model chooses the most<br/>direct potent move"}
-    ACT["Reason with the full capability plane<br/>tools · code · search · media · workers · instruments"]
-    R["Bounded receipt<br/>result · scope · cost · decision effect"]
-    K["Frontier Keeper<br/>accept · reject · reopen · compress"]
-    G["Causal gradient vector<br/>and commitment state"]
-    RG{"Resource governor<br/>continue or converge"}
-    H["Grant one more<br/>work horizon"]
-
-    subgraph RELEASE["Release membrane"]
-        SYN["Clean synthesis"]
-        CASE["Semantic CI<br/>+ Completion Case"]
-        CH{"Fresh artifact-bound challenge"}
-        ROUTE{"Earliest falsified boundary<br/>local · architecture · frame · observation"}
-        FIX["Bounded local repair"]
-        SEAL["Sealed result"]
-        SYN --> CASE --> CH
-        CH -->|material failure| ROUTE
-        ROUTE -->|local or sequence| FIX --> CASE
-        CH -->|survives| SEAL
-    end
-
-    subgraph TRUTH["Lossless foundation"]
-        L[("Hash-chained event ledger")]
-        B[("Content-addressed blobs")]
-        D["Deterministic reducer"]
-        L --> D
-        B --> D
-    end
-
-    C["Capability plane<br/>trusted tools · workspace · network · exact artifacts"]
-
-    OP --> TS
-    OP -->|safe-boundary amendment| TS
-    OP -->|ceiling, never a quota| RG
-    TC --> LIVE
-    LIVE --> MAP --> Q --> V --> M --> ACT --> R --> K
-    C --> ACT
-    K -->|integrate meaning| LIVE
-    K --> G
-    G --> RG
-    RG -->|productive or earned commitment| H --> MAP
-    RG -->|no useful horizon remains| SYN
-    ROUTE -. reconstruct · reframe · reobserve .-> LIVE
-
-    TS -. recorded .-> L
-    A -. versions .-> B
-    R -. raw observation .-> L
-    K -. semantic transition .-> L
-    D -. reconstructs .-> LIVE
-```
+<p align="center"><sub><a href="flourite-canonical-architecture.mmd">Mermaid source</a> · click the plate for full resolution</sub></p>
 
 This is one closed loop around one artifact. It is not a procession of agents
 and it is not a fixed workflow graph.
