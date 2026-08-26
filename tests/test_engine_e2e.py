@@ -12,10 +12,17 @@ from frontier_harness.engine import FrontierEngine
 from frontier_harness.errors import FrontierError, LedgerIntegrityError, ProviderCallError
 from frontier_harness.exporter import export_run
 from frontier_harness.models import (
+    ActionKind,
+    ActionProposal,
     ArtifactRef,
     BootstrapOutput,
     CheckpointOutput,
+    CostBand,
+    FailureScope,
     FinalOutput,
+    Impact,
+    IndependenceClass,
+    RecoveryRoute,
     ReleaseFinding,
     ReleaseOutput,
     RepairOutput,
@@ -119,6 +126,55 @@ class WorkerBlocks(FakeProvider):
         return await super().run(request)
 
 
+class FullScopeBootstrapProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.checkpoint_calls = 0
+
+    async def run(self, request):  # type: ignore[no-untyped-def]
+        result = await super().run(request)
+        if request.response_model is BootstrapOutput:
+            return result.model_copy(
+                update={
+                    "response": result.response.model_copy(
+                        update={"artifact_scope": "whole_artifact"}
+                    )
+                }
+            )
+        if request.response_model is CheckpointOutput:
+            self.checkpoint_calls += 1
+        return result
+
+
+class DeadSlateBootstrapProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.checkpoint_calls = 0
+
+    async def run(self, request):  # type: ignore[no-untyped-def]
+        result = await super().run(request)
+        if request.response_model is BootstrapOutput:
+            human_only = ActionProposal(
+                kind=ActionKind.DISCRIMINATE,
+                target="human-only verdict",
+                assignment="Ask a human to judge the artifact.",
+                impact=Impact.HIGH,
+                cost=CostBand.MODERATE,
+                independence_class=IndependenceClass.HUMAN,
+                expected_decision_effect="Resolve the only open issue.",
+            )
+            return result.model_copy(
+                update={
+                    "response": result.response.model_copy(
+                        update={"actions": [human_only], "quality_floor_reached": False}
+                    )
+                }
+            )
+        if request.response_model is CheckpointOutput:
+            self.checkpoint_calls += 1
+        return result
+
+
 def test_clean_fresh_release_can_clear_only_model_semantic_false_positives() -> None:
     release = ReleaseOutput(
         releaseable=True,
@@ -148,6 +204,85 @@ def test_clean_fresh_release_can_clear_only_model_semantic_false_positives() -> 
         checks=[],
         release=release,
     )
+
+
+def test_release_failure_routes_to_earliest_causal_boundary() -> None:
+    local = ReleaseOutput(
+        findings=[
+            ReleaseFinding(
+                severity="high",
+                title="Misaligned label",
+                explanation="One label overlaps its icon.",
+                scope=FailureScope.LOCAL,
+                recovery_route=RecoveryRoute.REPAIR,
+            )
+        ],
+        releaseable=False,
+    )
+    assert FrontierEngine._release_recovery(local) is None
+
+    structural = ReleaseOutput(
+        findings=[
+            ReleaseFinding(
+                severity="fatal",
+                title="The film is a slide deck",
+                explanation="The global grammar never becomes cinematic.",
+                scope=FailureScope.ARCHITECTURE,
+                causal_layer="temporal grammar",
+                falsified_assumptions=["Cards can carry the commissioned experience."],
+                invalidated_invariants=["The card grammar produces cinematic motion."],
+                recovery_route=RecoveryRoute.RECONSTRUCT,
+                next_discriminator="Render and watch one representative 20-second sequence.",
+            )
+        ],
+        releaseable=False,
+    )
+    recovery = FrontierEngine._release_recovery(structural)
+    assert recovery is not None
+    assert recovery.route == RecoveryRoute.RECONSTRUCT
+    assert recovery.scope == FailureScope.ARCHITECTURE
+    assert recovery.invalidated_invariants == [
+        "The card grammar produces cinematic motion."
+    ]
+    assert recovery.next_discriminators == [
+        "Render and watch one representative 20-second sequence."
+    ]
+    assert recovery.evidence_references == []
+
+
+def test_full_scope_bootstrap_gets_independent_stage_gate(fake_config) -> None:
+    provider = FullScopeBootstrapProvider()
+    engine = FrontierEngine.create(
+        "Build a high-stakes creative artifact.",
+        config=fake_config(run={"semantic_profiles": ["creative", "media"]}),
+        provider=provider,
+    )
+    try:
+        asyncio.run(engine.execute())
+        assert provider.checkpoint_calls >= 1
+        assert engine.state.metadata["bootstrap_artifact_scope"] == "whole_artifact"
+        assert "bootstrap_independent_checkpoint_required" not in engine.state.metadata
+    finally:
+        engine.close()
+
+
+def test_unexecutable_action_slate_replans_instead_of_false_convergence(
+    fake_config,
+) -> None:
+    provider = DeadSlateBootstrapProvider()
+    engine = FrontierEngine.create(
+        "Resolve a real issue without pretending unavailable human evidence exists.",
+        config=fake_config(cognition={"human_evidence_available": False}),
+        provider=provider,
+    )
+    try:
+        asyncio.run(engine.execute())
+        assert provider.checkpoint_calls >= 1
+        event_types = [event.event_type for event in engine.ledger.events()]
+        assert "frontier.replan_requested" in event_types
+        assert engine.state.metadata["frontier_replan_fingerprints"]
+    finally:
+        engine.close()
 
 
 def test_fake_end_to_end_resume_verify_and_export(tmp_path: Path, fake_config) -> None:
@@ -404,6 +539,115 @@ class SoftwarePatchProvider(FakeProvider):
             target = request.cwd / "app.txt"
             target.write_text("base\nmodel-change\n", encoding="utf-8")
         return result
+
+
+class StructuralReleaseRecoveryProvider(SoftwarePatchProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_calls = 0
+        self.repair_calls = 0
+        self.reconstruction_planned = False
+
+    async def run(self, request):  # type: ignore[no-untyped-def]
+        result = await super().run(request)
+        if request.response_model is RepairOutput:
+            self.repair_calls += 1
+        if request.response_model is ReleaseOutput:
+            self.release_calls += 1
+            if self.release_calls == 1:
+                release = ReleaseOutput(
+                    findings=[
+                        ReleaseFinding(
+                            severity="fatal",
+                            title="Global architecture contradicts the task",
+                            explanation="No local patch can correct the governing structure.",
+                            scope=FailureScope.ARCHITECTURE,
+                            causal_layer="governing architecture",
+                            falsified_assumptions=["The baseline structure can carry the task."],
+                            invalidated_invariants=["The baseline structure is sufficient."],
+                            recovery_route=RecoveryRoute.RECONSTRUCT,
+                            next_discriminator="Build one representative reconstructed slice.",
+                        )
+                    ],
+                    requires_repair=True,
+                    releaseable=False,
+                )
+                return result.model_copy(update={"response": release})
+        if (
+            request.response_model is CheckpointOutput
+            and self.release_calls == 1
+            and not self.reconstruction_planned
+        ):
+            self.reconstruction_planned = True
+            checkpoint = result.response.model_copy(
+                update={
+                    "actions": [
+                        ActionProposal(
+                            kind=ActionKind.RECONSTRUCT,
+                            target="governing architecture",
+                            assignment=(
+                                "Reconstruct the artifact from the last sound boundary and "
+                                "validate one representative slice before completing it."
+                            ),
+                            impact=Impact.FATAL,
+                            cost=CostBand.MODERATE,
+                            independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
+                            expected_decision_effect=(
+                                "Replace the falsified architecture with one that survives "
+                                "a representative discriminator."
+                            ),
+                            artifact_scope="whole_artifact",
+                            distinctive_angle="causal reconstruction, not local repair",
+                        )
+                    ],
+                    "stop": False,
+                    "stop_reason": None,
+                }
+            )
+            return result.model_copy(update={"response": checkpoint})
+        if request.response_model is FinalOutput and self.reconstruction_planned:
+            (request.cwd / "app.txt").write_text(
+                "base\nreconstructed-architecture\n", encoding="utf-8"
+            )
+        return result
+
+
+def test_structural_release_failure_reopens_frontier_without_local_repair(
+    fake_config,
+    git_repo: Path,
+) -> None:
+    provider = StructuralReleaseRecoveryProvider()
+    engine = FrontierEngine.create(
+        "Reconstruct a falsified architecture instead of polishing it.",
+        config=fake_config(
+            run={
+                "budget": {
+                    "max_rounds": 4,
+                    "max_calls": 18,
+                    "max_parallel": 2,
+                    "synthesis_reserve_calls": 4,
+                }
+            },
+            software={"apply_final_patch": True, "checks": []},
+        ),
+        adapter_name="software",
+        workspace=git_repo,
+        provider=provider,
+    )
+    try:
+        asyncio.run(engine.execute())
+        assert provider.reconstruction_planned is True
+        assert provider.repair_calls == 0
+        assert provider.release_calls == 2
+        assert engine.state.metadata["mutation_gate_passed"] is True
+        assert engine.state.metadata["release_recovery_history"][0]["route"] == (
+            "reconstruct"
+        )
+        assert engine.state.metadata["release_reopened_obligations"]
+        event_types = [event.event_type for event in engine.ledger.events()]
+        assert "release.recovery_requested" in event_types
+    finally:
+        engine.close()
 
 
 class ReleaseFailsForSoftware(SoftwarePatchProvider):

@@ -45,6 +45,7 @@ from .cognition import (
     instantiate_obligations,
     observed_modalities_from_trace,
     reactivate_cruxes_for_open_obligations,
+    reconcile_artifact_spine,
     reconcile_frontier_kernel,
     validate_lead_ack,
     validate_reframe,
@@ -73,6 +74,7 @@ from .models import (
     ActionKind,
     ActionProposal,
     ActionReceipt,
+    ActionRecord,
     ActionSpec,
     ActionStatus,
     ArtifactRef,
@@ -92,6 +94,7 @@ from .models import (
     EpistemicMode,
     EvidenceModality,
     EvidenceRecord,
+    FailureScope,
     FinalOutput,
     FrontierKernel,
     Impact,
@@ -108,7 +111,9 @@ from .models import (
     OverlayStatus,
     Probe,
     ProbeStatus,
+    RecoveryRoute,
     ReleaseOutput,
+    ReleaseRecovery,
     RepairOutput,
     ResourceDecisionKind,
     Role,
@@ -1965,9 +1970,11 @@ class FrontierEngine:
                 task=self.state.source_prompt,
                 state=self.state,
                 assignment=(
-                    "Orient to the immutable request, produce one credible end-to-end baseline, "
-                    "compile only the minimum obligations/cruxes needed, and expose only "
-                    "decision-sensitive unresolved work."
+                    "Orient to the immutable request and construct the smallest decisive "
+                    "artifact that can falsify the highest-leverage architectural choice. "
+                    "Do not build the whole deliverable while a cheaper representative slice "
+                    "can still expose a fatal direction error. Compile only the minimum "
+                    "obligations/cruxes needed and expose decision-sensitive unresolved work."
                 ),
                 goal_contract=None,
                 task_source=self.state.task_source,
@@ -2272,6 +2279,22 @@ class FrontierEngine:
             )
             high_open = any(issue.impact in {Impact.FATAL, Impact.HIGH} for issue in issues)
             active_crux = any(item.status == CruxStatus.ACTIVE for item in cruxes)
+            profiles = set(self.config.run.semantic_profiles)
+            profiles.update(contract.semantic_profiles)
+            qualitative_architecture = bool(
+                profiles.intersection({"creative", "media"})
+            )
+            independent_checkpoint_required = bool(
+                (
+                    output.artifact_scope in {"whole_artifact", "release"}
+                    or qualitative_architecture
+                )
+                and (
+                    high_open
+                    or active_crux
+                    or output.artifact_scope in {"whole_artifact", "release"}
+                )
+            )
             stop_requested = bool(
                 output.quality_floor_reached
                 and not high_open
@@ -2290,6 +2313,8 @@ class FrontierEngine:
                 "artifact_spine": spine.model_dump(mode="json"),
                 "frontier_kernel": frontier_kernel.model_dump(mode="json"),
                 "artifact": artifact.model_dump(mode="json"),
+                "artifact_scope": output.artifact_scope,
+                "independent_checkpoint_required": independent_checkpoint_required,
                 "issues": [item.model_dump(mode="json") for item in issues],
                 "obligations": [item.model_dump(mode="json") for item in obligations],
                 "cruxes": [item.model_dump(mode="json") for item in cruxes],
@@ -3440,6 +3465,15 @@ class FrontierEngine:
             self._close_workspace(workspace)
 
     def _fresh_frontier_keeper(self) -> bool:
+        if any(
+            self.state.metadata.get(key)
+            for key in (
+                "bootstrap_independent_checkpoint_required",
+                "frontier_replan_pending",
+                "release_replan_pending",
+            )
+        ):
+            return True
         mode = self.config.cognition.frontier_keeper
         if mode == "fresh":
             return True
@@ -3510,6 +3544,28 @@ class FrontierEngine:
                     )
                     + ". Do not propose another local mutation on them. Reopen the causal "
                     "model through a reframe, reconstruction, ceiling audit, or mechanism graft."
+                )
+            if self.state.metadata.get("bootstrap_independent_checkpoint_required"):
+                checkpoint_notes += (
+                    "\nIndependent stage gate: the construction Lead produced a whole-artifact "
+                    "or release-scope bootstrap. Audit its load-bearing architecture before "
+                    "hardening it. If a representative slice could still falsify the direction, "
+                    "schedule that discriminator rather than polishing or extending the whole."
+                )
+            if replan := self.state.metadata.get("frontier_replan_pending"):
+                checkpoint_notes += (
+                    "\nPlanner deadlock: the prior action slate produced no executable action. "
+                    "Do not repeat, rename, or defer the same slate. Preserve the unresolved debt "
+                    "and propose a materially executable route, or identify a genuine external "
+                    f"blocker. Scheduler evidence: {canonical_json(replan)}"
+                )
+            if recovery := self.state.metadata.get("release_replan_pending"):
+                checkpoint_notes += (
+                    "\nRelease evidence falsified an upstream commitment. Treat this as causal "
+                    "evidence, not a repair checklist. Explicitly revise every matching Artifact "
+                    "Spine invariant, reopen dependent obligations and cruxes, and schedule the "
+                    "typed recovery route at the earliest failed boundary. Recovery evidence: "
+                    f"{canonical_json(recovery)}"
                 )
             capsule = self._capsules.populate(
                 workspace,
@@ -3841,18 +3897,11 @@ class FrontierEngine:
                 self._changed_models(self.state.discovery_records, projected_discovery),
             )
 
-            spine = output.artifact_spine or self.state.artifact_spine
+            spine, spine_notes = reconcile_artifact_spine(
+                self.state.artifact_spine, output.artifact_spine
+            )
             if spine is None and self.state.contract is not None:
                 spine = fallback_spine(self.state.contract, output.artifact_summary)
-            if spine is not None and self.state.artifact_spine is not None:
-                spine = spine.model_copy(deep=True)
-                spine.revision = max(spine.revision, self.state.artifact_spine.revision + 1)
-                spine.hard_invariants = unique_preserving_order(
-                    [*self.state.artifact_spine.hard_invariants, *spine.hard_invariants]
-                )
-                spine.must_preserve = unique_preserving_order(
-                    [*self.state.artifact_spine.must_preserve, *spine.must_preserve]
-                )
 
             proposals = list(output.actions)
             self._ensure_fresh_global_review(
@@ -4091,6 +4140,7 @@ class FrontierEngine:
                     "reframe_notes": reframe_notes,
                     "dropped_action_proposals": dropped_actions,
                     "frontier_kernel_notes": asdict(frontier_notes),
+                    "artifact_spine_notes": spine_notes,
                     "ceiling_scan": (
                         output.ceiling_scan.model_dump(mode="json") if output.ceiling_scan else None
                     ),
@@ -4198,6 +4248,11 @@ class FrontierEngine:
 
             proposals = [item.spec for item in pending if item.status == ActionStatus.PROPOSED]
             if not proposals:
+                if await self._replan_dead_frontier(
+                    reason="no proposed action remained while release debt was still open",
+                    action_records=pending,
+                ):
+                    continue
                 return "no decision-relevant action remains"
 
             # One checkpoint plus the current evidence-derived completion path
@@ -4288,8 +4343,17 @@ class FrontierEngine:
                 actor="scheduler",
             )
             if not selection.selected:
+                if await self._replan_dead_frontier(
+                    reason=(
+                        "scheduler found no executable action; every proposal was dominated, "
+                        "correlated, deferred, or below threshold"
+                    ),
+                    action_records=pending,
+                ):
+                    continue
                 return (
-                    "all proposed actions were dominated, correlated, deferred, or below threshold"
+                    "planner deadlock: unresolved release debt remains but no executable "
+                    "action survived an independent replan"
                 )
 
             round_state = self.state.model_copy(deep=True)
@@ -4335,6 +4399,68 @@ class FrontierEngine:
             ):
                 return "checkpoint failed or lacked remaining call budget"
         return self.state.stop_reason or "semantic controller requested stop"
+
+    def _has_unresolved_frontier_debt(self) -> bool:
+        return bool(
+            self.state.high_impact_open_issues
+            or any(
+                item.release_blocking
+                and item.status in {ObligationStatus.OPEN, ObligationStatus.BLOCKED}
+                for item in self.state.obligations.values()
+            )
+            or any(item.status == CruxStatus.ACTIVE for item in self.state.cruxes.values())
+            or self.state.metadata.get("semantic_ci_gaps")
+        )
+
+    async def _replan_dead_frontier(
+        self,
+        *,
+        reason: str,
+        action_records: Sequence[ActionRecord],
+    ) -> bool:
+        """Give a dead action slate one fresh causal replan, never false convergence."""
+
+        if not self._has_unresolved_frontier_debt() or not self._can_call():
+            return False
+        fingerprint = sha256_text(
+            canonical_json(
+                {
+                    "reason": reason,
+                    "actions": [
+                        {
+                            "kind": item.spec.kind.value,
+                            "target": item.spec.target,
+                            "status": item.status.value,
+                            "rejection": item.rejection_reason,
+                        }
+                        for item in action_records
+                    ],
+                    "open_obligations": sorted(
+                        item.obligation_id
+                        for item in self.state.obligations.values()
+                        if item.release_blocking
+                        and item.status in {ObligationStatus.OPEN, ObligationStatus.BLOCKED}
+                    ),
+                    "active_cruxes": sorted(
+                        item.crux_id
+                        for item in self.state.cruxes.values()
+                        if item.status == CruxStatus.ACTIVE
+                    ),
+                }
+            )
+        )
+        if fingerprint in self.state.metadata.get("frontier_replan_fingerprints", []):
+            return False
+        self._append(
+            et.FRONTIER_REPLAN_REQUESTED,
+            {
+                "fingerprint": fingerprint,
+                "reason": reason,
+                "actions": [item.spec.action_id for item in action_records],
+            },
+            actor="scheduler",
+        )
+        return await self._checkpoint([], self.state.round_index)
 
     # ------------------------------------------------------------------
     # Final synthesis, release, repair, and materialization
@@ -4490,18 +4616,11 @@ class FrontierEngine:
                 ],
             )
 
-            spine = output.artifact_spine or self.state.artifact_spine
+            spine, spine_notes = reconcile_artifact_spine(
+                self.state.artifact_spine, output.artifact_spine
+            )
             if spine is None and self.state.contract is not None:
                 spine = fallback_spine(self.state.contract, output.summary)
-            if spine is not None and self.state.artifact_spine is not None:
-                spine = spine.model_copy(deep=True)
-                spine.revision = max(spine.revision, self.state.artifact_spine.revision + 1)
-                spine.hard_invariants = unique_preserving_order(
-                    [*self.state.artifact_spine.hard_invariants, *spine.hard_invariants]
-                )
-                spine.must_preserve = unique_preserving_order(
-                    [*self.state.artifact_spine.must_preserve, *spine.must_preserve]
-                )
 
             completion = self._normalize_completion_case(output.completion_case, artifact)
             report = run_semantic_ci(
@@ -4542,6 +4661,7 @@ class FrontierEngine:
                     "release_gate_recommended": output.release_gate_recommended,
                     "usage": result.usage.model_dump(mode="json"),
                     "normalization_notes": normalization,
+                    "artifact_spine_notes": spine_notes,
                     "semantic_ci_passed": report.passed,
                     "semantic_ci_gaps": report.completion_gaps,
                     "semantic_ci_deterministic_failures": report.deterministic_failures,
@@ -4768,6 +4888,106 @@ class FrontierEngine:
         )
 
     @staticmethod
+    def _release_recovery(release: ReleaseOutput) -> ReleaseRecovery | None:
+        """Route material release evidence to the earliest falsified boundary."""
+
+        material = [
+            finding
+            for finding in release.findings
+            if finding.severity in {"fatal", "high"}
+        ]
+        if not material:
+            return None
+
+        route_rank = {
+            RecoveryRoute.REPAIR: 0,
+            RecoveryRoute.EXTERNAL_BLOCKER: 1,
+            RecoveryRoute.REOBSERVE: 2,
+            RecoveryRoute.RECONSTRUCT: 3,
+            RecoveryRoute.REFRAME: 4,
+        }
+        scope_rank = {
+            FailureScope.LOCAL: 0,
+            FailureScope.SEQUENCE: 1,
+            FailureScope.WHOLE_ARTIFACT: 2,
+            FailureScope.OBSERVATION: 3,
+            FailureScope.ARCHITECTURE: 4,
+            FailureScope.TASK_FRAME: 5,
+        }
+
+        routed: list[tuple[RecoveryRoute, Any]] = []
+        for finding in material:
+            route = finding.recovery_route
+            if route == RecoveryRoute.REPAIR:
+                if finding.scope == FailureScope.TASK_FRAME:
+                    route = RecoveryRoute.REFRAME
+                elif finding.scope in {
+                    FailureScope.WHOLE_ARTIFACT,
+                    FailureScope.ARCHITECTURE,
+                }:
+                    route = RecoveryRoute.RECONSTRUCT
+                elif finding.scope == FailureScope.OBSERVATION:
+                    route = RecoveryRoute.REOBSERVE
+            routed.append((route, finding))
+
+        actionable = [item for item in routed if item[0] != RecoveryRoute.REPAIR]
+        if not actionable:
+            return None
+        route, controlling = max(
+            actionable,
+            key=lambda item: (route_rank[item[0]], scope_rank[item[1].scope]),
+        )
+        implicated = [
+            finding
+            for candidate_route, finding in routed
+            if candidate_route == route or scope_rank[finding.scope] >= 2
+        ]
+        return ReleaseRecovery(
+            route=route,
+            scope=max(implicated, key=lambda item: scope_rank[item.scope]).scope,
+            reason=(
+                f"Release evidence falsified the {controlling.scope.value} boundary: "
+                f"{controlling.title}"
+            ),
+            finding_titles=unique_preserving_order(item.title for item in implicated),
+            causal_layers=unique_preserving_order(
+                item.causal_layer for item in implicated if item.causal_layer.strip()
+            ),
+            falsified_assumptions=unique_preserving_order(
+                assumption
+                for item in implicated
+                for assumption in item.falsified_assumptions
+            ),
+            invalidated_invariants=unique_preserving_order(
+                invariant
+                for item in implicated
+                for invariant in item.invalidated_invariants
+            ),
+            next_discriminators=unique_preserving_order(
+                item.next_discriminator
+                for item in implicated
+                if item.next_discriminator.strip()
+            ),
+            evidence_references=unique_preserving_order(
+                reference
+                for item in implicated
+                for reference in [
+                    item.evidence_reference,
+                    release.artifact_digest,
+                ]
+                if reference
+            ),
+        )
+
+    def _can_reopen_release(self) -> bool:
+        round_limit = self.config.run.budget.max_rounds
+        if round_limit is not None and self.state.round_index >= round_limit:
+            return False
+        # One fresh Keeper and one substantive move must fit before the
+        # already-protected completion path.
+        return self._active_calls_remaining() >= self._completion_reserve_calls() + 2
+
+    @staticmethod
     def _release_can_adjudicate_model_semantic_findings(
         *,
         semantic_ci_passed: bool,
@@ -4915,6 +5135,7 @@ class FrontierEngine:
             release = await self._release_challenge()
 
         self._apply_release_adjudication(release, checks)
+        recovery = self._release_recovery(release) if release is not None else None
 
         rejection_history = list(self.state.metadata.get("release_rejection_fingerprints", []))
         rejection_fingerprints = set(rejection_history)
@@ -4933,6 +5154,7 @@ class FrontierEngine:
         while (
             release is not None
             and self._release_needs_repair(release)
+            and recovery is None
             and not repeated_current_rejection
         ):
             repair_limit = self.config.cognition.max_material_repairs
@@ -4990,6 +5212,9 @@ class FrontierEngine:
                 )
                 break
             if self._release_needs_repair(release):
+                recovery = self._release_recovery(release)
+                if recovery is not None:
+                    break
                 fingerprint = self._release_rejection_fingerprint(release)
                 if fingerprint in rejection_fingerprints:
                     self._record_repair_loop_stop(
@@ -5006,6 +5231,31 @@ class FrontierEngine:
             release=release,
             repair_completed=repair_completed,
         )
+        if (
+            recovery is not None
+            and recovery.route != RecoveryRoute.EXTERNAL_BLOCKER
+            and self._can_reopen_release()
+        ):
+            self._append(
+                et.RELEASE_RECOVERY_REQUESTED,
+                {
+                    "recovery": recovery.model_dump(mode="json"),
+                    "artifact_digest": release.artifact_digest if release else None,
+                },
+                actor="release",
+            )
+        elif recovery is not None and recovery.route == RecoveryRoute.EXTERNAL_BLOCKER:
+            self._record_repair_loop_stop(
+                "release evidence requires genuinely unavailable external authority or evidence",
+                release=release,
+                repairs_used=repairs_used,
+            )
+        elif recovery is not None:
+            self._record_repair_loop_stop(
+                "insufficient envelope to reopen the falsified upstream boundary",
+                release=release,
+                repairs_used=repairs_used,
+            )
         return checks, release, decision
 
     async def _release_challenge(self) -> ReleaseOutput | None:
@@ -5183,6 +5433,9 @@ class FrontierEngine:
                 finding.severity,
                 normalize_key(finding.title),
                 normalize_key(finding.evidence_reference or ""),
+                finding.scope.value,
+                finding.recovery_route.value,
+                normalize_key(finding.causal_layer),
             )
             for finding in release.findings
         )
@@ -5295,16 +5548,9 @@ class FrontierEngine:
                 parent=current,
                 source_action_ids=[],
             )
-            spine = output.artifact_spine or self.state.artifact_spine
-            if spine is not None and self.state.artifact_spine is not None:
-                spine = spine.model_copy(deep=True)
-                spine.revision = max(spine.revision, self.state.artifact_spine.revision + 1)
-                spine.hard_invariants = unique_preserving_order(
-                    [*self.state.artifact_spine.hard_invariants, *spine.hard_invariants]
-                )
-                spine.must_preserve = unique_preserving_order(
-                    [*self.state.artifact_spine.must_preserve, *spine.must_preserve]
-                )
+            spine, spine_notes = reconcile_artifact_spine(
+                self.state.artifact_spine, output.artifact_spine
+            )
             completion = self._normalize_completion_case(
                 output.completion_case or self.state.completion_case, artifact
             )
@@ -5335,6 +5581,7 @@ class FrontierEngine:
                     "semantic_ci_deterministic_failures": report.deterministic_failures,
                     "usage": result.usage.model_dump(mode="json"),
                     "normalization_notes": normalization,
+                    "artifact_spine_notes": spine_notes,
                     **trace.payload(),
                 },
                 actor="lead" if use_lead else "controller",
@@ -5451,6 +5698,19 @@ class FrontierEngine:
                 continue
             checks = self._record_deterministic_checks()
             _, release, decision = await self._run_release_tail(final_output, checks)
+            if self.state.metadata.get("release_replan_pending"):
+                self.observer.set_runtime(
+                    RuntimeStatus.RUNNING,
+                    phase=self.state.phase.value,
+                    detail="release evidence reopened the causal frontier",
+                )
+                if not await self._checkpoint([], self.state.round_index):
+                    raise FrontierError(
+                        "Release evidence reopened an upstream commitment, but its fresh "
+                        "causal checkpoint failed"
+                    )
+                stop_reason = await self._advance_frontier()
+                continue
             if await self._control_boundary():
                 if not await self._checkpoint([], self.state.round_index):
                     raise FrontierError(
@@ -5573,6 +5833,14 @@ class FrontierEngine:
                     await self._bootstrap()
                     steered_before_bootstrap = False
 
+                if self.state.metadata.get(
+                    "bootstrap_independent_checkpoint_required"
+                ) and not await self._checkpoint([], self.state.round_index):
+                    raise FrontierError(
+                        "A full-scope bootstrap required an independent architecture "
+                        "checkpoint, but that checkpoint failed"
+                    )
+
                 if (
                     steered_before_bootstrap or self.state.metadata.get("steering_replan_pending")
                 ) and not await self._checkpoint([], self.state.round_index):
@@ -5619,6 +5887,23 @@ class FrontierEngine:
                         ),
                     )
                     _, release, decision = await self._run_release_tail(dummy, checks)
+                    if self.state.metadata.get("release_replan_pending"):
+                        if not await self._checkpoint([], self.state.round_index):
+                            raise FrontierError(
+                                "Resumed release evidence reopened an upstream commitment, "
+                                "but its causal checkpoint failed"
+                            )
+                        stop_reason = await self._advance_frontier()
+                        path = await self._finalize(
+                            stop_reason=stop_reason,
+                            output_path=output_path,
+                        )
+                        self.observer.set_runtime(
+                            RuntimeStatus.COMPLETE,
+                            phase=self.state.phase.value,
+                            detail="result sealed",
+                        )
+                        return path
                     path = self._materialize_and_complete(
                         stop_reason=self.state.stop_reason or "resumed finalization tail",
                         output_path=output_path,

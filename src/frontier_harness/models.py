@@ -68,6 +68,27 @@ class EvidenceModality(StrEnum):
     HUMAN_OBSERVATION = "human_observation"
 
 
+class FailureScope(StrEnum):
+    """Earliest semantic boundary falsified by a release observation."""
+
+    LOCAL = "local"
+    SEQUENCE = "sequence"
+    WHOLE_ARTIFACT = "whole_artifact"
+    ARCHITECTURE = "architecture"
+    TASK_FRAME = "task_frame"
+    OBSERVATION = "observation"
+
+
+class RecoveryRoute(StrEnum):
+    """The smallest recovery move capable of addressing a failure's cause."""
+
+    REPAIR = "repair"
+    RECONSTRUCT = "reconstruct"
+    REFRAME = "reframe"
+    REOBSERVE = "reobserve"
+    EXTERNAL_BLOCKER = "external_blocker"
+
+
 class ActionKind(StrEnum):
     EXPLOIT = "exploit"
     EXPLORE = "explore"
@@ -430,6 +451,7 @@ class ArtifactSpine(StrictModel):
     architecture: list[str] = Field(default_factory=list)
     key_decisions: list[str] = Field(default_factory=list)
     hard_invariants: list[str] = Field(default_factory=list)
+    invariant_revisions: list[InvariantRevision] = Field(default_factory=list)
     must_preserve: list[str] = Field(default_factory=list)
     tradeoffs: list[str] = Field(default_factory=list)
     residual_uncertainty: list[str] = Field(default_factory=list)
@@ -552,6 +574,7 @@ class InvariantRevision(StrictModel):
     statement: str
     failure_mechanism: str
     replacement: str = ""
+    evidence_references: list[str] = Field(default_factory=list)
 
 
 class FrontierKernel(StrictModel):
@@ -1133,6 +1156,7 @@ class BootstrapOutput(StrictModel):
     goal_contract: GoalContract
     artifact_path: str
     artifact_summary: str
+    artifact_scope: ArtifactScope = "targeted"
     issues: list[IssueDraft] = Field(default_factory=list)
     actions: list[ActionProposal] = Field(default_factory=list)
     task_charter: TaskCharter | None = None
@@ -1194,6 +1218,26 @@ class ReleaseFinding(StrictModel):
     explanation: str
     evidence_reference: str | None = None
     repair_instruction: str | None = None
+    scope: FailureScope = FailureScope.LOCAL
+    causal_layer: str = ""
+    falsified_assumptions: list[str] = Field(default_factory=list)
+    invalidated_invariants: list[str] = Field(default_factory=list)
+    recovery_route: RecoveryRoute = RecoveryRoute.REPAIR
+    next_discriminator: str = ""
+
+
+class ReleaseRecovery(StrictModel):
+    """Causal handoff from the release membrane back into active search."""
+
+    route: RecoveryRoute
+    scope: FailureScope
+    reason: str
+    finding_titles: list[str] = Field(default_factory=list)
+    causal_layers: list[str] = Field(default_factory=list)
+    falsified_assumptions: list[str] = Field(default_factory=list)
+    invalidated_invariants: list[str] = Field(default_factory=list)
+    next_discriminators: list[str] = Field(default_factory=list)
+    evidence_references: list[str] = Field(default_factory=list)
 
 
 class ReleaseOutput(StrictModel):

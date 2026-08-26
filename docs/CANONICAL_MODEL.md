@@ -4,9 +4,9 @@ This is the canonical conceptual model of Flourite. It is not a tour of the
 source tree and it is not a list of features. It is the object the source is
 supposed to implement.
 
-> **Flourite holds one task still, evolves one authoritative artifact, and
-> spends compute only to collapse the few uncertainties preventing a
-> defensible release.**
+> **Flourite holds one task still, evolves one authoritative artifact, makes
+> commitments only as hard as the evidence supporting them, and spends compute
+> on the few uncertainties preventing a defensible release.**
 
 Everything else is substrate, an optional capability, or an interface.
 
@@ -24,7 +24,7 @@ flowchart TB
 
     subgraph LIVE["One evolving run state"]
         A["One authoritative artifact"]
-        S["Artifact Spine<br/>mechanism · decisions · invariants"]
+        S["Artifact Spine<br/>mechanism · decisions · revisable commitments"]
         O["Release obligations<br/>what must become true"]
         F["Decision frontier<br/>bottleneck · cruxes · live and eliminated families"]
         E["Scoped evidence<br/>what was actually observed"]
@@ -48,10 +48,12 @@ flowchart TB
         SYN["Clean synthesis"]
         CASE["Semantic CI<br/>+ Completion Case"]
         CH{"Fresh artifact-bound challenge"}
-        FIX["Bounded repair"]
+        ROUTE{"Earliest falsified boundary<br/>local · architecture · frame · observation"}
+        FIX["Bounded local repair"]
         SEAL["Sealed result"]
         SYN --> CASE --> CH
-        CH -->|material failure| FIX --> CASE
+        CH -->|material failure| ROUTE
+        ROUTE -->|local or sequence| FIX --> CASE
         CH -->|survives| SEAL
     end
 
@@ -76,7 +78,7 @@ flowchart TB
     G --> RG
     RG -->|productive or earned commitment| H --> MAP
     RG -->|no useful horizon remains| SYN
-    FIX -. reopens the exact failed boundary .-> LIVE
+    ROUTE -. reconstruct · reframe · reobserve .-> LIVE
 
     TS -. recorded .-> L
     A -. versions .-> B
@@ -93,20 +95,21 @@ and it is not a fixed workflow graph.
 At any meaningful boundary, the entire run can be understood as:
 
 ```text
-Xₜ = ⟨T, Aₜ, Sₜ, Oₜ, Fₜ, Eₜ, Ωₜ, Gₜ, Bₜ⟩
+Xₜ = ⟨T, Aₜ, Sₜ, Oₜ, Fₜ, Eₜ, Ωₜ, Gₜ, Bₜ, Rₜ⟩
 ```
 
 | Symbol | Meaning | What must remain true |
 | --- | --- | --- |
 | `T` | Exact Task Source plus its traced, revisable interpretation | The destination cannot drift. |
 | `Aₜ` | One authoritative artifact at time `t` | Every accepted improvement lands here. |
-| `Sₜ` | Artifact Spine | The central mechanism, decisions, and invariants remain globally coherent. |
+| `Sₜ` | Artifact Spine | The central mechanism and decisions remain coherent; every hard commitment can be causally retired by stronger evidence. |
 | `Oₜ` | Obligations | Every release requirement has an explicit truth condition and evidence need. |
 | `Fₜ` | Decision frontier | Only the bottleneck, active cruxes, live families, eliminated families, and best next move occupy attention. |
 | `Eₜ` | Scoped evidence | Observations retain provenance, modality, limits, and the decision they can support. |
 | `Ωₜ` | Observation geometry | The run knows which local, sequence, holistic, interactive, temporal, or objective observations can establish each important property—and which proxies cannot. |
 | `Gₜ` | Causal gradient | Progress remains a vector of quality, information, feasibility, exploration, and reliability movement with attribution and delayed commitments intact. |
 | `Bₜ` | Compute state | The operator owns the hard ceiling; the run earns access to it horizon by horizon. |
+| `Rₜ` | Recovery state | A material failure is routed to the earliest falsified boundary rather than translated into symptom-level patch work. |
 
 The Frontier Kernel is the dense core of `Fₜ`:
 
@@ -146,6 +149,14 @@ The governing law is:
 > rejected. Continue only while causal gradient or an earned bounded
 > commitment justifies another horizon.
 
+Two corollaries prevent the loop from becoming locally intelligent and
+globally stupid:
+
+> **No commitment may be harder to revise than the evidence that justified it.**
+
+> **Every failure backpropagates to the earliest upstream decision it actually
+> falsifies; only genuinely local failures remain local.**
+
 An action therefore begins with a small intent contract:
 
 ```text
@@ -164,6 +175,13 @@ the cost and stopping condition
 Only fields that affect the decision are required. A direct construction need
 not masquerade as an experiment, a tool call need not justify its existence in
 prose, and a reasoning action keeps the same tools as every other action.
+
+A provider process is an execution vessel, not a semantic unit of progress. It
+may contain many reasoning turns, tool calls, compactions, or nested tasks, but
+it owns only the current move and its stop condition. It must yield at a stage
+crossing so the ledger can integrate evidence before the same context hardens
+its own conclusion. Request and token counts remain visible as cost; they do
+not become accomplishments.
 
 Its receipt records what actually happened, what the observation can and cannot
 establish, what changed, what it cost, and whether it was integrated. The
@@ -232,8 +250,11 @@ tools.
 1. **Bind the task.** Capture the exact request and explicit amendments as the
    immutable Task Source. Compile deterministic guard obligations from its hard
    requirements.
-2. **Make reality early.** The Lead produces the first credible end-to-end
-   artifact, not a plan for eventually producing one.
+2. **Make the smallest decisive reality early.** The Lead constructs the
+   cheapest artifact capable of falsifying the highest-leverage architectural
+   choice: a study set, representative sequence, vertical slice, prototype, or
+   complete artifact as uncertainty permits. It does not build five minutes to
+   learn what twenty seconds could have disproved.
 3. **Define observation geometry.** State how each important property can be
    observed at its real scope and modality, including proxies that must not be
    mistaken for it.
@@ -262,10 +283,35 @@ tools.
     pre-registered delayed-payoff commitment continues only while its
     intermediate predictions hold and its kill condition does not. Otherwise
     the loop converges into release.
-12. **Seal the exact artifact.** Clean synthesis, deterministic checks,
+12. **Seal or backpropagate.** Clean synthesis, deterministic checks,
     obligation-by-obligation Completion Case, and a fresh digest-bound challenge
-    either produce a sealed result or one bounded repair followed by a fresh
-    challenge.
+    either seal the exact artifact or locate the earliest falsified boundary.
+    Local defects receive a bounded repair; architectural defects reconstruct;
+    representation defects reframe; invalid measurements reobserve. Every new
+    proposition faces a fresh challenge.
+
+## Commitments are evidence-qualified
+
+The Artifact Spine is a compact causal model, not scripture. Each governing
+decision begins provisional and becomes harder only when evidence at the same
+scope supports it. Its lifecycle is:
+
+```text
+propose ── discriminate ── support ── depend on
+   │                         │             │
+   └──────── falsify ────────┴── retire + reopen dependants
+```
+
+Omission never deletes a commitment. Retirement requires an explicit revision
+that names the old statement, the failure mechanism, the supporting evidence,
+and any replacement. The ledger preserves the superseded commitment and its
+cause. Obligations, cruxes, eliminated families, and artifact structure that
+depended on it reopen together.
+
+A construction Lead may propose a commitment, but cannot promote a qualitative
+whole-artifact architecture solely with its own correlated judgment. Before an
+expensive or hard-to-reverse build crosses such a stage gate, a fresh Keeper
+examines a representative artifact in the modality where failure would appear.
 
 ## Capability amplification, not project-wide ceremony
 
@@ -453,8 +499,33 @@ To cross it, the exact artifact needs:
    assumptions, residual uncertainty, and reopening condition;
 5. one fresh challenge bound to the artifact digest.
 
-A material failure returns only the failed boundary to the loop. A repair is
-not grandfathered through the old verdict; it faces a fresh challenge.
+A material finding must report:
+
+```text
+visible symptom
+earliest falsified scope
+causal layer and failed assumptions
+Spine commitments invalidated
+smallest sufficient recovery route
+next cheap discriminator
+```
+
+The route is typed:
+
+| Failure location | Recovery |
+| --- | --- |
+| Local component or bounded sequence | Repair it, then rechallenge. |
+| Whole-artifact grammar or architecture | Reconstruct from the last sound boundary. |
+| Task-equivalent representation | Reframe with an explicit witness back to the Task Source. |
+| Invalid or underpowered observation | Reobserve through a valid modality or instrument. |
+| Genuinely unavailable authority or external evidence | Block explicitly without pretending to converge. |
+
+Release is therefore not a terminal critic loop. It is the strongest causal
+sensor in the system. A structural failure becomes upstream state: the Spine
+retires disproved commitments, dependent obligations and cruxes reopen, and a
+fresh Keeper chooses an executable recovery. If unresolved release debt remains
+but every proposed action is deferred or dominated, that is planner deadlock;
+Flourite replans once from the cause instead of calling it convergence.
 
 ## Invariants
 
@@ -487,6 +558,12 @@ These define Flourite more strongly than any class or module name:
     attributable transition.
 13. **The released bytes are the thing judged.** Tests, evidence, and verdicts
     bind to the exact artifact they claim to support.
+14. **Commitments remain falsifiable.** Omission cannot erase them, dependency
+    cannot immortalize them, and stronger causal evidence can retire them.
+15. **Failures route by cause.** Local symptoms cannot trap structural failures
+    in a repair loop.
+16. **No-action is not success.** Unresolved release debt plus an empty
+    executable slate is planner failure and earns a fresh causal replan.
 
 ## What is core, conditional, and outside the object
 
@@ -505,7 +582,7 @@ These define Flourite more strongly than any class or module name:
 Every meaningful implementation path should reduce to one of these verbs:
 
 ```text
-bind · construct · map · choose · zoom · act · observe · integrate · attribute · release · persist
+bind · construct · map · choose · zoom · act · observe · integrate · attribute · route · release · persist
 ```
 
 Adapters translate domains. Providers execute cognition. The live UI projects
@@ -517,11 +594,11 @@ of Flourite's essential shape.
 
 ## In one breath
 
-Flourite binds an exact task, creates one real artifact, represents the gap to
-release as a sparse decision frontier, selects its highest-value
-discriminative question, composes a loss-aware view, lets a frontier model use
-its full intelligence and capability plane against that question, integrates
-and causally attributes the observed consequence, expands compute only while
-useful gradient or a valid bounded commitment remains, and seals the exact
-artifact only after task-native evidence and a fresh challenge support its
-obligations.
+Flourite binds an exact task, constructs the smallest artifact that can expose
+the next costly mistake, represents the gap to release as a sparse decision
+frontier, lets a frontier model use its full intelligence and capability plane
+against the highest-leverage question, integrates and causally attributes the
+result, keeps every commitment falsifiable, backpropagates failure to the
+earliest decision it invalidates, expands compute only while useful gradient or
+a valid bounded commitment remains, and seals the exact artifact only after
+task-native evidence and a fresh challenge support its obligations.

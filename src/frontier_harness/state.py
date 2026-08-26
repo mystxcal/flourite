@@ -29,6 +29,7 @@ from .models import (
     LeadSessionState,
     ObjectiveMeasurement,
     Obligation,
+    ObligationStatus,
     Probe,
     ReleaseOutput,
     ResourceState,
@@ -102,6 +103,11 @@ class StateReducer:
             state.phase = RunPhase.CREATED
         elif event.event_type == et.BOOTSTRAP_COMPLETED:
             state.metadata.pop("bootstrap_error", None)
+            state.metadata["bootstrap_artifact_scope"] = payload.get(
+                "artifact_scope", "targeted"
+            )
+            if payload.get("independent_checkpoint_required"):
+                state.metadata["bootstrap_independent_checkpoint_required"] = True
             state.metadata.pop("bootstrap_recovery_artifact", None)
             state.metadata.pop("bootstrap_recovery_thread_id", None)
             state.metadata.pop("bootstrap_recovery_error", None)
@@ -356,6 +362,9 @@ class StateReducer:
             state.metadata.pop("checkpoint_error", None)
             state.metadata.pop("extension_replan_pending", None)
             state.metadata.pop("steering_replan_pending", None)
+            state.metadata.pop("bootstrap_independent_checkpoint_required", None)
+            state.metadata.pop("release_replan_pending", None)
+            state.metadata.pop("frontier_replan_pending", None)
         elif event.event_type == et.CHECKPOINT_FAILED:
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
             state.metadata["checkpoint_error"] = payload.get("error", "checkpoint failed")
@@ -579,6 +588,52 @@ class StateReducer:
                     state.metadata.pop("resource_extension_recommended", None)
         elif event.event_type == et.REPAIR_LOOP_STOPPED:
             state.metadata["repair_loop_stop"] = payload
+        elif event.event_type == et.FRONTIER_REPLAN_REQUESTED:
+            fingerprint = str(payload["fingerprint"])
+            history = state.metadata.setdefault("frontier_replan_fingerprints", [])
+            if fingerprint not in history:
+                history.append(fingerprint)
+            state.metadata["frontier_replan_pending"] = payload
+        elif event.event_type == et.RELEASE_RECOVERY_REQUESTED:
+            recovery = payload["recovery"]
+            route = str(recovery["route"])
+            reopened: list[str] = []
+            for obligation in state.obligations.values():
+                if not obligation.release_blocking or obligation.status not in {
+                    ObligationStatus.SATISFIED,
+                    ObligationStatus.DEFERRED,
+                }:
+                    continue
+                structural = route in {"reconstruct", "reframe"}
+                evidentiary = route == "reobserve" and bool(
+                    obligation.required_evidence_modalities
+                    or obligation.kind in {"verification", "claim", "coherence"}
+                )
+                if not (structural or evidentiary):
+                    continue
+                obligation.status = ObligationStatus.OPEN
+                obligation.evidence_references = []
+                obligation.artifact_location = ""
+                obligation.resolution = None
+                obligation.residual_uncertainty = str(recovery["reason"])
+                obligation.reopen_condition = "Fresh scoped evidence after causal recovery"
+                obligation.updated_seq = event.seq
+                reopened.append(obligation.obligation_id)
+            state.phase = RunPhase.ACTIVE
+            state.stop_requested = False
+            state.stop_reason = None
+            state.final_artifact = None
+            state.pending_action_ids = []
+            state.completion_case = None
+            state.semantic_regression_findings = []
+            state.metadata["semantic_ci_passed"] = False
+            state.metadata["semantic_ci_gaps"] = [
+                "release evidence invalidated an upstream commitment"
+            ]
+            state.metadata["release_replan_pending"] = recovery
+            state.metadata["release_reopened_obligations"] = reopened
+            history = state.metadata.setdefault("release_recovery_history", [])
+            history.append(recovery)
         elif event.event_type == et.RUN_COMPLETED:
             state.phase = RunPhase.COMPLETE
             state.stop_requested = True

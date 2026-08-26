@@ -297,6 +297,79 @@ def _same_semantic_set(left: Sequence[str], right: Sequence[str]) -> bool:
     )
 
 
+def reconcile_artifact_spine(
+    current: ArtifactSpine | None,
+    proposed: ArtifactSpine | None,
+) -> tuple[ArtifactSpine | None, list[str]]:
+    """Merge a Spine while allowing only explicit, causal invariant retirement.
+
+    Omission is not deletion: a model cannot erase a durable commitment by
+    returning a shorter list.  Conversely, a disproved commitment cannot be
+    immortal.  It is retired only by an ``InvariantRevision`` that names the
+    failed assumption and its causal mechanism.  The ledger preserves both the
+    old statement and the reason it stopped governing the artifact.
+    """
+
+    if current is None:
+        return (proposed.model_copy(deep=True) if proposed is not None else None), []
+    if proposed is None:
+        return current.model_copy(deep=True), []
+
+    notes: list[str] = []
+    merged = proposed.model_copy(deep=True)
+    active = list(current.hard_invariants)
+    revisions = [item.model_copy(deep=True) for item in current.invariant_revisions]
+
+    for revision in proposed.invariant_revisions:
+        statement = " ".join(revision.statement.split()).strip()
+        mechanism = " ".join(revision.failure_mechanism.split()).strip()
+        replacement = " ".join(revision.replacement.split()).strip()
+        incumbent = next(
+            (item for item in active if _same_frontier_statement(statement, item)),
+            None,
+        )
+        if not statement or not mechanism or not revision.evidence_references:
+            notes.append(
+                "rejected Spine invariant revision without statement, cause, and evidence"
+            )
+            continue
+        if incumbent is None:
+            if any(
+                _same_frontier_statement(statement, item.statement) for item in revisions
+            ):
+                continue
+            notes.append("rejected Spine invariant revision that matched no active invariant")
+            continue
+        active.remove(incumbent)
+        revisions.append(
+            InvariantRevision(
+                statement=incumbent,
+                failure_mechanism=mechanism,
+                replacement=replacement,
+                evidence_references=unique_preserving_order(
+                    revision.evidence_references
+                ),
+            )
+        )
+        if replacement:
+            _append_semantic_unique(active, replacement)
+        notes.append(f"retired disproved Spine invariant: {incumbent}")
+
+    retired = [item.statement for item in revisions]
+    for invariant in proposed.hard_invariants:
+        if any(_same_frontier_statement(invariant, item) for item in retired):
+            continue
+        _append_semantic_unique(active, invariant)
+
+    merged.hard_invariants = active
+    merged.invariant_revisions = revisions
+    merged.must_preserve = unique_preserving_order(
+        [*current.must_preserve, *proposed.must_preserve]
+    )
+    merged.revision = max(current.revision + 1, proposed.revision)
+    return merged, notes
+
+
 def reconcile_frontier_kernel(
     current: FrontierKernel | None,
     proposed: FrontierKernel | None,
@@ -390,6 +463,9 @@ def reconcile_frontier_kernel(
                 statement=incumbent,
                 failure_mechanism=failure,
                 replacement=replacement,
+                evidence_references=unique_preserving_order(
+                    revision.evidence_references
+                ),
             )
         )
         if replacement:

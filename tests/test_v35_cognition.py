@@ -17,6 +17,7 @@ from frontier_harness.cognition import (
     finalize_action_receipt,
     observed_modalities_from_trace,
     reactivate_cruxes_for_open_obligations,
+    reconcile_artifact_spine,
     reconcile_frontier_kernel,
 )
 from frontier_harness.engine import FrontierEngine
@@ -275,6 +276,57 @@ def test_frontier_kernel_revises_false_working_invariants_but_not_hard_ones() ->
     ]
     assert len(updated.invariant_revisions) == 1
     assert any("cannot retire" in item for item in notes.rejected)
+
+
+def test_artifact_spine_preserves_omitted_commitments_but_retires_falsified_ones() -> None:
+    current = ArtifactSpine(
+        central_thesis="Use the strongest governing mechanism.",
+        hard_invariants=[
+            "The task destination remains fixed.",
+            "The card grammar produces cinematic motion.",
+        ],
+        must_preserve=["technical accuracy"],
+        revision=3,
+    )
+    omitted, notes = reconcile_artifact_spine(
+        current,
+        ArtifactSpine(
+            central_thesis=current.central_thesis,
+            hard_invariants=["The task destination remains fixed."],
+        ),
+    )
+    assert notes == []
+    assert omitted is not None
+    assert omitted.hard_invariants == current.hard_invariants
+
+    revised, notes = reconcile_artifact_spine(
+        current,
+        ArtifactSpine(
+            central_thesis="Use continuous spatial causality.",
+            hard_invariants=["The task destination remains fixed."],
+            invariant_revisions=[
+                InvariantRevision(
+                    statement="The card grammar produces cinematic motion.",
+                    failure_mechanism=(
+                        "Temporal inspection showed a presentation deck rather than a film."
+                    ),
+                    replacement="Motion must arise from continuous spatial causality.",
+                    evidence_references=["release:temporal-review"],
+                )
+            ],
+        ),
+    )
+    assert revised is not None
+    assert revised.hard_invariants == [
+        "The task destination remains fixed.",
+        "Motion must arise from continuous spatial causality.",
+    ]
+    assert revised.invariant_revisions[0].evidence_references == [
+        "release:temporal-review"
+    ]
+    assert notes == [
+        "retired disproved Spine invariant: The card grammar produces cinematic motion."
+    ]
 
 
 def test_eliminated_hypothesis_leaves_live_frontier_until_evidence_reopens_it() -> None:

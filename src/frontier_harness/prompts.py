@@ -57,7 +57,7 @@ V3.5 continuity rules:
     )
     return f"""You are the persistent Lead's first turn and the bootstrap solver for Flourite.
 
-Read `{context}/REQUEST.md`, `{context}/TASK_SOURCE.json`, `{context}/CONTEXT_LENS.json`, `{context}/OBSERVATION_CONTRACT.json`, `{context}/VERIFICATION_CONTRACT.json`, `{context}/SOURCES.md`, and every relevant supplied source. The verification contract is executable acceptance truth: reconcile its commands, schemas, output paths, and ignored paths with the Task Source before expensive work. Infer and declare the orthogonal semantic disciplines the work needs (for example software + creative + media); storage format does not determine evaluation discipline. Do three things in one strong pass: understand the exact task without compression loss, produce the earliest correctly ordered useful artifact or vertical slice, and expose only uncertainties that could materially make it wrong or substantially better.
+Read `{context}/REQUEST.md`, `{context}/TASK_SOURCE.json`, `{context}/CONTEXT_LENS.json`, `{context}/OBSERVATION_CONTRACT.json`, `{context}/VERIFICATION_CONTRACT.json`, `{context}/SOURCES.md`, and every relevant supplied source. The verification contract is executable acceptance truth: reconcile its commands, schemas, output paths, and ignored paths with the Task Source before expensive work. Infer and declare the orthogonal semantic disciplines the work needs (for example software + creative + media); storage format does not determine evaluation discipline. Do three things in one strong pass: understand the exact task without compression loss, produce the smallest decisive artifact that can falsify the highest-leverage architectural choice, and expose only uncertainties that could materially make it wrong or substantially better. This may be a study set, representative sequence, vertical slice, prototype, or complete artifact. Set `artifact_scope` truthfully. Do not build the whole deliverable while a cheaper representative artifact can still invalidate its governing grammar or mechanism.
 
 Domain guidance: {profile_guidance}
 
@@ -69,6 +69,8 @@ General sparse laws:
 - Treat your configured capabilities as real. Act directly, ambitiously, and autonomously inside the task; do not replace solvable work with a plan, a disclaimer, a request for help, or a smaller objective chosen because it is easier to verify.
 - Use at most {max_issues} load-bearing issues and at most {max_actions} proposed actions.
 - Bootstrap issue/action references may use stable local keys; the runtime assigns durable IDs.
+- Artifact Spine commitments are durable but not immortal. If direct evidence disproves one, return an explicit `artifact_spine.invariant_revisions` entry naming the failed assumption and causal mechanism; omission never retires it.
+- A provider epoch may reason, use tools, and delegate deeply inside the current semantic move, but it is not permission to cross unresolved stage gates. Once the smallest decisive artifact exists, return the boundary and express later construction as actions. Do not move from direction selection into full production using only your own correlated approval.
 - Default to one authoritative artifact. Branch only on consequential differences in behavior, mechanism, action, assumption, or boundary performance.
 - Do not create an exhaustive candidate grid, universal quality score, novelty quota, debate ritual, or cosmetic review loop.
 - Set `quality_floor_reached` only when no high-impact obligation or crux requires further work.
@@ -182,8 +184,10 @@ V3.5 controller rules:
 - Choose the highest-value discriminative question before considering its convenient implementation. Give the solver its full tool plane and let it combine reasoning, search, code, inspection, construction, and verification directly. `epistemic_mode` guides attention and telemetry; it never removes tools. An `execution_trigger` and full causal/potency fields are useful for a real costly experiment, not mandatory ceremony for ordinary capable work.
 - Detect semantic samsara. If a proposed direction shares the failure mechanism of an eliminated family, reject it even when the vocabulary, implementation, or formalism changed. After repeated local failure, state the invariant causing the loop and force a different representation, mechanism, or assumption—not another patch.
 - Update the Artifact Spine whenever the central mechanism, architecture, invariant, or key decision changes.
+- Artifact Spine commitments are evidence-qualified. Retire a disproved hard invariant through `artifact_spine.invariant_revisions`; name the causal failure and replacement. Never preserve a falsified commitment merely because later work depends on it.
 - Include a continuity acknowledgement matching the exact task, current artifact, active obligations, active cruxes, and spine revision.
 - The acknowledgement proves state at entry: include every incoming active obligation and crux ID even if this response resolves it.
+- One model epoch may be internally long, but it still owns only this integration boundary. Return once the next executable slate and revised state are sound; do not consume later construction phases inside the checkpoint itself.
 """
         if adaptive
         else "Use the legacy sparse controller; leave optional v3.5 state empty."
@@ -274,7 +278,11 @@ Find only:
 8. evidence that overclaims its modality (for example static frames standing in for timing, motion, audio, interaction, or the full rendered sequence);
 9. missing, inaccessible, or non-durable declared deliverables.
 
-Inspect the actual final artifact in the strongest available modality, not merely its source or summary. Report only modalities you directly observed in `observed_modalities`; state what that observation establishes and cannot establish. Static frames do not count as temporal observation, a file's existence does not count as watching it, and source inspection does not count as rendered-output inspection. Do not perform cosmetic rewriting, invent optional scope, or repeat checks owned by deterministic tools. Set task-fidelity, completion-case, and strongest-alternative flags explicitly. Recommend repair only for material findings. The runtime will bind your verdict to the exact artifact digest you inspected; a repaired artifact requires a new verdict.
+Inspect the actual final artifact in the strongest available modality, not merely its source or summary. Report only modalities you directly observed in `observed_modalities`; state what that observation establishes and cannot establish. Static frames do not count as temporal observation, a file's existence does not count as watching it, and source inspection does not count as rendered-output inspection. Do not perform cosmetic rewriting, invent optional scope, or repeat checks owned by deterministic tools. Set task-fidelity, completion-case, and strongest-alternative flags explicitly.
+
+For every material finding, locate the earliest falsified boundary rather than describing the visible symptom. Set `scope`, `causal_layer`, `falsified_assumptions`, any `invalidated_invariants`, and the smallest sufficient `recovery_route`: `repair` for a genuinely local or sequence defect; `reconstruct` when the artifact grammar, architecture, or whole-artifact mechanism is wrong; `reframe` when the task-equivalent representation is wrong; `reobserve` when the measurement channel cannot support the claim; `external_blocker` only for authority or evidence genuinely unavailable to the capable runtime. Give a `next_discriminator` that could falsify the proposed recovery before another full build. A global failure must never be disguised as a list of local repairs.
+
+The runtime will bind your verdict to the exact artifact digest you inspected; a repaired or reconstructed artifact requires a new verdict.
 """
 
 
@@ -290,9 +298,9 @@ def repair_prompt(
         if software
         else f"Write the repaired artifact to `{workspace.expected_artifact_path.resolve()}`."
     )
-    return f"""Perform the single bounded material repair pass.
+    return f"""Perform one bounded local material repair pass.
 
-Read `{context}/TASK_SOURCE.json`, `{context}/TASK_CHARTER.json`, `{context}/CONTEXT_LENS.json`, `{context}/OBSERVATION_CONTRACT.json`, `{context}/CURRENT_ARTIFACT.md`, `{context}/DELIVERABLES.md`, `{context}/ARTIFACT_SPINE.json`, `{context}/COMPLETION_CASE.json`, `{context}/SEMANTIC_CI.json`, `{context}/EVIDENCE_INDEX.md`, and `{context}/NOTES.md`. Repair only the supplied material findings and their direct consequences. Preserve all unaffected strengths. Do not reopen cosmetic questions or start another critic loop.
+Read `{context}/TASK_SOURCE.json`, `{context}/TASK_CHARTER.json`, `{context}/CONTEXT_LENS.json`, `{context}/OBSERVATION_CONTRACT.json`, `{context}/CURRENT_ARTIFACT.md`, `{context}/DELIVERABLES.md`, `{context}/ARTIFACT_SPINE.json`, `{context}/COMPLETION_CASE.json`, `{context}/SEMANTIC_CI.json`, `{context}/EVIDENCE_INDEX.md`, and `{context}/NOTES.md`. This path is valid only for findings classified as local or sequence repair. Repair those findings and their direct consequences. Preserve unaffected strengths. If inspection reveals that the supplied symptom actually comes from an architectural, whole-artifact, task-frame, or observation failure, do not camouflage it with polish: leave it unresolved and report the causal boundary so the runtime can reopen the frontier.
 
 {artifact_instruction}
 Return the repair object with an updated Artifact Spine, Completion Case, and continuity acknowledgement where available.

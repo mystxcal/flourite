@@ -326,13 +326,14 @@ flowchart LR
 
 The normal path is deliberately sparse:
 
-1. Build one complete baseline.
+1. Build the smallest real artifact that can expose the next costly mistake.
 2. Identify the few uncertainties controlling important improvements.
 3. Run only probes whose possible outcomes change a decision.
 4. Reduce the evidence into the current artifact.
 5. Rebuild one coherent final result.
-6. Verify its obligations and challenge the exact release artifact. A material
-   repair must survive fresh checks and a new challenge.
+6. Verify its obligations and challenge the exact release artifact. Local
+   defects are repaired; structural failures reopen the earliest bad decision.
+   Every changed artifact must survive fresh checks and a new challenge.
 
 The event ledger is authoritative; `state.json` is a derived view. Large
 artifacts and traces live in a content-addressed store. A persistent Lead may
