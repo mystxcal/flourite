@@ -8,12 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from frontier_harness import events as et
 from frontier_harness.engine import FrontierEngine
 from frontier_harness.errors import FrontierError, LedgerIntegrityError, ProviderCallError
 from frontier_harness.exporter import export_run
 from frontier_harness.models import (
+    ActionAttemptStatus,
     ActionKind,
     ActionProposal,
+    ActionStatus,
     ArtifactRef,
     BootstrapOutput,
     CheckpointOutput,
@@ -305,6 +308,21 @@ def test_fake_end_to_end_resume_verify_and_export(tmp_path: Path, fake_config) -
         assert engine.state.phase.value == "complete"
         assert engine.state.usage.calls == 5
         assert len(engine.state.probes) == 1
+        completed = [
+            record
+            for record in engine.state.actions.values()
+            if record.status == ActionStatus.COMPLETE
+        ]
+        assert completed
+        assert all(record.attempts for record in completed)
+        assert all(
+            record.attempts[-1].status == ActionAttemptStatus.SUCCEEDED
+            for record in completed
+        )
+        event_types = [event.event_type for event in engine.events()]
+        assert event_types.index(et.ACTION_ATTEMPT_FINISHED) < event_types.index(
+            et.ACTION_COMPLETED
+        )
         assert engine.state.release is not None
         assert engine.state.release.releaseable
         report = engine.verify_integrity()
@@ -438,6 +456,44 @@ def test_worker_failure_is_retained_and_run_can_integrate(tmp_path: Path, fake_c
         assert failures[0].receipt.integration_status == "failed"
         assert failures[0].receipt.evidence_strength == "none"
         assert engine.state.phase.value == "complete"
+    finally:
+        engine.close()
+
+
+def test_semantic_integration_failure_preserves_successful_attempt_usage(
+    tmp_path: Path,
+    fake_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = FrontierEngine.create(
+        "Account for a provider result even if semantic integration fails.",
+        config=fake_config(),
+        provider=FakeProvider(),
+    )
+
+    def fail_integration(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("synthetic semantic integration failure")
+
+    monkeypatch.setattr(type(engine.adapter), "capture_worker_patch", fail_integration)
+    try:
+        output = asyncio.run(engine.execute())
+        assert output.exists()
+        failed = [
+            record
+            for record in engine.state.actions.values()
+            if record.status == ActionStatus.FAILED
+        ]
+        assert len(failed) == 1
+        assert failed[0].attempts[-1].status == ActionAttemptStatus.SUCCEEDED
+        assert failed[0].attempts[-1].usage is not None
+        assert failed[0].attempts[-1].usage.calls == 1
+        failure_event = next(
+            event
+            for event in engine.events()
+            if event.event_type == et.ACTION_FAILED
+            and "semantic integration failure" in event.payload["error"]
+        )
+        assert failure_event.payload["usage"]["calls"] == 1
     finally:
         engine.close()
 

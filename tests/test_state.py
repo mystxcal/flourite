@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from frontier_harness import events as et
+from frontier_harness.kernel import PROJECTORS
 from frontier_harness.ledger import GENESIS_HASH, LedgerEvent
 from frontier_harness.state import StateReducer
 
@@ -56,4 +57,9 @@ def test_observation_only_events_are_explicit_noops(event_type: str) -> None:
 
 def test_every_declared_event_has_an_explicit_projection_category() -> None:
     assert et.OBSERVATION_ONLY_EVENT_TYPES <= et.EVENT_TYPES
-    assert len(et.EVENT_TYPES) == 54
+    assert len(et.EVENT_TYPES) == 56
+    projected = [event_type for projector in PROJECTORS for event_type in projector.event_types]
+    assert len(projected) == len(set(projected))
+    assert set(projected) | {et.RUN_CREATED} | set(et.OBSERVATION_ONLY_EVENT_TYPES) == set(
+        et.EVENT_TYPES
+    )

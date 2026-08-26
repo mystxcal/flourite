@@ -42,6 +42,10 @@ from .base import ArtifactAdapter, CallWorkspace
 class SoftwareAdapter(ArtifactAdapter):
     name = "software"
     artifact_kind = "git-patch"
+    is_software = True
+    supports_explicit_apply = True
+    final_suffix = ".patch"
+    engine_cleans_call_workspace = False
 
     @property
     def objective_enabled(self) -> bool:
@@ -866,3 +870,11 @@ class SoftwareAdapter(ArtifactAdapter):
             "starting_fingerprint": self.source_fingerprint,
             "post_fingerprint": post_fingerprint,
         }
+
+    def apply_final_explicit(self, artifact: ArtifactRef) -> dict[str, Any] | None:
+        previous = self.policy.apply_final_patch
+        self.policy.apply_final_patch = True
+        try:
+            return self.apply_final(artifact)
+        finally:
+            self.policy.apply_final_patch = previous

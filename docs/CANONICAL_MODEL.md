@@ -90,6 +90,70 @@ flowchart TB
 This is one closed loop around one artifact. It is not a procession of agents
 and it is not a fixed workflow graph.
 
+## The executable shape
+
+The implementation mirrors that object through a small number of ownership
+boundaries. These are not layers for their own sake; each boundary protects a
+different kind of truth.
+
+```text
+operator command
+      │
+      ▼
+RunCoordinator ──▶ FrontierLoop ──▶ ActionExecutor
+      │                   │                │
+      │                   ▼                ▼
+      │          CheckpointExecutor   provider attempt
+      │                   │          + raw observation
+      │                   └──────┬─────────┘
+      │                          ▼
+      │                    RunJournal
+      │               append + reduce + snapshot
+      │                          │
+      │                          ▼
+      │               bounded state projectors
+      │          bootstrap · work · semantics · release
+      │                          │
+      └──────▶ ReleasePipeline ◀─┘
+                    │
+                    ▼
+          challenge · repair · seal
+```
+
+| Boundary | Sole responsibility | It must not decide |
+| --- | --- | --- |
+| `RunCoordinator` | Resume and cross semantic phase boundaries safely. | What evidence means or which action wins. |
+| `FrontierLoop` | Protect completion capacity, select a sparse batch, and decide when another horizon is possible. | Provider mechanics or artifact semantics. |
+| `ActionExecutor` | Turn one selected intent into a durable attempt, raw result, scoped evidence, receipt, and semantic event. | Shared state directly. |
+| `CheckpointExecutor` | Integrate completed observations into the one artifact and next frontier. | Whether a provider process happened to look busy. |
+| `ReleasePolicy` / `ReleasePipeline` | Judge the exact final proposition, route failures causally, and fail closed before external mutation. | Upstream construction detail. |
+| `RunJournal` | Atomically append a versioned event, validate its projection, and replace the derived snapshot. | Semantic policy. |
+| Kernel projectors | Deterministically derive typed state from one event category. | I/O, scheduling, or model calls. |
+| Adapters | Translate artifact capture, checks, measurement, materialization, and optional apply for one domain. | Controller policy. |
+| Providers | Execute a bounded cognitive call and return its response, trace, usage, and raw boundary. | Run state. |
+
+The authoritative write path is deliberately singular:
+
+```text
+intent → attempt.started → provider result → attempt.finished
+       → semantic event → validated projection → commit → snapshot
+```
+
+`attempt.finished` precedes semantic integration. If the process dies between
+those points, the expensive provider result and raw trace still exist and the
+run can distinguish “the model call failed” from “integration was interrupted.”
+No engine path writes the ledger and state snapshot separately.
+
+Events carry an explicit schema version. Version 1 retains its historical hash
+material exactly; newer versions bind the schema version into the hash. This
+makes replay compatibility a named protocol rather than an accidental property
+of whichever Python model is installed.
+
+`RunState.runtime` is split into typed bootstrap, control, planning,
+verification, release, resource, extension, and completion compartments.
+Legacy metadata is a derived compatibility mirror only. New runtime policy may
+not hide authoritative state in an untyped dictionary.
+
 ## Canonical state
 
 At any meaningful boundary, the entire run can be understood as:

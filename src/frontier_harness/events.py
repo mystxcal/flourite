@@ -6,6 +6,8 @@ BOOTSTRAP_COMPLETED = "bootstrap.completed"
 BOOTSTRAP_FAILED = "bootstrap.failed"
 ACTION_SELECTED = "action.selected"
 ACTION_STARTED = "action.started"
+ACTION_ATTEMPT_STARTED = "action_attempt.started"
+ACTION_ATTEMPT_FINISHED = "action_attempt.finished"
 ACTION_COMPLETED = "action.completed"
 ACTION_FAILED = "action.failed"
 CHECKPOINT_STARTED = "checkpoint.started"
@@ -70,6 +72,8 @@ EVENT_TYPES = frozenset(
         BOOTSTRAP_FAILED,
         ACTION_SELECTED,
         ACTION_STARTED,
+        ACTION_ATTEMPT_STARTED,
+        ACTION_ATTEMPT_FINISHED,
         ACTION_COMPLETED,
         ACTION_FAILED,
         CHECKPOINT_STARTED,

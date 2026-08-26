@@ -13,7 +13,7 @@ import json
 import logging
 import shutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
@@ -21,34 +21,25 @@ from pydantic import BaseModel
 
 from . import __version__
 from . import events as et
-from .adapters import ArtifactAdapter, MarkdownAdapter, SoftwareAdapter, create_adapter
+from .adapters import ArtifactAdapter, create_adapter
 from .adapters.base import CallWorkspace
 from .adapters.profiles import PROFILES, AdapterProfile, combine_profiles
 from .blobs import BlobStore
 from .capsule import CapsuleBuilder, StagedSource, stage_sources
 from .cognition import (
     admit_overlays,
-    admit_substrate_entries,
-    apply_crux_updates,
-    apply_obligation_updates,
     build_action_contract,
     capture_task_source,
     ceiling_trigger_reasons,
-    charter_change_requires_witness,
     compile_guard_obligations,
     completion_case_gaps,
-    derive_action_receipt,
     fallback_charter,
     fallback_spine,
-    finalize_action_receipt,
     instantiate_cruxes,
     instantiate_obligations,
-    observed_modalities_from_trace,
-    reactivate_cruxes_for_open_obligations,
     reconcile_artifact_spine,
     reconcile_frontier_kernel,
     validate_lead_ack,
-    validate_reframe,
 )
 from .config import HarnessConfig
 from .control import (
@@ -66,7 +57,7 @@ from .errors import (
     ProviderError,
     RunNotFoundError,
 )
-from .execution import RunJournal
+from .execution import ActionExecutor, CallTrace, RunJournal
 from .ids import new_id
 from .ledger import EventLedger, LedgerEvent
 from .locking import RunLock
@@ -74,7 +65,6 @@ from .models import (
     ActionContract,
     ActionKind,
     ActionProposal,
-    ActionReceipt,
     ActionRecord,
     ActionSpec,
     ActionStatus,
@@ -82,8 +72,6 @@ from .models import (
     BlobRef,
     BootstrapOutput,
     BudgetContract,
-    CandidateDelta,
-    CheckpointOutput,
     CognitiveTopology,
     CompletionCase,
     CompletionClaim,
@@ -91,16 +79,14 @@ from .models import (
     Crux,
     CruxDraft,
     CruxStatus,
-    DiscoveryRecord,
     EpistemicMode,
     EvidenceModality,
     EvidenceRecord,
-    FailureScope,
     FinalOutput,
     FrontierKernel,
+    GoalContract,
     Impact,
     IndependenceClass,
-    InstrumentStatus,
     Issue,
     IssueDraft,
     IssueStatus,
@@ -110,9 +96,6 @@ from .models import (
     ObligationDraft,
     ObligationStatus,
     OverlayStatus,
-    Probe,
-    ProbeStatus,
-    RecoveryRoute,
     ReleaseOutput,
     ReleaseRecovery,
     RepairOutput,
@@ -120,29 +103,34 @@ from .models import (
     Role,
     RunPhase,
     RunState,
-    SpeculativeOverlay,
-    SubstrateEntry,
     SummitLineage,
     TaskAmendment,
+    TaskCharter,
+    TaskSource,
     Usage,
     ValueBand,
     WorkerEnvelope,
 )
 from .observability import LiveObserver
+from .orchestration import (
+    CheckpointExecutor,
+    FrontierLoop,
+    MutationGateDecision,
+    ReleasePipeline,
+    ReleasePolicy,
+    RunCoordinator,
+)
 from .prompts import (
     bootstrap_prompt,
-    checkpoint_prompt,
     final_prompt,
     release_prompt,
     repair_prompt,
-    worker_prompt,
 )
 from .providers import (
     ModelProvider,
     ProviderCallRequest,
     ProviderCallResult,
     ProviderDoctorResult,
-    ProviderTraceSummary,
     build_provider,
 )
 from .resources import ResourceGovernor
@@ -173,67 +161,6 @@ _TERMINAL_ACTION_STATUSES = {
     ActionStatus.FAILED,
     ActionStatus.CANCELLED,
 }
-
-
-@dataclass(slots=True)
-class CallTrace:
-    prompt_blob: BlobRef | None = None
-    schema_blob: BlobRef | None = None
-    boundary_blob: BlobRef | None = None
-    raw_events_blob: BlobRef | None = None
-    stderr_blob: BlobRef | None = None
-    command: list[str] | None = None
-    thread_id: str | None = None
-    resumed: bool = False
-    continuity_mode: str = "ephemeral"
-    provider_trace_summary: dict[str, Any] | None = None
-
-    def payload(self) -> dict[str, Any]:
-        return {
-            "prompt_blob": self.prompt_blob.model_dump(mode="json") if self.prompt_blob else None,
-            "schema_blob": self.schema_blob.model_dump(mode="json") if self.schema_blob else None,
-            "boundary_blob": self.boundary_blob.model_dump(mode="json")
-            if self.boundary_blob
-            else None,
-            "raw_events_blob": self.raw_events_blob.model_dump(mode="json")
-            if self.raw_events_blob
-            else None,
-            "stderr_blob": self.stderr_blob.model_dump(mode="json") if self.stderr_blob else None,
-            "provider_command": self.command or [],
-            "provider_thread_id": self.thread_id,
-            "provider_resumed": self.resumed,
-            "continuity_mode": self.continuity_mode,
-            "provider_trace_summary": self.provider_trace_summary or {},
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class MutationGateDecision:
-    """Fail-closed decision for any mutation of an external source artifact."""
-
-    deterministic_checks_run: int
-    deterministic_checks_passed: bool
-    release_required: bool
-    release_gate_succeeded: bool
-    release_report_releaseable: bool | None
-    repair_completed: bool
-    release_gate_passed: bool
-    mutation_gate_passed: bool
-    block_reason: str | None = None
-
-    def payload(self) -> dict[str, Any]:
-        return {
-            "deterministic_checks_run": self.deterministic_checks_run,
-            "deterministic_checks_passed": self.deterministic_checks_passed,
-            "release_required": self.release_required,
-            "release_gate_succeeded": self.release_gate_succeeded,
-            "release_report_releaseable": self.release_report_releaseable,
-            "release_gate_passed": self.release_gate_passed,
-            "releaseable": (self.release_gate_passed if self.release_required else None),
-            "repair_completed": self.repair_completed,
-            "mutation_gate_passed": self.mutation_gate_passed,
-            "mutation_gate_block_reason": self.block_reason,
-        }
 
 
 class FrontierEngine:
@@ -300,6 +227,10 @@ class FrontierEngine:
         )
         self.logger = logging.getLogger(f"frontier_harness.{state.run_id}")
         self.observer = LiveObserver(self.control, self.logger)
+        self.action_executor = ActionExecutor()
+        self.checkpoint_executor = CheckpointExecutor()
+        self.frontier_loop = FrontierLoop()
+        self.release_pipeline = ReleasePipeline()
         self._capsules = CapsuleBuilder(
             adapter=adapter,
             blobs=blobs,
@@ -658,9 +589,7 @@ class FrontierEngine:
                     )
                     history_dir = self.run_dir / "seal-history"
                     history_dir.mkdir(parents=True, exist_ok=True)
-                    history_name = (
-                        f"seal-{self.state.runtime.extension.count + 1:03d}.json"
-                    )
+                    history_name = f"seal-{self.state.runtime.extension.count + 1:03d}.json"
                     atomic_write_text(
                         history_dir / history_name,
                         seal_path.read_text(encoding="utf-8"),
@@ -706,7 +635,7 @@ class FrontierEngine:
         checks remain owned by the software adapter.
         """
 
-        if not isinstance(self.adapter, SoftwareAdapter):
+        if not self.adapter.supports_explicit_apply:
             raise FrontierError("Only software runs have an applicable Git patch")
         with self.lock:
             self._refresh_state_from_ledger()
@@ -724,12 +653,7 @@ class FrontierEngine:
                 )
                 raise FrontierError(f"Refusing to apply final patch: {reason}")
 
-            old = self.adapter.policy.apply_final_patch
-            self.adapter.policy.apply_final_patch = True
-            try:
-                result = self.adapter.apply_final(self.state.final_artifact)
-            finally:
-                self.adapter.policy.apply_final_patch = old
+            result = self.adapter.apply_final_explicit(self.state.final_artifact)
             if result is None:
                 raise FrontierError("Software adapter did not produce an apply result")
             self._append(et.PATCH_APPLIED, result, actor="user")
@@ -1015,7 +939,7 @@ class FrontierEngine:
     @property
     def _profile(self) -> AdapterProfile | None:
         names: list[str] = []
-        if isinstance(self.adapter, MarkdownAdapter) and self.adapter.profile.name != "generic":
+        if self.adapter.profile is not None and self.adapter.profile.name != "generic":
             names.append(self.adapter.profile.name)
         names.extend(self.config.run.semantic_profiles)
         if self.state.contract:
@@ -1024,12 +948,12 @@ class FrontierEngine:
         return (
             combine_profiles(names)
             if names
-            else (self.adapter.profile if isinstance(self.adapter, MarkdownAdapter) else None)
+            else self.adapter.profile
         )
 
     @property
     def _software(self) -> bool:
-        return isinstance(self.adapter, SoftwareAdapter)
+        return self.adapter.is_software
 
     def _calls_remaining(self) -> int:
         return max(0, self.config.run.budget.max_calls - self.state.usage.calls)
@@ -1079,9 +1003,7 @@ class FrontierEngine:
             self.state,
             self.state.resource_state,
             actionable_actions=len(selection.selected),
-            active_commitments=sum(
-                item.continuation is not None for item in selection.selected
-            ),
+            active_commitments=sum(item.continuation is not None for item in selection.selected),
         )
         self._append(
             et.RESOURCE_DECIDED,
@@ -1309,73 +1231,22 @@ class FrontierEngine:
         crux_keymap = crux_keymap or {}
         for proposal in proposals:
             proposal = self._compile_epistemic_action(proposal)
-            if proposal.kind == ActionKind.STOP:
-                dropped.append(f"stop proposal for {proposal.target}")
-                continue
-            if len(actions) >= self.config.frontier.max_actions_per_batch * 2:
-                dropped.append(proposal.assignment)
-                continue
-            if (
-                self.config.cognition.mode == "adaptive"
-                and self.config.cognition.action_contracts
-                and not proposal.could_change_decision
-            ):
-                dropped.append(f"non-decision-relevant action: {proposal.assignment}")
-                continue
-            resolved_issues: list[str] = []
-            for raw in proposal.issue_ids:
-                resolved = (
-                    issue_keymap.get(raw)
-                    or issue_keymap.get(normalize_key(raw))
-                    or (raw if raw in self.state.issues else None)
+            resolved_issues, resolved_obligations, resolved_cruxes = (
+                self._resolve_action_links(
+                    proposal,
+                    issue_keymap=issue_keymap,
+                    obligation_keymap=obligation_keymap,
+                    crux_keymap=crux_keymap,
                 )
-                if resolved:
-                    resolved_issues.append(resolved)
-            resolved_obligations: list[str] = []
-            # Legacy issue local keys may also identify a derived adaptive
-            # obligation during migration. This preserves useful sparse work.
-            for raw in proposal.issue_ids:
-                resolved_obligation_from_issue = obligation_keymap.get(
-                    raw
-                ) or obligation_keymap.get(normalize_key(raw))
-                if resolved_obligation_from_issue:
-                    resolved_obligations.append(resolved_obligation_from_issue)
-            for raw in [*proposal.obligation_ids, *proposal.obligation_keys]:
-                resolved = (
-                    obligation_keymap.get(raw)
-                    or obligation_keymap.get(normalize_key(raw))
-                    or (raw if raw in self.state.obligations else None)
-                )
-                if resolved:
-                    resolved_obligations.append(resolved)
-            resolved_cruxes: list[str] = []
-            for raw in proposal.issue_ids:
-                resolved = crux_keymap.get(raw) or crux_keymap.get(normalize_key(raw))
-                if resolved:
-                    resolved_cruxes.append(resolved)
-            for raw in [*proposal.crux_ids, *proposal.crux_keys]:
-                resolved = (
-                    crux_keymap.get(raw)
-                    or crux_keymap.get(normalize_key(raw))
-                    or (raw if raw in self.state.cruxes else None)
-                )
-                if resolved:
-                    resolved_cruxes.append(resolved)
-            # In adaptive mode, a substantive action should attach to a crux or
-            # obligation unless it is an explicit frame-break/ceiling action.
-            if (
-                self.config.cognition.mode == "adaptive"
-                and proposal.substantive
-                and not resolved_cruxes
-                and not resolved_obligations
-                and not (
-                    proposal.topology == CognitiveTopology.SUMMIT
-                    and (proposal.lineage_id or proposal.parent_lineage_ids)
-                )
-                and proposal.kind
-                not in {ActionKind.REFRAME, ActionKind.RECONSTRUCT, ActionKind.CEILING_AUDIT}
-            ):
-                dropped.append(f"unattached adaptive action: {proposal.assignment}")
+            )
+            rejection = self._action_rejection(
+                proposal,
+                action_count=len(actions),
+                obligation_ids=resolved_obligations,
+                crux_ids=resolved_cruxes,
+            )
+            if rejection is not None:
+                dropped.append(rejection)
                 continue
             payload = proposal.model_dump(mode="python")
             if not self.config.cognition.human_evidence_available:
@@ -1406,6 +1277,89 @@ class FrontierEngine:
                     )
                 )
         return actions, contracts, dropped
+
+    @staticmethod
+    def _resolve_reference_ids(
+        references: Iterable[str],
+        *,
+        local_keys: Mapping[str, str],
+        existing_ids: Mapping[str, Any],
+    ) -> list[str]:
+        resolved: list[str] = []
+        for reference in references:
+            canonical = (
+                local_keys.get(reference)
+                or local_keys.get(normalize_key(reference))
+                or (reference if reference in existing_ids else None)
+            )
+            if canonical is not None:
+                resolved.append(canonical)
+        return unique_preserving_order(resolved)
+
+    def _resolve_action_links(
+        self,
+        proposal: ActionProposal,
+        *,
+        issue_keymap: Mapping[str, str],
+        obligation_keymap: Mapping[str, str],
+        crux_keymap: Mapping[str, str],
+    ) -> tuple[list[str], list[str], list[str]]:
+        issues = self._resolve_reference_ids(
+            proposal.issue_ids,
+            local_keys=issue_keymap,
+            existing_ids=self.state.issues,
+        )
+        # During migration, issue-local keys may also identify the adaptive
+        # obligation or crux derived from that issue.
+        obligations = self._resolve_reference_ids(
+            [*proposal.issue_ids, *proposal.obligation_ids, *proposal.obligation_keys],
+            local_keys=obligation_keymap,
+            existing_ids=self.state.obligations,
+        )
+        cruxes = self._resolve_reference_ids(
+            [*proposal.issue_ids, *proposal.crux_ids, *proposal.crux_keys],
+            local_keys=crux_keymap,
+            existing_ids=self.state.cruxes,
+        )
+        return issues, obligations, cruxes
+
+    def _action_rejection(
+        self,
+        proposal: ActionProposal,
+        *,
+        action_count: int,
+        obligation_ids: Sequence[str],
+        crux_ids: Sequence[str],
+    ) -> str | None:
+        if proposal.kind == ActionKind.STOP:
+            return f"stop proposal for {proposal.target}"
+        if action_count >= self.config.frontier.max_actions_per_batch * 2:
+            return proposal.assignment
+        adaptive = self.config.cognition.mode == "adaptive"
+        if (
+            adaptive
+            and self.config.cognition.action_contracts
+            and not proposal.could_change_decision
+        ):
+            return f"non-decision-relevant action: {proposal.assignment}"
+        attached_lineage = proposal.topology == CognitiveTopology.SUMMIT and bool(
+            proposal.lineage_id or proposal.parent_lineage_ids
+        )
+        frame_break = proposal.kind in {
+            ActionKind.REFRAME,
+            ActionKind.RECONSTRUCT,
+            ActionKind.CEILING_AUDIT,
+        }
+        if (
+            adaptive
+            and proposal.substantive
+            and not crux_ids
+            and not obligation_ids
+            and not attached_lineage
+            and not frame_break
+        ):
+            return f"unattached adaptive action: {proposal.assignment}"
+        return None
 
     def _apply_issue_updates(
         self,
@@ -1963,6 +1917,230 @@ class FrontierEngine:
             return recovery_artifact, thread_id
         return None, None
 
+    def _bootstrap_obligation_drafts(
+        self,
+        *,
+        output: BootstrapOutput,
+        task_source: TaskSource,
+        contract: GoalContract,
+        charter: TaskCharter,
+    ) -> tuple[TaskCharter, list[ObligationDraft]]:
+        if self.config.cognition.mode != "adaptive":
+            return charter, []
+
+        drafts = list(output.obligations)
+        charter, guards = compile_guard_obligations(
+            task_source,
+            contract,
+            charter,
+            existing_drafts=drafts,
+        )
+        guards.extend(
+            ObligationDraft(
+                local_key=f"release_artifact_{index}",
+                title=f"Capture declared release artifact {index}",
+                requirement=f"A final artifact matching `{pattern}` must be captured durably.",
+                kind="construction",
+                acceptance=(
+                    "The final ArtifactRef contains the exact generated bytes in its "
+                    "durable deliverables manifest."
+                ),
+                impact=Impact.FATAL,
+                release_blocking=True,
+                required_artifact_scope="release",
+                tags=["runtime-guard", "durable-deliverable"],
+            )
+            for index, pattern in enumerate(self.config.software.release_artifacts, start=1)
+        )
+        by_requirement = {normalize_key(item.requirement): item for item in drafts}
+        scope_rank = {"targeted": 0, "sequence": 1, "whole_artifact": 2, "release": 3}
+        for guard in guards:
+            incumbent = by_requirement.get(normalize_key(guard.requirement))
+            if incumbent is None:
+                drafts.append(guard)
+                by_requirement[normalize_key(guard.requirement)] = guard
+                continue
+            incumbent.release_blocking = incumbent.release_blocking or guard.release_blocking
+            if guard.impact == Impact.FATAL:
+                incumbent.impact = Impact.FATAL
+            incumbent.source_requirement_ids = unique_preserving_order(
+                [*incumbent.source_requirement_ids, *guard.source_requirement_ids]
+            )
+            incumbent.required_evidence_modalities = unique_preserving_order(
+                [
+                    *incumbent.required_evidence_modalities,
+                    *guard.required_evidence_modalities,
+                ]
+            )
+            if (
+                scope_rank[guard.required_artifact_scope]
+                > scope_rank[incumbent.required_artifact_scope]
+            ):
+                incumbent.required_artifact_scope = guard.required_artifact_scope
+            incumbent.tags = unique_preserving_order([*incumbent.tags, *guard.tags])
+        return charter, drafts
+
+    def _bootstrap_crux_drafts(
+        self,
+        *,
+        output: BootstrapOutput,
+        issues: Sequence[Issue],
+    ) -> list[CruxDraft]:
+        if self.config.cognition.mode != "adaptive":
+            return []
+        drafts = list(output.cruxes)
+        if drafts:
+            return drafts
+        for index, issue in enumerate(issues[: self.config.cognition.max_active_cruxes]):
+            local_key = next(
+                (
+                    tag.removeprefix("local-key:")
+                    for tag in issue.tags
+                    if tag.startswith("local-key:")
+                ),
+                f"issue_{index + 1}",
+            )
+            drafts.append(
+                CruxDraft(
+                    local_key=local_key,
+                    title=issue.title,
+                    uncertainty=issue.description,
+                    decision_controlled=issue.decision_sensitivity,
+                    why_it_matters=issue.decision_sensitivity,
+                    obligation_keys=["deliverable"],
+                    discriminating_evidence=[],
+                    unlock_value=issue.impact,
+                )
+            )
+        return drafts
+
+    def _bootstrap_summit_active(
+        self,
+        output: BootstrapOutput,
+        reasons: list[str],
+    ) -> tuple[bool, list[str]]:
+        if self.config.cognition.mode != "adaptive":
+            return False, reasons
+        if self.config.summit.mode == "on":
+            return True, unique_preserving_order(["summit.mode=on", *reasons])
+        if self.config.summit.mode != "auto" or not reasons:
+            return False, reasons
+        concrete_enough = (
+            not self.config.summit.require_concrete_auto_trigger
+            or bool(output.ceiling_scan and output.ceiling_scan.concrete_trigger)
+        )
+        return concrete_enough, reasons
+
+    def _bootstrap_proposals(
+        self,
+        *,
+        output: BootstrapOutput,
+        summit_active: bool,
+        lineages: Mapping[str, SummitLineage],
+        discovery_records: Mapping[str, Any],
+        obligations: Sequence[Obligation],
+        cruxes: Sequence[Crux],
+        reasons: Sequence[str],
+    ) -> list[ActionProposal]:
+        proposals = list(output.actions)
+        has_summit_action = any(
+            item.topology == CognitiveTopology.SUMMIT for item in proposals
+        )
+        target_cruxes = [
+            item.crux_id for item in cruxes if item.status == CruxStatus.ACTIVE
+        ][:1]
+        target_obligations = [
+            item.obligation_id for item in obligations if item.release_blocking
+        ][:2]
+        summit_reason = reasons[0] if reasons else "summit.mode=on"
+        if summit_active and not lineages and not has_summit_action:
+            proposals.append(
+                ActionProposal(
+                    kind=ActionKind.EXPLORE,
+                    target="exact-task upper-tail mechanism search",
+                    assignment=(
+                        "Seed at most two genuinely mechanistically distinct Summit lineages "
+                        "for the exact immutable task. Each lineage must name a concrete "
+                        "mechanism, assumptions, discriminating prediction, next dependency, "
+                        "and a bounded kill condition. Do not generate alternate objectives "
+                        "or cosmetic variants."
+                    ),
+                    obligation_ids=target_obligations,
+                    crux_ids=target_cruxes,
+                    impact=Impact.HIGH,
+                    cost=CostBand.MODERATE,
+                    independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
+                    topology=CognitiveTopology.SUMMIT,
+                    epistemic_mode=EpistemicMode.THINK,
+                    expected_decision_effect=(
+                        "Either establish a viable distant mechanism for the same task, or "
+                        "record why upper-tail expansion is not justified."
+                    ),
+                    reusable_value=ValueBand.HIGH,
+                    distinctive_angle="mechanism-level exact-task support expansion",
+                    summit_reason=summit_reason,
+                )
+            )
+        elif (
+            summit_active
+            and lineages
+            and self.config.summit.experimental_frontier
+            and not has_summit_action
+        ):
+            plans = self.experimental_frontier.select(
+                dict(lineages),
+                dict(discovery_records),
+                limit=self.config.summit.max_discovery_actions_per_round,
+            )
+            proposals.extend(
+                self.experimental_frontier.to_action(
+                    plan,
+                    crux_ids=target_cruxes,
+                    obligation_ids=target_obligations,
+                    summit_reason=summit_reason,
+                )
+                for plan in plans
+            )
+        if not proposals:
+            proposals.extend(
+                self._fallback_action_proposals(
+                    obligations={item.obligation_id: item for item in obligations},
+                    cruxes={item.crux_id: item for item in cruxes},
+                )
+            )
+        return proposals
+
+    @staticmethod
+    def _bootstrap_stop_signals(
+        *,
+        output: BootstrapOutput,
+        actions: Sequence[ActionSpec],
+        issues: Sequence[Issue],
+        cruxes: Sequence[Crux],
+        semantic_profiles: Sequence[str],
+    ) -> tuple[bool, str | None, bool]:
+        high_open = any(issue.impact in {Impact.FATAL, Impact.HIGH} for issue in issues)
+        active_crux = any(item.status == CruxStatus.ACTIVE for item in cruxes)
+        qualitative_architecture = bool(set(semantic_profiles).intersection({"creative", "media"}))
+        full_scope = output.artifact_scope in {"whole_artifact", "release"}
+        independent_checkpoint_required = bool(
+            (full_scope or qualitative_architecture)
+            and (high_open or active_crux or full_scope)
+        )
+        stop_requested = bool(
+            output.quality_floor_reached
+            and not high_open
+            and not active_crux
+            and not any(action.topology == CognitiveTopology.SUMMIT for action in actions)
+        )
+        stop_reason = output.stop_reason if stop_requested else None
+        if not actions and not high_open and not active_crux:
+            stop_requested = True
+            stop_reason = stop_reason or (
+                "Baseline reached the quality floor without a decision-relevant frontier."
+            )
+        return stop_requested, stop_reason, independent_checkpoint_required
+
     async def _bootstrap(self) -> None:
         if not self._can_call():
             raise ProviderError("No model-call budget is available for the required baseline")
@@ -2067,66 +2245,12 @@ class FrontierEngine:
 
             issues, issue_keymap, dropped_issues = self._instantiate_issue_drafts(output.issues)
 
-            adaptive_mode = self.config.cognition.mode == "adaptive"
-            obligation_drafts = list(output.obligations) if adaptive_mode else []
-            if adaptive_mode:
-                charter, guard_drafts = compile_guard_obligations(
-                    task_source,
-                    contract,
-                    charter,
-                    existing_drafts=obligation_drafts,
-                )
-                guard_drafts.extend(
-                    ObligationDraft(
-                        local_key=f"release_artifact_{index}",
-                        title=f"Capture declared release artifact {index}",
-                        requirement=f"A final artifact matching `{pattern}` must be captured durably.",
-                        kind="construction",
-                        acceptance=(
-                            "The final ArtifactRef contains the exact generated bytes in its "
-                            "durable deliverables manifest."
-                        ),
-                        impact=Impact.FATAL,
-                        release_blocking=True,
-                        required_artifact_scope="release",
-                        tags=["runtime-guard", "durable-deliverable"],
-                    )
-                    for index, pattern in enumerate(self.config.software.release_artifacts, start=1)
-                )
-                by_requirement = {
-                    normalize_key(item.requirement): item for item in obligation_drafts
-                }
-                for guard in guard_drafts:
-                    incumbent = by_requirement.get(normalize_key(guard.requirement))
-                    if incumbent is None:
-                        obligation_drafts.append(guard)
-                        by_requirement[normalize_key(guard.requirement)] = guard
-                        continue
-                    incumbent.release_blocking = (
-                        incumbent.release_blocking or guard.release_blocking
-                    )
-                    if guard.impact == Impact.FATAL:
-                        incumbent.impact = Impact.FATAL
-                    incumbent.source_requirement_ids = unique_preserving_order(
-                        [*incumbent.source_requirement_ids, *guard.source_requirement_ids]
-                    )
-                    incumbent.required_evidence_modalities = unique_preserving_order(
-                        [
-                            *incumbent.required_evidence_modalities,
-                            *guard.required_evidence_modalities,
-                        ]
-                    )
-                    scope_rank = {
-                        "targeted": 0,
-                        "sequence": 1,
-                        "whole_artifact": 2,
-                        "release": 3,
-                    }
-                    if scope_rank[guard.required_artifact_scope] > scope_rank[
-                        incumbent.required_artifact_scope
-                    ]:
-                        incumbent.required_artifact_scope = guard.required_artifact_scope
-                    incumbent.tags = unique_preserving_order([*incumbent.tags, *guard.tags])
+            charter, obligation_drafts = self._bootstrap_obligation_drafts(
+                output=output,
+                task_source=task_source,
+                contract=contract,
+                charter=charter,
+            )
             obligations, obligation_keymap, obligation_notes = instantiate_obligations(
                 obligation_drafts,
                 existing=(),
@@ -2136,29 +2260,7 @@ class FrontierEngine:
                 human_evidence_available=self.config.cognition.human_evidence_available,
             )
 
-            crux_drafts = list(output.cruxes) if adaptive_mode else []
-            if adaptive_mode and not crux_drafts:
-                for index, issue in enumerate(issues[: self.config.cognition.max_active_cruxes]):
-                    local = next(
-                        (
-                            tag.removeprefix("local-key:")
-                            for tag in issue.tags
-                            if tag.startswith("local-key:")
-                        ),
-                        f"issue_{index + 1}",
-                    )
-                    crux_drafts.append(
-                        CruxDraft(
-                            local_key=local,
-                            title=issue.title,
-                            uncertainty=issue.description,
-                            decision_controlled=issue.decision_sensitivity,
-                            why_it_matters=issue.decision_sensitivity,
-                            obligation_keys=["deliverable"],
-                            discriminating_evidence=[],
-                            unlock_value=issue.impact,
-                        )
-                    )
+            crux_drafts = self._bootstrap_crux_drafts(output=output, issues=issues)
             cruxes, crux_keymap, crux_notes = instantiate_cruxes(
                 crux_drafts,
                 obligations=obligations,
@@ -2169,19 +2271,7 @@ class FrontierEngine:
             )
 
             reasons = ceiling_trigger_reasons(output.ceiling_scan)
-            summit_active = False
-            if self.config.cognition.mode == "adaptive":
-                if self.config.summit.mode == "on":
-                    summit_active = True
-                    reasons = unique_preserving_order(["summit.mode=on", *reasons])
-                elif self.config.summit.mode == "auto":
-                    summit_active = bool(
-                        reasons
-                        and (
-                            not self.config.summit.require_concrete_auto_trigger
-                            or (output.ceiling_scan and output.ceiling_scan.concrete_trigger)
-                        )
-                    )
+            summit_active, reasons = self._bootstrap_summit_active(output, reasons)
 
             lineages: dict[str, SummitLineage] = {}
             lineage_notes: dict[str, Any] = {}
@@ -2207,75 +2297,15 @@ class FrontierEngine:
                 ),
             )
 
-            proposals = list(output.actions)
-            if (
-                summit_active
-                and not lineages
-                and not any(item.topology == CognitiveTopology.SUMMIT for item in proposals)
-            ):
-                target_cruxes = [
-                    item.crux_id for item in cruxes if item.status == CruxStatus.ACTIVE
-                ][:1]
-                target_obligations = [
-                    item.obligation_id for item in obligations if item.release_blocking
-                ][:2]
-                proposals.append(
-                    ActionProposal(
-                        kind=ActionKind.EXPLORE,
-                        target="exact-task upper-tail mechanism search",
-                        assignment=(
-                            "Seed at most two genuinely mechanismally distinct Summit lineages for the exact immutable task. "
-                            "Each lineage must name a concrete mechanism, assumptions, discriminating prediction, next dependency, "
-                            "and a bounded kill condition. Do not generate alternate objectives or cosmetic variants."
-                        ),
-                        obligation_ids=target_obligations,
-                        crux_ids=target_cruxes,
-                        impact=Impact.HIGH,
-                        cost=CostBand.MODERATE,
-                        independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
-                        topology=CognitiveTopology.SUMMIT,
-                        epistemic_mode=EpistemicMode.THINK,
-                        expected_decision_effect=(
-                            "Either establish a viable distant mechanism for the same task, or record why upper-tail expansion is not justified."
-                        ),
-                        reusable_value=ValueBand.HIGH,
-                        distinctive_angle="mechanism-level exact-task support expansion",
-                        summit_reason=reasons[0] if reasons else "summit.mode=on",
-                    )
-                )
-            elif (
-                summit_active
-                and lineages
-                and self.config.summit.experimental_frontier
-                and not any(item.topology == CognitiveTopology.SUMMIT for item in proposals)
-            ):
-                target_cruxes = [
-                    item.crux_id for item in cruxes if item.status == CruxStatus.ACTIVE
-                ][:1]
-                target_obligations = [
-                    item.obligation_id for item in obligations if item.release_blocking
-                ][:2]
-                plans = self.experimental_frontier.select(
-                    lineages,
-                    discovery_records,
-                    limit=self.config.summit.max_discovery_actions_per_round,
-                )
-                proposals.extend(
-                    self.experimental_frontier.to_action(
-                        plan,
-                        crux_ids=target_cruxes,
-                        obligation_ids=target_obligations,
-                        summit_reason=reasons[0] if reasons else "summit.mode=on",
-                    )
-                    for plan in plans
-                )
-            if not proposals:
-                proposals.extend(
-                    self._fallback_action_proposals(
-                        obligations={item.obligation_id: item for item in obligations},
-                        cruxes={item.crux_id: item for item in cruxes},
-                    )
-                )
+            proposals = self._bootstrap_proposals(
+                output=output,
+                summit_active=summit_active,
+                lineages=lineages,
+                discovery_records=discovery_records,
+                obligations=obligations,
+                cruxes=cruxes,
+                reasons=reasons,
+            )
             actions, action_contracts, dropped_actions = self._instantiate_actions(
                 proposals,
                 issue_keymap=issue_keymap,
@@ -2291,36 +2321,17 @@ class FrontierEngine:
                 next_actions=actions,
                 round_index=0,
             )
-            high_open = any(issue.impact in {Impact.FATAL, Impact.HIGH} for issue in issues)
-            active_crux = any(item.status == CruxStatus.ACTIVE for item in cruxes)
             profiles = set(self.config.run.semantic_profiles)
             profiles.update(contract.semantic_profiles)
-            qualitative_architecture = bool(
-                profiles.intersection({"creative", "media"})
-            )
-            independent_checkpoint_required = bool(
-                (
-                    output.artifact_scope in {"whole_artifact", "release"}
-                    or qualitative_architecture
-                )
-                and (
-                    high_open
-                    or active_crux
-                    or output.artifact_scope in {"whole_artifact", "release"}
+            stop_requested, stop_reason, independent_checkpoint_required = (
+                self._bootstrap_stop_signals(
+                    output=output,
+                    actions=actions,
+                    issues=issues,
+                    cruxes=cruxes,
+                    semantic_profiles=list(profiles),
                 )
             )
-            stop_requested = bool(
-                output.quality_floor_reached
-                and not high_open
-                and not active_crux
-                and not any(action.topology == CognitiveTopology.SUMMIT for action in actions)
-            )
-            stop_reason = output.stop_reason if stop_requested else None
-            if not actions and not high_open and not active_crux:
-                stop_requested = True
-                stop_reason = stop_reason or (
-                    "Baseline reached the quality floor without a decision-relevant frontier."
-                )
             payload = {
                 "contract": contract.model_dump(mode="json"),
                 "task_charter": charter.model_dump(mode="json"),
@@ -2533,8 +2544,8 @@ class FrontierEngine:
             or (
                 kernel is None
                 and any(
-                count >= self.config.frontier.max_stalled_actions_per_target
-                for count in target_stalls.values()
+                    count >= self.config.frontier.max_stalled_actions_per_target
+                    for count in target_stalls.values()
                 )
             )
         )
@@ -2580,11 +2591,7 @@ class FrontierEngine:
                 ),
                 obligation_ids=[item.obligation_id for item in blockers[:2]],
                 crux_ids=[item.crux_id for item in active_cruxes[:1]],
-                impact=(
-                    blockers[0].impact
-                    if blockers
-                    else active_cruxes[0].unlock_value
-                ),
+                impact=(blockers[0].impact if blockers else active_cruxes[0].unlock_value),
                 cost=CostBand.MODERATE,
                 independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
                 topology=CognitiveTopology.WORKER,
@@ -2630,13 +2637,10 @@ class FrontierEngine:
             self.state.actions[action_id]
             for action_id in accepted_action_ids
             if action_id in self.state.actions
-            and self.state.actions[action_id].spec.artifact_scope
-            in {"whole_artifact", "release"}
+            and self.state.actions[action_id].spec.artifact_scope in {"whole_artifact", "release"}
             and self.state.actions[action_id].spec.kind
             not in {ActionKind.DISCRIMINATE, ActionKind.CEILING_AUDIT}
-            and experiential.intersection(
-                self.state.actions[action_id].spec.observation_modalities
-            )
+            and experiential.intersection(self.state.actions[action_id].spec.observation_modalities)
         ]
         if not candidates or any(
             proposal.kind in {ActionKind.DISCRIMINATE, ActionKind.CEILING_AUDIT}
@@ -2678,7 +2682,9 @@ class FrontierEngine:
                 feasibility=ValueBand.HIGH,
                 artifact_scope=source.artifact_scope,
                 observation_modalities=[
-                    modality for modality in source.observation_modalities if modality in experiential
+                    modality
+                    for modality in source.observation_modalities
+                    if modality in experiential
                 ],
                 causal_hypothesis=(
                     "The integrated artifact satisfies its global experience and quality claims "
@@ -2851,632 +2857,12 @@ class FrontierEngine:
         *,
         max_provider_calls: int = 1,
     ) -> None:
-        lineage_parent_ids = unique_preserving_order(
-            [
-                *action.parent_lineage_ids,
-                *([action.lineage_id] if action.lineage_id else []),
-            ]
+        await self.action_executor.execute(
+            self,
+            action,
+            round_state,
+            max_provider_calls=max_provider_calls,
         )
-        lineage_base = round_state.current_artifact
-        for lineage_id in lineage_parent_ids:
-            lineage = round_state.summit_lineages.get(lineage_id)
-            if lineage is not None and lineage.candidate_artifact is not None:
-                lineage_base = lineage.candidate_artifact
-                break
-        baseline_objective = None
-        primary_lineage_id = lineage_parent_ids[0] if lineage_parent_ids else None
-        primary_record = (
-            round_state.discovery_records.get(primary_lineage_id) if primary_lineage_id else None
-        )
-        if (
-            action.topology == CognitiveTopology.SUMMIT
-            and primary_lineage_id is not None
-            and (primary_record is None or primary_record.best_objective is None)
-            and self.adapter.objective_enabled
-        ):
-            baseline_workspace = self.adapter.open_call(
-                call_id=f"{action.action_id}-baseline",
-                call_kind="objective-baseline",
-                current_artifact=lineage_base,
-            )
-            try:
-                baseline_objective = self.adapter.measure_candidate(baseline_workspace)
-            finally:
-                self._close_workspace(baseline_workspace)
-        workspace = self.adapter.open_call(
-            call_id=action.action_id,
-            call_kind=f"worker-{action.kind.value}",
-            current_artifact=lineage_base,
-        )
-        action_contract: ActionContract | None = None
-        context_lens_digest: str | None = None
-        try:
-            record = round_state.actions.get(action.action_id)
-            action_contract = record.contract if record else None
-            capsule = self._capsules.populate(
-                workspace,
-                task=round_state.source_prompt,
-                state=round_state,
-                assignment=action.assignment,
-                goal_contract=round_state.contract,
-                task_source=round_state.task_source,
-                action_contract=action_contract,
-                lens_purpose="action",
-            )
-            context_lens_digest = cast(str, capsule["context_lens_digest"])
-            lineage_context: list[dict[str, Any]] = []
-            lineage_dir = workspace.context_dir / "lineage-candidates"
-            for lineage_id in lineage_parent_ids:
-                lineage = round_state.summit_lineages.get(lineage_id)
-                if lineage is None:
-                    continue
-                entry: dict[str, Any] = {
-                    "lineage_id": lineage_id,
-                    "name": lineage.name,
-                    "mechanism": lineage.mechanism,
-                    "candidate_artifact": None,
-                }
-                if lineage.candidate_artifact is not None:
-                    lineage_dir.mkdir(parents=True, exist_ok=True)
-                    suffix = (
-                        ".patch" if lineage.candidate_artifact.kind == "git-patch" else ".artifact"
-                    )
-                    destination = lineage_dir / f"{safe_slug(lineage_id)}{suffix}"
-                    self.blobs.materialize(lineage.candidate_artifact.blob, destination)
-                    entry["candidate_artifact"] = str(destination)
-                lineage_context.append(entry)
-            if lineage_context:
-                atomic_write_text(
-                    workspace.context_dir / "LINEAGE_CONTEXT.json",
-                    json.dumps(
-                        {
-                            "working_tree_base_lineage": (
-                                lineage_parent_ids[0] if lineage_parent_ids else None
-                            ),
-                            "parents": lineage_context,
-                        },
-                        indent=2,
-                        ensure_ascii=False,
-                    ),
-                )
-            prompt = worker_prompt(
-                workspace,
-                action=action,
-                profile=self._profile,
-                software=self._software,
-            )
-            use_lead = (
-                self.config.cognition.mode == "adaptive"
-                and self.config.cognition.persistent_lead
-                and action.topology == CognitiveTopology.LEAD
-            )
-            result, trace = await self._invoke(
-                workspace,
-                call_kind=f"worker-{action.kind.value}",
-                role=Role.STRONG if use_lead else self._role_for_action(action),
-                prompt=prompt,
-                response_model=WorkerEnvelope,
-                sandbox=action.sandbox,
-                network_access=action.network or self.config.provider.default_network_access,
-                image_paths=[Path(item) for item in cast(list[str], capsule["image_paths"])],
-                metadata={
-                    "target": action.target,
-                    "action_id": action.action_id,
-                    "task_source_digest": (
-                        round_state.task_source.digest if round_state.task_source else None
-                    ),
-                    "active_obligation_ids": list(action.obligation_ids),
-                    "active_crux_ids": list(action.crux_ids),
-                    "topology": action.topology.value,
-                    "lineage_id": action.lineage_id,
-                    "parent_lineage_ids": list(action.parent_lineage_ids),
-                    "discovery_operator": (
-                        action.discovery_operator.value if action.discovery_operator else None
-                    ),
-                },
-                use_lead=use_lead,
-                max_provider_calls=max_provider_calls,
-            )
-            envelope = result.response
-            declared, normalization = self._ensure_worker_result_file(workspace, envelope)
-            if declared != envelope.result_or_artifact_reference:
-                envelope = envelope.model_copy(update={"result_or_artifact_reference": declared})
-            result_blob = self.adapter.capture_worker_result(workspace, declared)
-            patch_blob = self.adapter.capture_worker_patch(workspace)
-            evidence_artifacts = self.adapter.capture_evidence_artifacts(
-                workspace,
-                envelope.evidence_artifact_paths,
-            )
-            candidate_artifact = (
-                self.adapter.capture_candidate_artifact(
-                    workspace,
-                    summary="; ".join(envelope.findings) or action.target,
-                    parent=lineage_base,
-                    source_action_ids=[action.action_id],
-                )
-                if action.topology == CognitiveTopology.SUMMIT and patch_blob is not None
-                else None
-            )
-            if envelope.lineage is not None:
-                inherited_candidate = round_state.summit_lineages.get(envelope.lineage.lineage_id)
-                envelope.lineage.candidate_artifact = candidate_artifact or (
-                    inherited_candidate.candidate_artifact if inherited_candidate else None
-                )
-            objective = self.adapter.measure_candidate(workspace) if patch_blob else None
-            evidence = EvidenceRecord(
-                evidence_id=new_id("evd"),
-                source_action_id=action.action_id,
-                kind=f"{action.kind.value}_result",
-                summary="; ".join(envelope.findings) or "Worker returned no concise finding.",
-                scope=envelope.scope or action.stop_condition,
-                artifact_scope=action.artifact_scope,
-                independence_class=action.independence_class,
-                references=unique_preserving_order(
-                    [*envelope.evidence_references, result_blob.digest]
-                ),
-                blob=result_blob,
-                negative_result=envelope.negative_result,
-                modalities=list(action.observation_modalities),
-                establishes=(
-                    list(envelope.action_receipt.decisions_changed)
-                    if envelope.action_receipt
-                    else []
-                ),
-                cannot_establish=(
-                    ["independent external validity"]
-                    if action.independence_class
-                    in {
-                        IndependenceClass.SAME_MODEL,
-                        IndependenceClass.DIFFERENT_CONDITIONING,
-                    }
-                    else []
-                ),
-                artifact_digest=(
-                    candidate_artifact.blob.digest if candidate_artifact is not None else None
-                ),
-            )
-            evidence_items = [evidence]
-            for ref in evidence_artifacts:
-                evidence_items.append(
-                    EvidenceRecord(
-                        evidence_id=new_id("evd"),
-                        source_action_id=action.action_id,
-                        kind="retained_worker_artifact",
-                        summary=(
-                            "Preserved generated evidence before isolated workspace cleanup: "
-                            f"{ref.original_name or ref.digest}"
-                        ),
-                        scope=(
-                            "Durable byte retention only. Content validity requires an actual "
-                            "inspection in the declared modality."
-                        ),
-                        artifact_scope=action.artifact_scope,
-                        independence_class=IndependenceClass.DETERMINISTIC_TOOL,
-                        references=[ref.digest],
-                        blob=ref,
-                        modalities=[],
-                        cannot_establish=["quality, correctness, or successful playback"],
-                        artifact_digest=(
-                            candidate_artifact.blob.digest
-                            if candidate_artifact is not None
-                            else None
-                        ),
-                    )
-                )
-            if baseline_objective is not None:
-                baseline_blob = baseline_objective.evidence_blob
-                evidence_items.append(
-                    EvidenceRecord(
-                        evidence_id=new_id("evd"),
-                        source_action_id=action.action_id,
-                        kind="objective_baseline",
-                        summary=(
-                            f"Baseline {baseline_objective.primary_metric}="
-                            f"{baseline_objective.metrics.get(baseline_objective.primary_metric)!r}"
-                            if baseline_objective.valid
-                            else f"Baseline measurement invalid: {baseline_objective.detail}"
-                        ),
-                        scope=f"Isolated parent evaluator: {baseline_objective.command}",
-                        artifact_scope=action.artifact_scope,
-                        independence_class=IndependenceClass.DETERMINISTIC_TOOL,
-                        references=[baseline_blob.digest] if baseline_blob else [],
-                        blob=baseline_blob,
-                        negative_result=not baseline_objective.valid,
-                        modalities=[
-                            EvidenceModality.DETERMINISTIC_TEST,
-                            EvidenceModality.STRUCTURED_DATA,
-                        ],
-                        establishes=[baseline_objective.primary_metric],
-                        artifact_digest=(
-                            round_state.current_artifact.blob.digest
-                            if round_state.current_artifact
-                            else None
-                        ),
-                    )
-                )
-            if objective is not None:
-                objective_blob = objective.evidence_blob
-                evidence_items.append(
-                    EvidenceRecord(
-                        evidence_id=new_id("evd"),
-                        source_action_id=action.action_id,
-                        kind="objective_measurement",
-                        summary=(
-                            f"Measured {objective.primary_metric}="
-                            f"{objective.metrics.get(objective.primary_metric)!r}"
-                            if objective.valid
-                            else f"Objective measurement invalid: {objective.detail}"
-                        ),
-                        scope=f"Runtime-owned evaluator: {objective.command}",
-                        artifact_scope=action.artifact_scope,
-                        independence_class=IndependenceClass.DETERMINISTIC_TOOL,
-                        references=[objective_blob.digest] if objective_blob else [],
-                        blob=objective_blob,
-                        negative_result=not objective.valid,
-                        modalities=[
-                            EvidenceModality.DETERMINISTIC_TEST,
-                            EvidenceModality.STRUCTURED_DATA,
-                        ],
-                        establishes=[objective.primary_metric],
-                    )
-                )
-
-            candidate: CandidateDelta | None = None
-            probe: Probe | None = None
-            candidate_kinds = {
-                ActionKind.EXPLOIT,
-                ActionKind.EXPLORE,
-                ActionKind.REPAIR,
-                ActionKind.INTEGRATE,
-                ActionKind.REFRAME,
-                ActionKind.MECHANISM_GRAFT,
-            }
-            if action.kind in candidate_kinds:
-                candidate = CandidateDelta(
-                    delta_id=new_id("delta"),
-                    target=action.target,
-                    proposed_change="; ".join(envelope.findings)
-                    or "See the referenced candidate artifact.",
-                    expected_benefit=envelope.decision_effect or action.expected_decision_effect,
-                    dependencies=unique_preserving_order(
-                        [*action.issue_ids, *action.obligation_ids, *action.crux_ids]
-                    ),
-                    risks=envelope.unresolved_risks,
-                    evidence_references=[evidence.evidence_id],
-                    source_action_id=action.action_id,
-                    artifact_blob=(
-                        candidate_artifact.blob
-                        if candidate_artifact is not None
-                        else patch_blob or result_blob
-                    ),
-                )
-            else:
-                probe = Probe(
-                    probe_id=new_id("probe"),
-                    target_issue_ids=action.issue_ids,
-                    method=action.assignment,
-                    predicted_outcomes=[
-                        branch.decision_effect for branch in action.outcome_branches
-                    ]
-                    or [action.expected_decision_effect],
-                    scope=envelope.scope or action.stop_condition,
-                    blind_spots=envelope.unresolved_risks,
-                    independence_class=action.independence_class,
-                    cost=action.cost,
-                    source_action_id=action.action_id,
-                    status=(
-                        ProbeStatus.INCONCLUSIVE
-                        if envelope.materiality == "none" and not envelope.negative_result
-                        else ProbeStatus.COMPLETE
-                    ),
-                    finding="; ".join(envelope.findings),
-                    evidence_references=[evidence.evidence_id],
-                )
-
-            receipt = (
-                ActionReceipt.model_validate(envelope.action_receipt.model_dump(mode="json"))
-                if envelope.action_receipt is not None
-                else derive_action_receipt(
-                    action_id=action.action_id,
-                    findings=envelope.findings,
-                    decision_effect=(envelope.decision_effect or action.expected_decision_effect),
-                    scope=envelope.scope or action.stop_condition,
-                )
-            )
-            if receipt.action_id != action.action_id:
-                receipt = receipt.model_copy(update={"action_id": action.action_id})
-            receipt = finalize_action_receipt(
-                receipt,
-                contract=action_contract,
-                trace=result.trace_summary,
-                usage=result.usage,
-            )
-            receipt = receipt.model_copy(
-                update={
-                    "context_lens_digest": context_lens_digest,
-                    "parent_artifact_digest": (
-                        lineage_base.blob.digest if lineage_base is not None else None
-                    ),
-                }
-            )
-            observed_modalities = observed_modalities_from_trace(
-                action.observation_modalities,
-                result.trace_summary,
-            )
-            missing_modalities = [
-                item for item in action.observation_modalities if item not in observed_modalities
-            ]
-            evidence = evidence.model_copy(
-                update={
-                    "modalities": observed_modalities,
-                    "establishes": (
-                        list(receipt.decisions_changed) if observed_modalities else []
-                    ),
-                    "cannot_establish": unique_preserving_order(
-                        [
-                            *evidence.cannot_establish,
-                            *(
-                                [
-                                    "requested observation modalities were not seen in the "
-                                    "provider tool trace: "
-                                    + ", ".join(item.value for item in missing_modalities)
-                                ]
-                                if missing_modalities
-                                else []
-                            ),
-                        ]
-                    ),
-                }
-            )
-            evidence_items[0] = evidence
-            if objective is not None and objective.valid:
-                measured_channels = list(receipt.observed_evidence_channels)
-                if IndependenceClass.DETERMINISTIC_TOOL not in measured_channels:
-                    measured_channels.append(IndependenceClass.DETERMINISTIC_TOOL)
-                receipt.observed_evidence_channels = measured_channels
-                receipt.evidence_channel_confirmed = True
-
-            substrate_candidates: list[SubstrateEntry] = []
-            for raw in envelope.substrate_entries:
-                item = raw.model_copy(deep=True)
-                item.source_action_id = action.action_id
-                if item.global_admission and not item.evidence_references:
-                    item.evidence_references = [evidence.evidence_id]
-                substrate_candidates.append(item)
-            projected_substrate, substrate_notes = admit_substrate_entries(
-                substrate_candidates,
-                existing=round_state.substrate,
-            )
-            substrate_upserts = cast(
-                list[SubstrateEntry],
-                self._changed_models(round_state.substrate, projected_substrate),
-            )
-
-            instrument = envelope.instrument or action.instrument
-            if instrument is not None and self.config.cognition.instruments_enabled:
-                instrument = instrument.model_copy(deep=True)
-                if not instrument.instrument_id:
-                    instrument.instrument_id = new_id("ins")
-                instrument.artifact_references = unique_preserving_order(
-                    [*instrument.artifact_references, result_blob.digest]
-                )
-                if envelope.negative_result:
-                    instrument.status = InstrumentStatus.FAILED
-                elif instrument.status in {InstrumentStatus.VALIDATED, InstrumentStatus.EXECUTED}:
-                    if not instrument.validation_evidence:
-                        # Execution success is not inference validity. Do not
-                        # let a model self-declare a validated instrument without
-                        # an explicit validation record.
-                        instrument.status = InstrumentStatus.BUILT
-                elif instrument.observation_evidence and instrument.validation_evidence:
-                    instrument.status = InstrumentStatus.EXECUTED
-                elif instrument.validation_evidence:
-                    instrument.status = InstrumentStatus.VALIDATED
-                else:
-                    instrument.status = InstrumentStatus.BUILT
-
-            overlay_upserts: list[SpeculativeOverlay] = []
-            if envelope.overlay is not None:
-                projected_overlays, overlay_notes = admit_overlays(
-                    [envelope.overlay],
-                    existing=round_state.overlays,
-                    normal_limit=self.config.cognition.normal_overlay_limit,
-                    hard_limit=self.config.cognition.hard_overlay_limit,
-                    require_behavioral_difference=(
-                        self.config.cognition.require_behavioral_overlay_difference
-                    ),
-                )
-                overlay_upserts = cast(
-                    list[SpeculativeOverlay],
-                    self._changed_models(round_state.overlays, projected_overlays),
-                )
-            else:
-                overlay_notes = None
-
-            lineage_upserts: list[SummitLineage] = []
-            lineage_notes: dict[str, Any] = {}
-            if envelope.lineage is not None and round_state.summit_active:
-                projected_lineages, decision = self.summit_archive.admit(
-                    round_state.summit_lineages, [envelope.lineage]
-                )
-                lineage_upserts = cast(
-                    list[SummitLineage],
-                    self._changed_models(round_state.summit_lineages, projected_lineages),
-                )
-                lineage_notes = {
-                    "accepted": decision.accepted,
-                    "replaced": decision.replaced,
-                    "rejected": decision.rejected,
-                    "demoted": decision.demoted,
-                }
-            elif envelope.lineage is not None:
-                lineage_notes = {
-                    "rejected": {
-                        envelope.lineage.lineage_id: "Summit lineage returned while Summit was inactive"
-                    }
-                }
-
-            projected_discovery = self.experimental_frontier.seed_records(
-                round_state.summit_lineages,
-                self.state.discovery_records,
-            )
-            if action.topology == CognitiveTopology.SUMMIT:
-                projected_discovery = self.experimental_frontier.observe(
-                    projected_discovery,
-                    round_state.summit_lineages,
-                    action=action,
-                    returned=envelope.lineage,
-                    receipt=receipt,
-                    baseline_objective=baseline_objective,
-                    objective=objective,
-                    negative_result=envelope.negative_result,
-                    event_seq=self.journal.count() + 1,
-                )
-            discovery_upserts = cast(
-                list[DiscoveryRecord],
-                self._changed_models(self.state.discovery_records, projected_discovery),
-            )
-
-            self._append(
-                et.ACTION_COMPLETED,
-                {
-                    "action_id": action.action_id,
-                    "result": envelope.model_dump(mode="json"),
-                    "result_blob": result_blob.model_dump(mode="json"),
-                    "patch_blob": patch_blob.model_dump(mode="json") if patch_blob else None,
-                    "evidence": [item.model_dump(mode="json") for item in evidence_items],
-                    "candidate_delta": candidate.model_dump(mode="json") if candidate else None,
-                    "probe": probe.model_dump(mode="json") if probe else None,
-                    "action_receipt": receipt.model_dump(mode="json"),
-                    "objective_measurement": (
-                        objective.model_dump(mode="json") if objective else None
-                    ),
-                    "baseline_objective_measurement": (
-                        baseline_objective.model_dump(mode="json") if baseline_objective else None
-                    ),
-                    "substrate_entries": [
-                        item.model_dump(mode="json") for item in substrate_upserts
-                    ],
-                    "instrument": instrument.model_dump(mode="json") if instrument else None,
-                    "overlays": [item.model_dump(mode="json") for item in overlay_upserts],
-                    "lineages": [item.model_dump(mode="json") for item in lineage_upserts],
-                    "discovery_records": [
-                        item.model_dump(mode="json") for item in discovery_upserts
-                    ],
-                    "lead_session": (
-                        self.state.lead_session.model_dump(mode="json") if use_lead else None
-                    ),
-                    "completed_at": utc_now(),
-                    "usage": result.usage.model_dump(mode="json"),
-                    "normalization_notes": normalization,
-                    "substrate_admission": asdict(substrate_notes),
-                    "overlay_admission": asdict(overlay_notes) if overlay_notes else {},
-                    "lineage_admission": lineage_notes,
-                    **trace.payload(),
-                },
-                actor="lead" if use_lead else "worker",
-                action_id=action.action_id,
-            )
-        except asyncio.CancelledError:
-            recovery_artifact, recovery_capture_error = self._capture_recovery_artifact(
-                workspace,
-                summary=f"Interrupted action workspace: {action.target}",
-                parent=lineage_base,
-                source_action_ids=[action.action_id],
-            )
-            self._append(
-                et.ACTION_FAILED,
-                {
-                    "action_id": action.action_id,
-                    "error": "worker cancelled before durable completion",
-                    "completed_at": utc_now(),
-                    "usage": Usage().model_dump(mode="json"),
-                    "recovery_artifact": (
-                        recovery_artifact.model_dump(mode="json") if recovery_artifact else None
-                    ),
-                    "recovery_capture_error": recovery_capture_error,
-                },
-                actor="worker",
-                action_id=action.action_id,
-            )
-            raise
-        except BaseException as exc:
-            usage, trace = self._failure_parts(exc)
-            recovery_artifact, recovery_capture_error = self._capture_recovery_artifact(
-                workspace,
-                summary=f"Failed action workspace: {action.target}",
-                parent=lineage_base,
-                source_action_ids=[action.action_id],
-            )
-            provider_trace = ProviderTraceSummary.model_validate(trace.provider_trace_summary or {})
-            failed_receipt = finalize_action_receipt(
-                ActionReceipt(
-                    action_id=action.action_id,
-                    observed_result=f"{type(exc).__name__}: {exc}",
-                    evidence_strength="none",
-                    evidence_scope=action.stop_condition,
-                    integration_status="failed",
-                    recommended_next_action=action.failure_handling,
-                ),
-                contract=action_contract,
-                trace=provider_trace,
-                usage=usage,
-            )
-            failed_receipt = failed_receipt.model_copy(
-                update={
-                    "context_lens_digest": context_lens_digest,
-                    "parent_artifact_digest": (
-                        lineage_base.blob.digest if lineage_base is not None else None
-                    ),
-                }
-            )
-            failed_discovery: list[DiscoveryRecord] = []
-            if action.topology == CognitiveTopology.SUMMIT:
-                projected_failure_records = self.experimental_frontier.observe(
-                    self.state.discovery_records,
-                    round_state.summit_lineages,
-                    action=action,
-                    returned=None,
-                    receipt=failed_receipt,
-                    baseline_objective=baseline_objective,
-                    objective=None,
-                    negative_result=False,
-                    event_seq=self.journal.count() + 1,
-                )
-                failed_discovery = cast(
-                    list[DiscoveryRecord],
-                    self._changed_models(
-                        self.state.discovery_records,
-                        projected_failure_records,
-                    ),
-                )
-            self._append(
-                et.ACTION_FAILED,
-                {
-                    "action_id": action.action_id,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "completed_at": utc_now(),
-                    "usage": usage.model_dump(mode="json"),
-                    "action_receipt": failed_receipt.model_dump(mode="json"),
-                    "baseline_objective_measurement": (
-                        baseline_objective.model_dump(mode="json") if baseline_objective else None
-                    ),
-                    "discovery_records": [
-                        item.model_dump(mode="json") for item in failed_discovery
-                    ],
-                    "recovery_artifact": (
-                        recovery_artifact.model_dump(mode="json") if recovery_artifact else None
-                    ),
-                    "recovery_capture_error": recovery_capture_error,
-                    **trace.payload(),
-                },
-                actor="worker",
-                action_id=action.action_id,
-            )
-            if self.config.run.fail_fast_on_provider_error:
-                raise
-        finally:
-            self._close_workspace(workspace)
 
     def _fresh_frontier_keeper(self) -> bool:
         if (
@@ -3498,10 +2884,7 @@ class FrontierEngine:
         return bool(
             profiles.intersection({"research", "formal", "decision", "creative", "media"})
             or self.state.summit_active
-            or bool(
-                self.state.frontier_kernel
-                and self.state.frontier_kernel.stagnant_rounds > 0
-            )
+            or bool(self.state.frontier_kernel and self.state.frontier_kernel.stagnant_rounds > 0)
             or any(
                 count >= self.config.frontier.max_stalled_actions_per_target
                 for count in self._target_stalls().values()
@@ -3509,905 +2892,14 @@ class FrontierEngine:
         )
 
     async def _checkpoint(self, action_ids: Sequence[str], round_index: int) -> bool:
-        repairing_verification = self.state.runtime.verification.replan_pending
-        if not self._can_call():
-            return False
-        call_id = new_id("call")
-        self._append(
-            et.CHECKPOINT_STARTED,
-            {
-                "call_id": call_id,
-                "round_index": round_index,
-                "action_ids": list(action_ids),
-                "started_at": utc_now(),
-            },
-            actor="controller",
+        return await self.checkpoint_executor.execute(
+            self,
+            action_ids,
+            round_index,
         )
-        current = self.state.current_artifact
-        if current is None:
-            raise FrontierError("Checkpoint cannot run without a current artifact")
-        workspace = self.adapter.open_call(
-            call_id=call_id,
-            call_kind="checkpoint",
-            current_artifact=current,
-        )
-        try:
-            completed = [
-                action_id
-                for action_id in action_ids
-                if action_id in self.state.actions
-                and self.state.actions[action_id].status == ActionStatus.COMPLETE
-            ]
-            stalled_targets = {
-                target: count
-                for target, count in self._target_stalls().items()
-                if count >= self.config.frontier.max_stalled_actions_per_target
-            }
-            checkpoint_notes = ""
-            if stalled_targets:
-                checkpoint_notes = (
-                    "Diminishing-return boundary reached for these semantic targets: "
-                    + "; ".join(
-                        f"{target} ({count} non-informative attempts)"
-                        for target, count in sorted(stalled_targets.items())
-                    )
-                    + ". Do not propose another local mutation on them. Reopen the causal "
-                    "model through a reframe, reconstruction, ceiling audit, or mechanism graft."
-                )
-            if self.state.runtime.bootstrap.independent_checkpoint_required:
-                checkpoint_notes += (
-                    "\nIndependent stage gate: the construction Lead produced a whole-artifact "
-                    "or release-scope bootstrap. Audit its load-bearing architecture before "
-                    "hardening it. If a representative slice could still falsify the direction, "
-                    "schedule that discriminator rather than polishing or extending the whole."
-                )
-            if replan := self.state.runtime.planning.frontier_replan_pending:
-                checkpoint_notes += (
-                    "\nPlanner deadlock: the prior action slate produced no executable action. "
-                    "Do not repeat, rename, or defer the same slate. Preserve the unresolved debt "
-                    "and propose a materially executable route, or identify a genuine external "
-                    f"blocker. Scheduler evidence: {canonical_json(replan)}"
-                )
-            if recovery := self.state.runtime.release.replan_pending:
-                checkpoint_notes += (
-                    "\nRelease evidence falsified an upstream commitment. Treat this as causal "
-                    "evidence, not a repair checklist. Explicitly revise every matching Artifact "
-                    "Spine invariant, reopen dependent obligations and cruxes, and schedule the "
-                    "typed recovery route at the earliest failed boundary. Recovery evidence: "
-                    f"{canonical_json(recovery.model_dump(mode='json'))}"
-                )
-            capsule = self._capsules.populate(
-                workspace,
-                task=self.state.source_prompt,
-                state=self.state,
-                assignment=(
-                    "Integrate the completed sparse batch, update only causally affected "
-                    "obligations/cruxes, preserve the artifact spine, and choose the next "
-                    "minimum-sufficient action slate or stop."
-                ),
-                goal_contract=self.state.contract,
-                evidence_action_ids=list(action_ids),
-                task_source=self.state.task_source,
-                extra_notes=checkpoint_notes,
-                lens_purpose="checkpoint",
-            )
-            synthesis_interval = self.config.frontier.clean_synthesis_every_rounds
-            force_clean = self.state.runtime.planning.clean_synthesis_needed or bool(
-                synthesis_interval
-                and round_index > 0
-                and round_index % synthesis_interval == 0
-            )
-            fresh_keeper = self._fresh_frontier_keeper()
-            prompt = checkpoint_prompt(
-                workspace,
-                profile=self._profile,
-                max_issues=self.config.frontier.max_open_issues,
-                max_actions=self.config.frontier.max_actions_per_batch * 2,
-                software=self._software,
-                force_clean_synthesis=force_clean,
-                adaptive=self.config.cognition.mode == "adaptive",
-                max_cruxes=self.config.cognition.max_active_cruxes,
-                normal_overlay_limit=self.config.cognition.normal_overlay_limit,
-                summit_mode=self.config.summit.mode,
-                fresh_keeper=fresh_keeper,
-            )
-            use_lead = (
-                self.config.cognition.mode == "adaptive"
-                and self.config.cognition.persistent_lead
-                and not fresh_keeper
-            )
-            result, trace = await self._invoke(
-                workspace,
-                call_kind="checkpoint",
-                role=Role.STRONG,
-                prompt=prompt,
-                response_model=CheckpointOutput,
-                sandbox=self._bootstrap_sandbox(),
-                network_access=self.config.provider.default_network_access,
-                image_paths=[Path(item) for item in cast(list[str], capsule["image_paths"])],
-                metadata={
-                    "current_artifact_text": self.adapter.artifact_text(current),
-                    "open_issue_ids": [issue.issue_id for issue in self.state.open_issues],
-                    "open_obligation_ids": [
-                        item.obligation_id for item in self.state.open_obligations
-                    ],
-                    "active_crux_ids": [item.crux_id for item in self.state.active_cruxes],
-                    "completed_action_ids": completed,
-                    "task_source_digest": (
-                        self.state.task_source.digest if self.state.task_source else None
-                    ),
-                },
-                use_lead=use_lead,
-            )
-            output = result.response
-            accepted = [item for item in output.accepted_action_ids if item in completed]
-            rejected = [
-                item
-                for item in output.rejected_action_ids
-                if item in completed and item not in accepted
-            ]
-            rejected.extend(
-                item for item in completed if item not in accepted and item not in rejected
-            )
-            receipt_updates = []
-            for action_id in completed:
-                record = self.state.actions.get(action_id)
-                if record is None or record.receipt is None:
-                    continue
-                receipt_updates.append(
-                    record.receipt.model_copy(
-                        update={
-                            "integration_status": (
-                                "accepted" if action_id in accepted else "rejected"
-                            )
-                        }
-                    )
-                )
-
-            reframe_valid = True
-            reframe_notes: list[str] = []
-            if output.reframe_witness is not None and self.state.task_charter is not None:
-                reframe_valid, reframe_notes = validate_reframe(
-                    output.reframe_witness, charter=self.state.task_charter
-                )
-                self._append(
-                    et.REFRAME_ADMITTED if reframe_valid else et.REFRAME_REJECTED,
-                    {
-                        "witness": output.reframe_witness.model_dump(mode="json"),
-                        "problems": reframe_notes,
-                        "call_id": call_id,
-                    },
-                    actor="controller",
-                )
-            elif (output.frame_break or output.task_charter is not None) and (
-                self.config.cognition.require_reframe_witness
-                and charter_change_requires_witness(self.state.task_charter, output.task_charter)
-            ):
-                reframe_valid = False
-                reframe_notes.append("material charter change omitted a reframe witness")
-                self._append(
-                    et.REFRAME_REJECTED,
-                    {"problems": reframe_notes, "call_id": call_id},
-                    actor="controller",
-                )
-
-            charter = self.state.task_charter
-            if output.task_charter is not None and reframe_valid:
-                proposed = output.task_charter.model_copy(deep=True)
-                source_digest = self.state.task_source.digest if self.state.task_source else None
-                if source_digest and proposed.source_digest != source_digest:
-                    reframe_notes.append("task charter digest mismatch; prior charter preserved")
-                else:
-                    if charter is not None:
-                        proposed.hard_constraints = unique_preserving_order(
-                            [*charter.hard_constraints, *proposed.hard_constraints]
-                        )
-                        proposed.unacceptable_failures = unique_preserving_order(
-                            [
-                                *charter.unacceptable_failures,
-                                *proposed.unacceptable_failures,
-                            ]
-                        )
-                        proposed.evidence_requirements = unique_preserving_order(
-                            [*charter.evidence_requirements, *proposed.evidence_requirements]
-                        )
-                        traces = {item.requirement_id: item for item in charter.requirement_traces}
-                        traces.update(
-                            {item.requirement_id: item for item in proposed.requirement_traces}
-                        )
-                        proposed.requirement_traces = list(traces.values())
-                    old_constraints = {
-                        normalize_key(item)
-                        for item in (charter.hard_constraints if charter else [])
-                    }
-                    new_constraints = {normalize_key(item) for item in proposed.hard_constraints}
-                    if not old_constraints.issubset(new_constraints):
-                        reframe_notes.append(
-                            "task charter attempted to drop an existing hard constraint; prior charter preserved"
-                        )
-                    else:
-                        proposed.revision = max(
-                            proposed.revision, (charter.revision + 1) if charter else 1
-                        )
-                        charter = proposed
-
-            declared, normalization = self._ensure_artifact_file(
-                workspace,
-                declared_path=output.artifact_path,
-                summary=output.artifact_summary,
-                current_artifact=current,
-            )
-            artifact = self.adapter.capture_artifact(
-                workspace,
-                declared_path=declared,
-                version=current.version + 1,
-                summary=output.artifact_summary,
-                parent=current,
-                source_action_ids=accepted,
-            )
-
-            upserts, new_keymap, issue_notes = self._apply_issue_updates(
-                output.issue_updates,
-                output.new_issues,
-            )
-            issue_keymap = self._issue_local_keys([*self.state.issues.values(), *upserts])
-            issue_keymap.update(new_keymap)
-
-            adaptive_mode = self.config.cognition.mode == "adaptive"
-            projected_obligations, obligation_notes = apply_obligation_updates(
-                self.state.obligations if adaptive_mode else {},
-                output.obligation_updates if adaptive_mode else [],
-                updated_seq=self.journal.count() + 1,
-            )
-            new_obligations, obligation_keymap, obligation_admission = instantiate_obligations(
-                output.new_obligations if adaptive_mode else [],
-                existing=projected_obligations.values(),
-                capacity=max(
-                    32,
-                    len(projected_obligations)
-                    + len(output.new_obligations if adaptive_mode else []),
-                ),
-                created_seq=self.journal.count() + 1,
-                charter=charter,
-                human_evidence_available=self.config.cognition.human_evidence_available,
-            )
-            projected_obligations.update({item.obligation_id: item for item in new_obligations})
-            obligation_keymap = self._obligation_local_keys(projected_obligations.values())
-            obligation_upserts = cast(
-                list[Obligation],
-                self._changed_models(self.state.obligations, projected_obligations),
-            )
-
-            projected_cruxes, crux_notes = apply_crux_updates(
-                self.state.cruxes if adaptive_mode else {},
-                output.crux_updates if adaptive_mode else [],
-                updated_seq=self.journal.count() + 1,
-                active_limit=self.config.cognition.max_active_cruxes,
-            )
-            projected_cruxes, obligation_recompile_notes = reactivate_cruxes_for_open_obligations(
-                projected_cruxes,
-                projected_obligations,
-                updated_seq=self.journal.count() + 1,
-                active_limit=self.config.cognition.max_active_cruxes,
-            )
-            crux_notes.extend(obligation_recompile_notes)
-            new_cruxes, crux_keymap, crux_admission = instantiate_cruxes(
-                output.new_cruxes if adaptive_mode else [],
-                obligations=projected_obligations.values(),
-                existing=projected_cruxes.values(),
-                active_limit=self.config.cognition.max_active_cruxes,
-                total_limit=max(8, self.config.cognition.max_active_cruxes * 4),
-                created_seq=self.journal.count() + 1,
-            )
-            projected_cruxes.update({item.crux_id: item for item in new_cruxes})
-            active_now = [
-                item for item in projected_cruxes.values() if item.status == CruxStatus.ACTIVE
-            ]
-            if adaptive_mode and len(active_now) < self.config.cognition.max_active_cruxes:
-                dormant = sorted(
-                    (
-                        item
-                        for item in projected_cruxes.values()
-                        if item.status == CruxStatus.DORMANT
-                    ),
-                    key=lambda item: (
-                        -_IMPACT_RANK[item.unlock_value],
-                        item.created_seq,
-                        item.crux_id,
-                    ),
-                )
-                for item in dormant[: self.config.cognition.max_active_cruxes - len(active_now)]:
-                    item.status = CruxStatus.ACTIVE
-                    item.updated_seq = self.journal.count() + 1
-                    crux_notes.append(f"promoted dormant crux: {item.crux_id}")
-            crux_keymap = self._crux_local_keys(projected_cruxes.values())
-            crux_upserts = cast(
-                list[Crux], self._changed_models(self.state.cruxes, projected_cruxes)
-            )
-
-            projected_substrate, substrate_admission = admit_substrate_entries(
-                output.substrate_entries if adaptive_mode else [],
-                existing=self.state.substrate if adaptive_mode else {},
-            )
-            substrate_upserts = cast(
-                list[SubstrateEntry],
-                self._changed_models(self.state.substrate, projected_substrate),
-            )
-            projected_overlays, overlay_admission = admit_overlays(
-                output.overlays if adaptive_mode else [],
-                existing=self.state.overlays if adaptive_mode else {},
-                normal_limit=self.config.cognition.normal_overlay_limit,
-                hard_limit=self.config.cognition.hard_overlay_limit,
-                require_behavioral_difference=(
-                    self.config.cognition.require_behavioral_overlay_difference
-                ),
-            )
-            overlay_upserts = cast(
-                list[SpeculativeOverlay],
-                self._changed_models(self.state.overlays, projected_overlays),
-            )
-
-            reasons = unique_preserving_order(
-                [*self.state.summit_reasons, *ceiling_trigger_reasons(output.ceiling_scan)]
-            )
-            summit_active = self.state.summit_active
-            if self.config.cognition.mode == "adaptive":
-                if self.config.summit.mode == "on":
-                    summit_active = True
-                    reasons = unique_preserving_order(["summit.mode=on", *reasons])
-                elif self.config.summit.mode == "auto" and output.ceiling_scan:
-                    summit_active = summit_active or bool(
-                        ceiling_trigger_reasons(output.ceiling_scan)
-                        and (
-                            not self.config.summit.require_concrete_auto_trigger
-                            or output.ceiling_scan.concrete_trigger
-                        )
-                    )
-
-            projected_lineages = dict(self.state.summit_lineages)
-            lineage_admission: dict[str, Any] = {}
-            if summit_active and output.lineages:
-                checkpoint_lineages = []
-                for lineage_output in output.lineages:
-                    incumbent = self.state.summit_lineages.get(lineage_output.lineage_id)
-                    checkpoint_lineages.append(
-                        lineage_output.model_copy(
-                            update={
-                                "candidate_artifact": (
-                                    incumbent.candidate_artifact if incumbent else None
-                                )
-                            }
-                        )
-                    )
-                projected_lineages, decision = self.summit_archive.admit(
-                    self.state.summit_lineages, checkpoint_lineages
-                )
-                lineage_admission = {
-                    "accepted": decision.accepted,
-                    "replaced": decision.replaced,
-                    "rejected": decision.rejected,
-                    "demoted": decision.demoted,
-                }
-            lineage_upserts = cast(
-                list[SummitLineage],
-                self._changed_models(self.state.summit_lineages, projected_lineages),
-            )
-            projected_discovery = self.experimental_frontier.seed_records(
-                projected_lineages,
-                self.state.discovery_records,
-            )
-            projected_discovery = self.experimental_frontier.integrate(
-                projected_discovery,
-                self.state.actions,
-                accepted,
-            )
-            discovery_upserts = cast(
-                list[DiscoveryRecord],
-                self._changed_models(self.state.discovery_records, projected_discovery),
-            )
-
-            spine, spine_notes = reconcile_artifact_spine(
-                self.state.artifact_spine, output.artifact_spine
-            )
-            if spine is None and self.state.contract is not None:
-                spine = fallback_spine(self.state.contract, output.artifact_summary)
-
-            proposals = list(output.actions)
-            self._ensure_fresh_global_review(
-                proposals,
-                accepted_action_ids=accepted,
-            )
-            if (
-                summit_active
-                and not projected_lineages
-                and not any(item.topology == CognitiveTopology.SUMMIT for item in proposals)
-            ):
-                target_cruxes = [
-                    item.crux_id
-                    for item in projected_cruxes.values()
-                    if item.status == CruxStatus.ACTIVE
-                ][:1]
-                target_obligations = [
-                    item.obligation_id
-                    for item in projected_obligations.values()
-                    if item.release_blocking
-                    and item.status in {ObligationStatus.OPEN, ObligationStatus.BLOCKED}
-                ][:2]
-                proposals.append(
-                    ActionProposal(
-                        kind=ActionKind.EXPLORE,
-                        target="exact-task upper-tail mechanism search",
-                        assignment=(
-                            "Seed at most two genuinely mechanismally distinct Summit lineages for the exact immutable task. "
-                            "Name concrete mechanisms, assumptions, discriminating predictions, next dependencies, and bounded kill conditions."
-                        ),
-                        obligation_ids=target_obligations,
-                        crux_ids=target_cruxes,
-                        impact=Impact.HIGH,
-                        cost=CostBand.MODERATE,
-                        independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
-                        topology=CognitiveTopology.SUMMIT,
-                        epistemic_mode=EpistemicMode.THINK,
-                        expected_decision_effect=(
-                            "Either establish a viable upper-tail mechanism or close the concrete ceiling risk with scoped negative evidence."
-                        ),
-                        reusable_value=ValueBand.HIGH,
-                        distinctive_angle="mechanism-level exact-task support expansion",
-                        summit_reason=reasons[0] if reasons else "active Summit capability",
-                    )
-                )
-            elif (
-                summit_active
-                and projected_lineages
-                and self.config.summit.experimental_frontier
-                and not any(item.topology == CognitiveTopology.SUMMIT for item in proposals)
-            ):
-                active_crux_ids = [
-                    item.crux_id
-                    for item in projected_cruxes.values()
-                    if item.status == CruxStatus.ACTIVE
-                ][:1]
-                blocking_obligation_ids = [
-                    item.obligation_id
-                    for item in projected_obligations.values()
-                    if item.release_blocking
-                    and item.status in {ObligationStatus.OPEN, ObligationStatus.BLOCKED}
-                ][:2]
-                plans = self.experimental_frontier.select(
-                    projected_lineages,
-                    projected_discovery,
-                    limit=self.config.summit.max_discovery_actions_per_round,
-                )
-                proposals.extend(
-                    self.experimental_frontier.to_action(
-                        plan,
-                        crux_ids=active_crux_ids,
-                        obligation_ids=blocking_obligation_ids,
-                        summit_reason=reasons[0] if reasons else "active Summit capability",
-                    )
-                    for plan in plans
-                )
-            if not proposals and summit_active and not self.config.summit.experimental_frontier:
-                development = self.summit_archive.select_development_batch(
-                    projected_lineages, limit=1
-                )
-                if development:
-                    lineage = development[0]
-                    active_crux_ids = [
-                        item.crux_id
-                        for item in projected_cruxes.values()
-                        if item.status == CruxStatus.ACTIVE
-                    ][:1]
-                    proposals.append(
-                        ActionProposal(
-                            kind=ActionKind.EXPLORE,
-                            target=lineage.name,
-                            assignment=(
-                                "Develop this exact-task Summit lineage only through its next unresolved dependency or decisive falsifier: "
-                                + (
-                                    lineage.unresolved_questions[0]
-                                    if lineage.unresolved_questions
-                                    else lineage.mechanism
-                                )
-                            ),
-                            crux_ids=active_crux_ids,
-                            impact=Impact.HIGH,
-                            cost=CostBand.MODERATE,
-                            independence_class=IndependenceClass.DIFFERENT_CONDITIONING,
-                            topology=CognitiveTopology.SUMMIT,
-                            epistemic_mode=EpistemicMode.THINK,
-                            expected_decision_effect=(
-                                "Either mature the lineage into a viable mechanism, extract reusable residue, or falsify it within its bounded unlock contract."
-                            ),
-                            reusable_value=ValueBand.HIGH,
-                            distinctive_angle=lineage.mechanism,
-                            lineage_id=lineage.lineage_id,
-                            summit_reason=reasons[0] if reasons else "explicit Summit mode",
-                        )
-                    )
-
-            if not proposals:
-                proposals.extend(
-                    self._fallback_action_proposals(
-                        obligations=projected_obligations, cruxes=projected_cruxes
-                    )
-                )
-
-            frontier_kernel, frontier_notes = reconcile_frontier_kernel(
-                self.state.frontier_kernel,
-                output.frontier_kernel,
-                cruxes=list(projected_cruxes.values()),
-                spine=spine,
-                next_actions=proposals,
-                round_index=round_index,
-                eligible_action_ids=completed,
-            )
-            self._ensure_frame_pressure(
-                proposals,
-                obligations=projected_obligations,
-                cruxes=projected_cruxes,
-                frontier_kernel=frontier_kernel,
-            )
-            actions, action_contracts, dropped_actions = self._instantiate_actions(
-                proposals,
-                issue_keymap=issue_keymap,
-                obligation_keymap=obligation_keymap,
-                crux_keymap=crux_keymap,
-                round_index=round_index + 1,
-            )
-
-            projected_issues = dict(self.state.issues)
-            projected_issues.update({item.issue_id: item for item in upserts})
-            high_open = any(
-                issue.status == IssueStatus.OPEN and issue.impact in {Impact.FATAL, Impact.HIGH}
-                for issue in projected_issues.values()
-            )
-            release_blockers = [
-                item
-                for item in projected_obligations.values()
-                if item.release_blocking
-                and item.status in {ObligationStatus.OPEN, ObligationStatus.BLOCKED}
-            ]
-            active_cruxes = [
-                item for item in projected_cruxes.values() if item.status == CruxStatus.ACTIVE
-            ]
-            active_discovery = any(
-                action.topology == CognitiveTopology.SUMMIT for action in actions
-            )
-            stop = bool(output.stop)
-            stop_reason = output.stop_reason
-            if (
-                stop
-                and (high_open or release_blockers or active_cruxes or active_discovery)
-                and actions
-            ):
-                stop = False
-                stop_reason = None
-            if (
-                not actions
-                and not high_open
-                and not release_blockers
-                and not active_cruxes
-                and not active_discovery
-            ):
-                stop = True
-                stop_reason = stop_reason or (
-                    "No high-impact issue, release-blocking obligation, active crux, or decision-relevant next action remains."
-                )
-            elif not actions and (
-                high_open or release_blockers or active_cruxes or active_discovery
-            ):
-                stop = False
-                stop_reason = None
-
-            self._append(
-                et.CHECKPOINT_COMPLETED,
-                {
-                    "call_id": call_id,
-                    "artifact": artifact.model_dump(mode="json"),
-                    "task_charter": charter.model_dump(mode="json") if charter else None,
-                    "artifact_spine": spine.model_dump(mode="json") if spine else None,
-                    "frontier_kernel": frontier_kernel.model_dump(mode="json"),
-                    "issue_upserts": [item.model_dump(mode="json") for item in upserts],
-                    "obligation_upserts": [
-                        item.model_dump(mode="json") for item in obligation_upserts
-                    ],
-                    "crux_upserts": [item.model_dump(mode="json") for item in crux_upserts],
-                    "substrate_entries": [
-                        item.model_dump(mode="json") for item in substrate_upserts
-                    ],
-                    "overlays": [item.model_dump(mode="json") for item in overlay_upserts],
-                    "lineages": [item.model_dump(mode="json") for item in lineage_upserts],
-                    "discovery_records": [
-                        item.model_dump(mode="json") for item in discovery_upserts
-                    ],
-                    "summit_active": summit_active,
-                    "summit_reasons": reasons,
-                    "accepted_action_ids": accepted,
-                    "rejected_action_ids": unique_preserving_order(rejected),
-                    "receipt_updates": [item.model_dump(mode="json") for item in receipt_updates],
-                    "actions": [item.model_dump(mode="json") for item in actions],
-                    "action_contracts": [item.model_dump(mode="json") for item in action_contracts],
-                    "lead_session": (
-                        self.state.lead_session.model_dump(mode="json") if use_lead else None
-                    ),
-                    "stop_requested": stop,
-                    "stop_reason": stop_reason,
-                    "frame_break": output.frame_break if reframe_valid else None,
-                    "clean_synthesis_needed": output.clean_synthesis_needed,
-                    "completed_round_index": round_index,
-                    "usage": result.usage.model_dump(mode="json"),
-                    "normalization_notes": normalization,
-                    "issue_update_notes": issue_notes,
-                    "obligation_update_notes": obligation_notes,
-                    "crux_update_notes": crux_notes,
-                    "obligation_admission": asdict(obligation_admission),
-                    "crux_admission": asdict(crux_admission),
-                    "substrate_admission": asdict(substrate_admission),
-                    "overlay_admission": asdict(overlay_admission),
-                    "lineage_admission": lineage_admission,
-                    "reframe_notes": reframe_notes,
-                    "dropped_action_proposals": dropped_actions,
-                    "frontier_kernel_notes": asdict(frontier_notes),
-                    "artifact_spine_notes": spine_notes,
-                    "ceiling_scan": (
-                        output.ceiling_scan.model_dump(mode="json") if output.ceiling_scan else None
-                    ),
-                    **trace.payload(),
-                },
-                actor="lead" if use_lead else "controller",
-            )
-            self._append(
-                et.ROUND_COMPLETED,
-                {
-                    "round_index": round_index,
-                    "accepted_action_ids": accepted,
-                    "rejected_action_ids": unique_preserving_order(rejected),
-                },
-                actor="controller",
-            )
-            self._record_staged_checks(stage="preflight")
-            self._record_staged_checks(stage="candidate")
-            if repairing_verification and self.state.runtime.verification.replan_pending:
-                corrective_actions = bool(self.state.pending_action_ids)
-                preflight = self.state.runtime.verification.stages.get("preflight")
-                candidate = self.state.runtime.verification.stages.get("candidate")
-                failures = unique_preserving_order(
-                    [
-                        *(preflight.failures if preflight else []),
-                        *(candidate.failures if candidate else []),
-                    ]
-                )
-                self._append(
-                    et.CHECK_REPLAN_DECIDED,
-                    {
-                        "decision": (
-                            "corrective_actions" if corrective_actions else "dead_end"
-                        ),
-                        "failures": failures,
-                        "action_ids": list(self.state.pending_action_ids),
-                    },
-                    actor="controller",
-                )
-            return True
-        except BaseException as exc:
-            usage, trace = self._failure_parts(exc)
-            recovery_artifact, recovery_capture_error = self._capture_recovery_artifact(
-                workspace,
-                summary="Interrupted checkpoint workspace.",
-                parent=current,
-                source_action_ids=list(action_ids),
-            )
-            self._append(
-                et.CHECKPOINT_FAILED,
-                {
-                    "call_id": call_id,
-                    "round_index": round_index,
-                    "action_ids": list(action_ids),
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "usage": usage.model_dump(mode="json"),
-                    "recovery_artifact": (
-                        recovery_artifact.model_dump(mode="json") if recovery_artifact else None
-                    ),
-                    "recovery_capture_error": recovery_capture_error,
-                    **trace.payload(),
-                },
-                actor="controller",
-            )
-            if self.config.run.fail_fast_on_provider_error:
-                raise
-            return False
-        finally:
-            self._close_workspace(workspace)
 
     async def _advance_frontier(self) -> str:
-        while not self.state.stop_requested:
-            if failures := self.state.runtime.verification.dead_end:
-                raise FrontierError(
-                    "Staged verification remained failed after a corrective Lead checkpoint, "
-                    "and no corrective action was proposed: " + "; ".join(failures)
-                )
-            if await self._control_boundary():
-                if not await self._checkpoint([], self.state.round_index):
-                    return "operator steering admitted but replanning checkpoint failed"
-                continue
-            if self.state.runtime.verification.replan_pending:
-                if not await self._checkpoint([], self.state.round_index):
-                    return "staged verification failed and its corrective checkpoint could not run"
-                continue
-            round_limit = self.config.run.budget.max_rounds
-            if round_limit is not None and self.state.round_index >= round_limit:
-                return "round budget reached"
-            non_call_limit = self._budget_limit_reason(calls=False)
-            if non_call_limit:
-                return non_call_limit
-
-            pending = [
-                self.state.actions[action_id]
-                for action_id in self.state.pending_action_ids
-                if action_id in self.state.actions
-            ]
-            if pending and all(item.status in _TERMINAL_ACTION_STATUSES for item in pending):
-                round_index = max(item.spec.round_index for item in pending)
-                if not await self._checkpoint(
-                    [item.spec.action_id for item in pending], round_index
-                ):
-                    return "checkpoint failed or lacked remaining call budget"
-                continue
-
-            proposals = [item.spec for item in pending if item.status == ActionStatus.PROPOSED]
-            if not proposals:
-                if await self._replan_dead_frontier(
-                    reason="no proposed action remained while release debt was still open",
-                    action_records=pending,
-                ):
-                    continue
-                return "no decision-relevant action remains"
-
-            # One checkpoint plus the current evidence-derived completion path
-            # must survive the worker batch.  Adaptive runs expose only a
-            # rolling call horizon and earn the next tranche from observed
-            # progress; the hard operator envelope remains inviolable.
-            completion_reserve = self._completion_reserve_calls()
-            available_for_workers = max(
-                0,
-                self._active_calls_remaining() - completion_reserve - 1,
-            )
-            if available_for_workers <= 0:
-                if self._resource_boundary(proposals):
-                    completion_reserve = self._completion_reserve_calls()
-                    available_for_workers = max(
-                        0,
-                        self._active_calls_remaining() - completion_reserve - 1,
-                    )
-                if available_for_workers <= 0:
-                    decision = (
-                        self.state.resource_state.last_decision
-                        if self.state.resource_state
-                        else None
-                    )
-                    if decision and decision.extension_recommended:
-                        return "hard resource envelope reached with useful work remaining; extension recommended"
-                    detail = (
-                        "; ".join(decision.reasons) if decision else "completion reserve reached"
-                    )
-                    return f"adaptive resource governor stopped frontier work: {detail}"
-            control_cap = int(
-                self.config.run.budget.max_calls * self.config.cognition.max_control_call_fraction
-            )
-            if self.config.cognition.max_control_call_fraction > 0:
-                control_cap = max(1, control_cap)
-            control_used = sum(
-                record.status in _TERMINAL_ACTION_STATUSES and not record.spec.substantive
-                for record in self.state.actions.values()
-            )
-            control_deferred: dict[str, str] = {}
-            eligible_proposals: list[ActionSpec] = []
-            for proposal in proposals:
-                if not proposal.substantive and control_used >= control_cap:
-                    control_deferred[proposal.action_id] = (
-                        "discretionary control-action budget exhausted; substantive reasoning and release reserve protected"
-                    )
-                else:
-                    eligible_proposals.append(proposal)
-            selection = self.scheduler.select(
-                eligible_proposals,
-                max_parallel=self.config.run.budget.max_parallel,
-                available_calls=available_for_workers,
-                obligations=self.state.obligations,
-                target_stalls=self._target_stalls(),
-                human_evidence_available=self.config.cognition.human_evidence_available,
-                require_execution_trigger=self.config.cognition.require_execution_trigger,
-                frontier_kernel=self.state.frontier_kernel,
-                action_records=self.state.actions,
-                frontier_advancing_action_ids=set(
-                    self.state.frontier_advancing_action_ids
-                ),
-            )
-            selection.deferred.update(control_deferred)
-            lead_actions = [
-                item for item in selection.selected if item.topology == CognitiveTopology.LEAD
-            ]
-            if lead_actions:
-                # The persistent Lead is a serial cognitive owner. Never run a
-                # Lead turn concurrently with workers that were selected from
-                # the same pre-turn state; their results would race the very
-                # state the Lead is meant to integrate.
-                chosen = lead_actions[0]
-                for item in list(selection.selected):
-                    if item.action_id == chosen.action_id:
-                        continue
-                    selection.deferred[item.action_id] = (
-                        "serialized behind the persistent Lead action"
-                    )
-                    selection.selected_reasons.pop(item.action_id, None)
-                selection.selected = [chosen]
-            self._append(
-                et.ACTION_SELECTED,
-                {
-                    "selected": selection.selected_reasons,
-                    "dominated": selection.dominated,
-                    "deferred": selection.deferred,
-                },
-                actor="scheduler",
-            )
-            if not selection.selected:
-                if await self._replan_dead_frontier(
-                    reason=(
-                        "scheduler found no executable action; every proposal was dominated, "
-                        "correlated, deferred, or below threshold"
-                    ),
-                    action_records=pending,
-                ):
-                    continue
-                return (
-                    "planner deadlock: unresolved release debt remains but no executable "
-                    "action survived an independent replan"
-                )
-
-            round_state = self.state.model_copy(deep=True)
-            call_allocations = {item.action_id: 1 for item in selection.selected}
-            spare_attempts = max(0, available_for_workers - len(selection.selected))
-            while spare_attempts:
-                admitted = False
-                for item in selection.selected:
-                    if call_allocations[item.action_id] >= self.config.provider.schema_attempts:
-                        continue
-                    call_allocations[item.action_id] += 1
-                    spare_attempts -= 1
-                    admitted = True
-                    if spare_attempts == 0:
-                        break
-                if not admitted:
-                    break
-            for action in selection.selected:
-                self._append(
-                    et.ACTION_STARTED,
-                    {
-                        "action_id": action.action_id,
-                        "started_at": utc_now(),
-                        "round_index": action.round_index,
-                    },
-                    actor="worker",
-                    action_id=action.action_id,
-                )
-            await asyncio.gather(
-                *(
-                    self._execute_action(
-                        action,
-                        round_state,
-                        max_provider_calls=call_allocations[action.action_id],
-                    )
-                    for action in selection.selected
-                )
-            )
-            await self._control_boundary()
-            round_index = selection.selected[0].round_index
-            if not await self._checkpoint(
-                [action.action_id for action in selection.selected], round_index
-            ):
-                return "checkpoint failed or lacked remaining call budget"
-        return self.state.stop_reason or "semantic controller requested stop"
+        return await self.frontier_loop.execute(self)
 
     def _has_unresolved_frontier_debt(self) -> bool:
         return bool(
@@ -4858,143 +3350,26 @@ class FrontierEngine:
         final_output: FinalOutput,
         checks: Sequence[EvidenceRecord],
     ) -> bool:
-        policy = self.config.run.release_gate
-        if policy == "never":
-            return False
-        if policy == "always":
-            return True
-        contract = self.state.contract
-        high_stakes = bool(contract and contract.stakes in {"high", "critical"})
-        high_floor = bool(contract and contract.quality_floor in {"very_high", "frontier"})
-        check_failed = any(item.negative_result for item in checks)
-        unresolved_high = bool(self.state.high_impact_open_issues)
-        semantic_ci_failed = self.state.runtime.verification.semantic_ci_passed is False
-        completion_gaps = bool(self.state.runtime.verification.semantic_ci_gaps)
-        continuity_degraded = (
-            self.config.cognition.mode == "adaptive"
-            and self.state.lead_session.status == LeadContinuityStatus.DEGRADED
-        )
-        return (
-            final_output.release_gate_recommended
-            or high_stakes
-            or high_floor
-            or check_failed
-            or unresolved_high
-            or semantic_ci_failed
-            or completion_gaps
-            or continuity_degraded
+        return ReleasePolicy.should_challenge(
+            policy=self.config.run.release_gate,
+            adaptive_mode=self.config.cognition.mode == "adaptive",
+            state=self.state,
+            final_output=final_output,
+            checks=checks,
         )
 
     @staticmethod
     def _release_needs_repair(release: ReleaseOutput) -> bool:
-        severe_finding = any(finding.severity in {"fatal", "high"} for finding in release.findings)
-        return (
-            release.requires_repair
-            or not release.releaseable
-            or severe_finding
-            or not release.task_fidelity_passed
-            or not release.completion_case_valid
-            or not release.strongest_alternative_addressed
-        )
+        return ReleasePolicy.needs_repair(release)
 
     @staticmethod
     def _release_recovery(release: ReleaseOutput) -> ReleaseRecovery | None:
-        """Route material release evidence to the earliest falsified boundary."""
-
-        material = [
-            finding
-            for finding in release.findings
-            if finding.severity in {"fatal", "high"}
-        ]
-        if not material:
-            return None
-
-        route_rank = {
-            RecoveryRoute.REPAIR: 0,
-            RecoveryRoute.EXTERNAL_BLOCKER: 1,
-            RecoveryRoute.REOBSERVE: 2,
-            RecoveryRoute.RECONSTRUCT: 3,
-            RecoveryRoute.REFRAME: 4,
-        }
-        scope_rank = {
-            FailureScope.LOCAL: 0,
-            FailureScope.SEQUENCE: 1,
-            FailureScope.WHOLE_ARTIFACT: 2,
-            FailureScope.OBSERVATION: 3,
-            FailureScope.ARCHITECTURE: 4,
-            FailureScope.TASK_FRAME: 5,
-        }
-
-        routed: list[tuple[RecoveryRoute, Any]] = []
-        for finding in material:
-            route = finding.recovery_route
-            if route == RecoveryRoute.REPAIR:
-                if finding.scope == FailureScope.TASK_FRAME:
-                    route = RecoveryRoute.REFRAME
-                elif finding.scope in {
-                    FailureScope.WHOLE_ARTIFACT,
-                    FailureScope.ARCHITECTURE,
-                }:
-                    route = RecoveryRoute.RECONSTRUCT
-                elif finding.scope == FailureScope.OBSERVATION:
-                    route = RecoveryRoute.REOBSERVE
-            routed.append((route, finding))
-
-        actionable = [item for item in routed if item[0] != RecoveryRoute.REPAIR]
-        if not actionable:
-            return None
-        route, controlling = max(
-            actionable,
-            key=lambda item: (route_rank[item[0]], scope_rank[item[1].scope]),
-        )
-        implicated = [
-            finding
-            for candidate_route, finding in routed
-            if candidate_route == route or scope_rank[finding.scope] >= 2
-        ]
-        return ReleaseRecovery(
-            route=route,
-            scope=max(implicated, key=lambda item: scope_rank[item.scope]).scope,
-            reason=(
-                f"Release evidence falsified the {controlling.scope.value} boundary: "
-                f"{controlling.title}"
-            ),
-            finding_titles=unique_preserving_order(item.title for item in implicated),
-            causal_layers=unique_preserving_order(
-                item.causal_layer for item in implicated if item.causal_layer.strip()
-            ),
-            falsified_assumptions=unique_preserving_order(
-                assumption
-                for item in implicated
-                for assumption in item.falsified_assumptions
-            ),
-            invalidated_invariants=unique_preserving_order(
-                invariant
-                for item in implicated
-                for invariant in item.invalidated_invariants
-            ),
-            next_discriminators=unique_preserving_order(
-                item.next_discriminator
-                for item in implicated
-                if item.next_discriminator.strip()
-            ),
-            evidence_references=unique_preserving_order(
-                reference
-                for item in implicated
-                for reference in [
-                    item.evidence_reference,
-                    release.artifact_digest,
-                ]
-                if reference
-            ),
-        )
+        return ReleasePolicy.recovery(release)
 
     def _can_reopen_release(self) -> bool:
         round_limit = self.config.run.budget.max_rounds
         if round_limit is not None and self.state.round_index >= round_limit:
             return False
-        # One fresh Keeper and one substantive move must fit before the
-        # already-protected completion path.
         return self._active_calls_remaining() >= self._completion_reserve_calls() + 2
 
     @staticmethod
@@ -5006,19 +3381,12 @@ class FrontierEngine:
         checks: Sequence[EvidenceRecord],
         release: ReleaseOutput,
     ) -> bool:
-        """Let a clean fresh release challenge clear model-only false positives.
-
-        Deterministic failures and Completion Case gaps remain authoritative.
-        The challenger can only adjudicate model-authored semantic findings it
-        received explicitly and found immaterial.
-        """
-
-        return (
-            not semantic_ci_passed
-            and deterministic_failures == []
-            and not completion_gaps
-            and not any(item.negative_result for item in checks)
-            and not FrontierEngine._release_needs_repair(release)
+        return ReleasePolicy.can_adjudicate_semantic_findings(
+            semantic_ci_passed=semantic_ci_passed,
+            completion_gaps=completion_gaps,
+            deterministic_failures=deterministic_failures,
+            checks=checks,
+            release=release,
         )
 
     def _apply_release_adjudication(
@@ -5026,7 +3394,7 @@ class FrontierEngine:
         release: ReleaseOutput | None,
         checks: Sequence[EvidenceRecord],
     ) -> None:
-        if release is None or not self._release_can_adjudicate_model_semantic_findings(
+        if release is None or not ReleasePolicy.can_adjudicate_semantic_findings(
             semantic_ci_passed=self.state.runtime.verification.semantic_ci_passed is True,
             completion_gaps=self.state.runtime.verification.semantic_ci_gaps,
             deterministic_failures=self.state.runtime.verification.deterministic_failures,
@@ -5061,59 +3429,12 @@ class FrontierEngine:
         release: ReleaseOutput | None,
         repair_completed: bool,
     ) -> MutationGateDecision:
-        failed_checks = [item for item in checks if item.negative_result]
-        checks_passed = not failed_checks
-        release_succeeded = release is not None
-        release_gate_passed = not release_required
-        block_reason: str | None = None
-        semantic_ci_passed = self.state.runtime.verification.semantic_ci_passed is True
-        completion_case_passed = not bool(self.state.runtime.verification.semantic_ci_gaps)
-
-        if not checks_passed:
-            block_reason = (
-                f"{len(failed_checks)} of {len(checks)} deterministic release checks failed"
-            )
-
-        if not semantic_ci_passed and block_reason is None:
-            block_reason = "semantic regression checks did not pass"
-        if not completion_case_passed and block_reason is None:
-            block_reason = "completion case has unresolved coverage gaps"
-
-        if release_required:
-            if release is None:
-                release_gate_passed = False
-                if block_reason is None:
-                    block_reason = "required release challenge did not complete"
-            elif (
-                self.state.final_artifact is None
-                or release.artifact_digest != self.state.final_artifact.blob.digest
-            ):
-                release_gate_passed = False
-                if block_reason is None:
-                    block_reason = "release verdict is not bound to the current final artifact"
-            elif self._release_needs_repair(release):
-                release_gate_passed = False
-                if block_reason is None:
-                    block_reason = (
-                        "release report is non-releaseable or contains unresolved "
-                        "high-severity findings"
-                    )
-            else:
-                release_gate_passed = True
-
-        mutation_gate_passed = (
-            checks_passed and semantic_ci_passed and completion_case_passed and release_gate_passed
-        )
-        return MutationGateDecision(
-            deterministic_checks_run=len(checks),
-            deterministic_checks_passed=checks_passed,
+        return ReleasePolicy.mutation_gate(
+            state=self.state,
+            checks=checks,
             release_required=release_required,
-            release_gate_succeeded=release_succeeded,
-            release_report_releaseable=release.releaseable if release else None,
+            release=release,
             repair_completed=repair_completed,
-            release_gate_passed=release_gate_passed,
-            mutation_gate_passed=mutation_gate_passed,
-            block_reason=block_reason,
         )
 
     async def _run_release_tail(
@@ -5121,152 +3442,7 @@ class FrontierEngine:
         final_output: FinalOutput,
         checks: list[EvidenceRecord],
     ) -> tuple[list[EvidenceRecord], ReleaseOutput | None, MutationGateDecision]:
-        repairs_used = self.state.runtime.release.repair_count
-        repair_completed = repairs_used > 0 or self.state.runtime.release.repair_completed
-        release_required = (
-            self._should_release(final_output, checks)
-            or self.state.release is not None
-            or bool(self.state.runtime.release.release_error)
-            or repair_completed
-        )
-        release = self.state.release if release_required else None
-
-        # A crash may leave a completed repair followed by no challenge. The
-        # last durable verdict then belongs to the repaired artifact's parent
-        # and must never drive another repair or the mutation gate.
-        if (
-            release is not None
-            and self.state.final_artifact is not None
-            and release.artifact_digest != self.state.final_artifact.blob.digest
-        ):
-            release = None
-
-        if release_required and release is None:
-            release = await self._release_challenge()
-
-        self._apply_release_adjudication(release, checks)
-        recovery = self._release_recovery(release) if release is not None else None
-
-        rejection_history = list(self.state.runtime.release.rejection_fingerprints)
-        rejection_fingerprints = set(rejection_history)
-        repeated_current_rejection = False
-        if release is not None and self._release_needs_repair(release):
-            current_fingerprint = self._release_rejection_fingerprint(release)
-            repeated_current_rejection = rejection_history.count(current_fingerprint) > 1
-            rejection_fingerprints.add(current_fingerprint)
-            if repeated_current_rejection:
-                self._record_repair_loop_stop(
-                    "fresh challenge repeated a prior blocking finding",
-                    release=release,
-                    repairs_used=repairs_used,
-                )
-
-        while (
-            release is not None
-            and self._release_needs_repair(release)
-            and recovery is None
-            and not repeated_current_rejection
-        ):
-            repair_limit = self.config.cognition.max_material_repairs
-            if repair_limit is not None and repairs_used >= repair_limit:
-                self._record_repair_loop_stop(
-                    "material repair limit reached",
-                    release=release,
-                    repairs_used=repairs_used,
-                )
-                break
-            # A repaired artifact is a new proposition and needs a fresh
-            # challenger.  Starting a repair without room for both calls would
-            # knowingly create an unverifiable final candidate.
-            if self._calls_remaining() < 2 or self._budget_limit_reason(calls=False):
-                self._record_repair_loop_stop(
-                    "insufficient envelope for repair plus fresh challenge",
-                    release=release,
-                    repairs_used=repairs_used,
-                )
-                break
-
-            before_digest = (
-                self.state.final_artifact.blob.digest if self.state.final_artifact else None
-            )
-            if not await self._repair(release):
-                self._record_repair_loop_stop(
-                    "repair call failed or produced no capturable candidate",
-                    release=release,
-                    repairs_used=repairs_used,
-                )
-                break
-            repair_completed = True
-            repairs_used = self.state.runtime.release.repair_count
-            after_digest = (
-                self.state.final_artifact.blob.digest if self.state.final_artifact else None
-            )
-            if not after_digest or after_digest == before_digest:
-                self._record_repair_loop_stop(
-                    "repair did not change the authoritative artifact",
-                    release=release,
-                    repairs_used=repairs_used,
-                )
-                break
-
-            checks = self._record_deterministic_checks()
-            # A repair creates a new candidate. The rejecting verdict for its
-            # parent can neither approve nor condemn these new bytes.
-            release = await self._release_challenge()
-            self._apply_release_adjudication(release, checks)
-            if release is None:
-                self._record_repair_loop_stop(
-                    "fresh release challenge did not complete",
-                    release=None,
-                    repairs_used=repairs_used,
-                )
-                break
-            if self._release_needs_repair(release):
-                recovery = self._release_recovery(release)
-                if recovery is not None:
-                    break
-                fingerprint = self._release_rejection_fingerprint(release)
-                if fingerprint in rejection_fingerprints:
-                    self._record_repair_loop_stop(
-                        "fresh challenge repeated the same blocking findings",
-                        release=release,
-                        repairs_used=repairs_used,
-                    )
-                    break
-                rejection_fingerprints.add(fingerprint)
-
-        decision = self._evaluate_mutation_gate(
-            checks=checks,
-            release_required=release_required,
-            release=release,
-            repair_completed=repair_completed,
-        )
-        if (
-            recovery is not None
-            and recovery.route != RecoveryRoute.EXTERNAL_BLOCKER
-            and self._can_reopen_release()
-        ):
-            self._append(
-                et.RELEASE_RECOVERY_REQUESTED,
-                {
-                    "recovery": recovery.model_dump(mode="json"),
-                    "artifact_digest": release.artifact_digest if release else None,
-                },
-                actor="release",
-            )
-        elif recovery is not None and recovery.route == RecoveryRoute.EXTERNAL_BLOCKER:
-            self._record_repair_loop_stop(
-                "release evidence requires genuinely unavailable external authority or evidence",
-                release=release,
-                repairs_used=repairs_used,
-            )
-        elif recovery is not None:
-            self._record_repair_loop_stop(
-                "insufficient envelope to reopen the falsified upstream boundary",
-                release=release,
-                repairs_used=repairs_used,
-            )
-        return checks, release, decision
+        return await self.release_pipeline.run(self, final_output, checks)
 
     async def _release_challenge(self) -> ReleaseOutput | None:
         if self.state.final_artifact is None or not self._can_call():
@@ -5436,28 +3612,7 @@ class FrontierEngine:
 
     @staticmethod
     def _release_rejection_fingerprint(release: ReleaseOutput) -> str:
-        """Stable identity for a material rejection, excluding prose drift."""
-
-        findings = sorted(
-            (
-                finding.severity,
-                normalize_key(finding.title),
-                normalize_key(finding.evidence_reference or ""),
-                finding.scope.value,
-                finding.recovery_route.value,
-                normalize_key(finding.causal_layer),
-            )
-            for finding in release.findings
-        )
-        payload = {
-            "findings": findings,
-            "requires_repair": release.requires_repair,
-            "releaseable": release.releaseable,
-            "task_fidelity_passed": release.task_fidelity_passed,
-            "completion_case_valid": release.completion_case_valid,
-            "strongest_alternative_addressed": release.strongest_alternative_addressed,
-        }
-        return sha256_text(canonical_json(payload))
+        return ReleasePolicy.rejection_fingerprint(release)
 
     def _record_repair_loop_stop(
         self,
@@ -5642,7 +3797,7 @@ class FrontierEngine:
     def _default_output_path(self) -> Path:
         if self.config.run.final_output is not None:
             return self.config.run.final_output.expanduser().resolve()
-        return self.run_dir / ("final.patch" if self._software else "final.md")
+        return self.run_dir / f"final{self.adapter.final_suffix}"
 
     def _materialize_and_complete(
         self,
@@ -5768,13 +3923,31 @@ class FrontierEngine:
     def _recover_interrupted_actions(self) -> None:
         for record in list(self.state.actions.values()):
             if record.status == ActionStatus.RUNNING:
+                latest_attempt = record.attempts[-1] if record.attempts else None
+                provider_succeeded = bool(
+                    latest_attempt and latest_attempt.status.value == "succeeded"
+                )
+                recovered_usage = (
+                    latest_attempt.usage
+                    if latest_attempt is not None and provider_succeeded
+                    else None
+                )
                 self._append(
                     et.ACTION_FAILED,
                     {
                         "action_id": record.spec.action_id,
-                        "error": "previous process ended before durable action completion",
+                        "error": (
+                            "provider attempt completed and its raw result was preserved, but "
+                            "semantic integration was interrupted"
+                            if provider_succeeded
+                            else "previous process ended before provider attempt completion"
+                        ),
                         "completed_at": utc_now(),
-                        "usage": Usage().model_dump(mode="json"),
+                        "usage": (
+                            recovered_usage.model_dump(mode="json")
+                            if recovered_usage is not None
+                            else Usage().model_dump(mode="json")
+                        ),
                     },
                     actor="recovery",
                     action_id=record.spec.action_id,
@@ -5784,205 +3957,14 @@ class FrontierEngine:
         try:
             self.adapter.close_call(workspace)
         finally:
-            if not self.config.run.keep_capsules and not self._software and workspace.root.exists():
+            if (
+                not self.config.run.keep_capsules
+                and self.adapter.engine_cleans_call_workspace
+                and workspace.root.exists()
+            ):
                 shutil.rmtree(workspace.root, ignore_errors=True)
 
     async def execute(self, *, output_path: Path | None = None) -> Path:
-        """Advance the run to completion in the current process.
+        """Advance this run through the semantic coordinator."""
 
-        Reinvoking this method on a completed run simply returns the materialized
-        output.  Reinvoking after interruption reconstructs state from the ledger
-        and resumes at the smallest safe semantic boundary.
-        """
-
-        with self.lock:
-            self._refresh_state_from_ledger()
-            self.verify_integrity()
-            intent_path = self.run_dir / self.EXTENSION_INTENT_FILE
-            if self.state.phase == RunPhase.COMPLETE and intent_path.exists():
-                raise FrontierError(
-                    "A durable extension intent is pending; run `flourite extend` to complete it"
-                )
-            if self.state.phase == RunPhase.COMPLETE:
-                if output_path is not None:
-                    if self.state.final_artifact is None:
-                        raise FrontierError("Completed run has no final artifact")
-                    return self.adapter.materialize_final(
-                        self.state.final_artifact, output_path.expanduser().resolve()
-                    )
-                existing = self.state.runtime.completion.output_path
-                if existing and Path(existing).exists():
-                    return Path(existing)
-                if self.state.final_artifact is None:
-                    raise FrontierError("Completed run has no final artifact")
-                destination = output_path or self._default_output_path()
-                return self.adapter.materialize_final(
-                    self.state.final_artifact, destination.expanduser().resolve()
-                )
-            if self.state.phase == RunPhase.FAILED:
-                raise FrontierError(
-                    f"Run is terminally failed: {self.state.stop_reason or 'unknown error'}"
-                )
-
-            self.observer.set_runtime(
-                RuntimeStatus.RUNNING,
-                phase=self.state.phase.value,
-                detail="controller starting",
-            )
-            self._recover_interrupted_actions()
-            self._ensure_resource_state()
-            try:
-                if self.state.runtime.control.status in {"paused", "stopped"}:
-                    self._append(
-                        et.RUN_RESUMED,
-                        {"detail": "new controller process resumed durable state"},
-                        actor="recovery",
-                    )
-                steered_before_bootstrap = await self._control_boundary()
-                if self.state.contract is None or self.state.current_artifact is None:
-                    await self._bootstrap()
-                    steered_before_bootstrap = False
-
-                if self.state.runtime.bootstrap.independent_checkpoint_required and not await self._checkpoint([], self.state.round_index):
-                    raise FrontierError(
-                        "A full-scope bootstrap required an independent architecture "
-                        "checkpoint, but that checkpoint failed"
-                    )
-
-                if (
-                    steered_before_bootstrap or self.state.runtime.control.steering_replan_pending
-                ) and not await self._checkpoint([], self.state.round_index):
-                    raise FrontierError(
-                        "Operator steering was admitted, but its required checkpoint failed"
-                    )
-
-                if self.state.runtime.extension.replan_pending:
-                    intent_path.unlink(missing_ok=True)
-                    if not await self._checkpoint([], self.state.round_index):
-                        raise FrontierError(
-                            "Extension was admitted but its required fresh Lead checkpoint failed; the run remains recoverable"
-                        )
-
-                if self.state.phase == RunPhase.RELEASE and self.state.final_artifact is not None:
-                    # A crash after final synthesis resumes from the smallest
-                    # fail-closed boundary. Existing release/repair events are
-                    # reused; missing tail work is performed at most once.
-                    if await self._control_boundary():
-                        if not await self._checkpoint([], self.state.round_index):
-                            raise FrontierError(
-                                "Operator steering was admitted, but its required checkpoint failed"
-                            )
-                        stop_reason = self.state.stop_reason or await self._advance_frontier()
-                        path = await self._finalize(
-                            stop_reason=stop_reason,
-                            output_path=output_path,
-                        )
-                        self.observer.set_runtime(
-                            RuntimeStatus.COMPLETE,
-                            phase=self.state.phase.value,
-                            detail="result sealed",
-                        )
-                        return path
-                    checks = self._record_deterministic_checks()
-                    dummy = FinalOutput(
-                        artifact_path="",
-                        summary=self.state.final_artifact.summary,
-                        remaining_uncertainty=list(
-                            self.state.runtime.release.remaining_uncertainty
-                        ),
-                        release_gate_recommended=bool(
-                            self.state.runtime.release.gate_recommended
-                        ),
-                    )
-                    _, release, decision = await self._run_release_tail(dummy, checks)
-                    if self.state.runtime.release.replan_pending:
-                        if not await self._checkpoint([], self.state.round_index):
-                            raise FrontierError(
-                                "Resumed release evidence reopened an upstream commitment, "
-                                "but its causal checkpoint failed"
-                            )
-                        stop_reason = await self._advance_frontier()
-                        path = await self._finalize(
-                            stop_reason=stop_reason,
-                            output_path=output_path,
-                        )
-                        self.observer.set_runtime(
-                            RuntimeStatus.COMPLETE,
-                            phase=self.state.phase.value,
-                            detail="result sealed",
-                        )
-                        return path
-                    path = self._materialize_and_complete(
-                        stop_reason=self.state.stop_reason or "resumed finalization tail",
-                        output_path=output_path,
-                        release=release,
-                        decision=decision,
-                        actor="recovery",
-                    )
-                    self.observer.set_runtime(
-                        RuntimeStatus.COMPLETE,
-                        phase=self.state.phase.value,
-                        detail="result sealed",
-                    )
-                    return path
-
-                stop_reason = self.state.stop_reason or await self._advance_frontier()
-                if await self._control_boundary():
-                    if not await self._checkpoint([], self.state.round_index):
-                        raise FrontierError(
-                            "Operator steering was admitted, but its required checkpoint failed"
-                        )
-                    stop_reason = self.state.stop_reason or await self._advance_frontier()
-                path = await self._finalize(
-                    stop_reason=stop_reason,
-                    output_path=output_path,
-                )
-                self.observer.set_runtime(
-                    RuntimeStatus.COMPLETE,
-                    phase=self.state.phase.value,
-                    detail="result sealed",
-                )
-                return path
-            except OperatorStop:
-                self.observer.set_runtime(
-                    RuntimeStatus.STOPPED,
-                    phase=self.state.phase.value,
-                    detail="stopped by operator",
-                )
-                raise
-            except asyncio.CancelledError:
-                self.observer.set_runtime(
-                    RuntimeStatus.STOPPED,
-                    phase=self.state.phase.value,
-                    detail="controller interrupted",
-                )
-                raise
-            except KeyboardInterrupt:
-                self.observer.set_runtime(
-                    RuntimeStatus.STOPPED,
-                    phase=self.state.phase.value,
-                    detail="controller interrupted",
-                )
-                raise
-            except FrontierError:
-                self.observer.set_runtime(
-                    RuntimeStatus.FAILED,
-                    phase=self.state.phase.value,
-                    detail="controller error",
-                )
-                raise
-            except BaseException as exc:
-                self._append(
-                    et.RUN_FAILED,
-                    {
-                        "failed_at": utc_now(),
-                        "error": f"{type(exc).__name__}: {exc}",
-                    },
-                    actor="runtime",
-                )
-                self.observer.set_runtime(
-                    RuntimeStatus.FAILED,
-                    phase=self.state.phase.value,
-                    detail=f"{type(exc).__name__}: {exc}",
-                )
-                raise
+        return await RunCoordinator().execute(self, output_path=output_path)

@@ -1111,6 +1111,26 @@ class WorkerEnvelope(StrictModel):
     continuity_ack: LeadContinuityAck | None = None
 
 
+class ActionAttemptStatus(StrEnum):
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ActionAttempt(StrictModel):
+    attempt_id: str
+    action_id: str
+    status: ActionAttemptStatus
+    started_at: str
+    completed_at: str | None = None
+    result_blob: BlobRef | None = None
+    boundary_blob: BlobRef | None = None
+    raw_events_blob: BlobRef | None = None
+    error: str | None = None
+    usage: Usage | None = None
+
+
 class ActionRecord(StrictModel):
     spec: ActionSpec
     status: ActionStatus = ActionStatus.PROPOSED
@@ -1127,6 +1147,7 @@ class ActionRecord(StrictModel):
     receipt: ActionReceipt | None = None
     objective_measurement: ObjectiveMeasurement | None = None
     baseline_objective_measurement: ObjectiveMeasurement | None = None
+    attempts: list[ActionAttempt] = Field(default_factory=list)
 
 
 class Usage(StrictModel):

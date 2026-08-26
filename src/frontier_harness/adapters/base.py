@@ -5,10 +5,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..blobs import BlobStore
 from ..models import ArtifactRef, BlobRef, EvidenceRecord, ObjectiveMeasurement
+
+if TYPE_CHECKING:
+    from .profiles import AdapterProfile
 
 
 @dataclass(slots=True)
@@ -27,6 +30,11 @@ class CallWorkspace:
 class ArtifactAdapter(ABC):
     name = "base"
     artifact_kind = "unknown"
+    profile: AdapterProfile | None = None
+    is_software = False
+    supports_explicit_apply = False
+    final_suffix = ".md"
+    engine_cleans_call_workspace = True
 
     def __init__(
         self,
@@ -127,6 +135,11 @@ class ArtifactAdapter(ABC):
         return []
 
     def apply_final(self, artifact: ArtifactRef) -> dict[str, Any] | None:
+        return None
+
+    def apply_final_explicit(self, artifact: ArtifactRef) -> dict[str, Any] | None:
+        """Apply a final artifact under explicit operator authority, if supported."""
+
         return None
 
     @staticmethod

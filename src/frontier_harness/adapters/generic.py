@@ -15,6 +15,7 @@ from .profiles import AdapterProfile
 
 class MarkdownAdapter(ArtifactAdapter):
     artifact_kind = "markdown"
+    profile: AdapterProfile
 
     def __init__(
         self,
