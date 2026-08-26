@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from .. import events as et
 from ..adapters.base import CallWorkspace
+from ..capsule import CapsuleSpec
 from ..cognition import (
     admit_overlays,
     admit_substrate_entries,
@@ -220,13 +221,15 @@ class ActionExecutor:
         workspace = execution.workspace
         capsule = engine._capsules.populate(
             workspace,
-            task=round_state.source_prompt,
-            state=round_state,
-            assignment=action.assignment,
-            goal_contract=round_state.contract,
-            task_source=round_state.task_source,
-            action_contract=execution.action_contract,
-            lens_purpose="action",
+            CapsuleSpec(
+                task=round_state.source_prompt,
+                state=round_state,
+                assignment=action.assignment,
+                goal_contract=round_state.contract,
+                task_source=round_state.task_source,
+                action_contract=execution.action_contract,
+                purpose="action",
+            ),
         )
         execution.context_lens_digest = cast(str, capsule["context_lens_digest"])
         self._write_lineage_context(engine, execution)
@@ -280,6 +283,11 @@ class ActionExecutor:
                 "status": "succeeded",
                 "completed_at": utc_now(),
                 "result_blob": result_blob.model_dump(mode="json"),
+                "context_lens_blob": (
+                    trace.context_lens_blob.model_dump(mode="json")
+                    if trace.context_lens_blob
+                    else None
+                ),
                 "boundary_blob": (
                     trace.boundary_blob.model_dump(mode="json") if trace.boundary_blob else None
                 ),
@@ -405,9 +413,7 @@ class ActionExecutor:
                     "completed_at": utc_now(),
                     "error": f"{type(exc).__name__}: {exc}",
                     "boundary_blob": (
-                        trace.boundary_blob.model_dump(mode="json")
-                        if trace.boundary_blob
-                        else None
+                        trace.boundary_blob.model_dump(mode="json") if trace.boundary_blob else None
                     ),
                     "raw_events_blob": (
                         trace.raw_events_blob.model_dump(mode="json")
@@ -648,21 +654,15 @@ class ActionExecutor:
                 "candidate_delta": candidate.model_dump(mode="json") if candidate else None,
                 "probe": probe.model_dump(mode="json") if probe else None,
                 "action_receipt": receipt.model_dump(mode="json"),
-                "objective_measurement": (
-                    objective.model_dump(mode="json") if objective else None
-                ),
+                "objective_measurement": (objective.model_dump(mode="json") if objective else None),
                 "baseline_objective_measurement": (
                     baseline_objective.model_dump(mode="json") if baseline_objective else None
                 ),
-                "substrate_entries": [
-                    item.model_dump(mode="json") for item in substrate_upserts
-                ],
+                "substrate_entries": [item.model_dump(mode="json") for item in substrate_upserts],
                 "instrument": instrument.model_dump(mode="json") if instrument else None,
                 "overlays": [item.model_dump(mode="json") for item in overlay_upserts],
                 "lineages": [item.model_dump(mode="json") for item in lineage_upserts],
-                "discovery_records": [
-                    item.model_dump(mode="json") for item in discovery_upserts
-                ],
+                "discovery_records": [item.model_dump(mode="json") for item in discovery_upserts],
                 "lead_session": (
                     engine.state.lead_session.model_dump(mode="json") if use_lead else None
                 ),
@@ -698,16 +698,12 @@ class ActionExecutor:
             scope=envelope.scope or action.stop_condition,
             artifact_scope=action.artifact_scope,
             independence_class=action.independence_class,
-            references=unique_preserving_order(
-                [*envelope.evidence_references, result_blob.digest]
-            ),
+            references=unique_preserving_order([*envelope.evidence_references, result_blob.digest]),
             blob=result_blob,
             negative_result=envelope.negative_result,
             modalities=list(action.observation_modalities),
             establishes=(
-                list(envelope.action_receipt.decisions_changed)
-                if envelope.action_receipt
-                else []
+                list(envelope.action_receipt.decisions_changed) if envelope.action_receipt else []
             ),
             cannot_establish=(
                 ["independent external validity"]
@@ -744,9 +740,7 @@ class ActionExecutor:
                     modalities=[],
                     cannot_establish=["quality, correctness, or successful playback"],
                     artifact_digest=(
-                        candidate_artifact.blob.digest
-                        if candidate_artifact is not None
-                        else None
+                        candidate_artifact.blob.digest if candidate_artifact is not None else None
                     ),
                 )
             )
@@ -854,9 +848,7 @@ class ActionExecutor:
                 probe_id=new_id("probe"),
                 target_issue_ids=action.issue_ids,
                 method=action.assignment,
-                predicted_outcomes=[
-                    branch.decision_effect for branch in action.outcome_branches
-                ]
+                predicted_outcomes=[branch.decision_effect for branch in action.outcome_branches]
                 or [action.expected_decision_effect],
                 scope=envelope.scope or action.stop_condition,
                 blind_spots=envelope.unresolved_risks,

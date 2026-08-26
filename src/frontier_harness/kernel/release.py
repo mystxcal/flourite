@@ -17,6 +17,7 @@ from ..models import (
     ReleaseOutput,
     RunPhase,
     RunState,
+    SemanticAdjudication,
     SemanticRegressionFinding,
     Usage,
 )
@@ -145,7 +146,7 @@ class ReleaseProjector:
         if "deterministic_failures" in payload:
             verification.deterministic_failures = list(payload.get("deterministic_failures", []))
         if payload.get("adjudication"):
-            verification.adjudication = payload["adjudication"]
+            verification.adjudication = SemanticAdjudication.model_validate(payload["adjudication"])
 
     @staticmethod
     def _completion_case(state: RunState, payload: dict[str, Any]) -> None:

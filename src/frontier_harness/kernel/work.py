@@ -118,7 +118,12 @@ class WorkProjector:
         attempt.completed_at = payload["completed_at"]
         attempt.error = payload.get("error")
         attempt.usage = Usage.model_validate(payload.get("usage", {}))
-        for field in ("result_blob", "boundary_blob", "raw_events_blob"):
+        for field in (
+            "result_blob",
+            "context_lens_blob",
+            "boundary_blob",
+            "raw_events_blob",
+        ):
             if payload.get(field):
                 setattr(attempt, field, BlobRef.model_validate(payload[field]))
 

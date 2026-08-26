@@ -25,7 +25,7 @@ from .adapters import ArtifactAdapter, create_adapter
 from .adapters.base import CallWorkspace
 from .adapters.profiles import PROFILES, AdapterProfile, combine_profiles
 from .blobs import BlobStore
-from .capsule import CapsuleBuilder, StagedSource, stage_sources
+from .capsule import CapsuleBuilder, CapsuleSpec, StagedSource, stage_sources
 from .cognition import (
     admit_overlays,
     build_action_contract,
@@ -39,7 +39,6 @@ from .cognition import (
     instantiate_obligations,
     reconcile_artifact_spine,
     reconcile_frontier_kernel,
-    validate_lead_ack,
 )
 from .config import HarnessConfig
 from .control import (
@@ -53,11 +52,10 @@ from .errors import (
     FrontierError,
     LedgerIntegrityError,
     OperatorStop,
-    ProviderCallError,
     ProviderError,
     RunNotFoundError,
 )
-from .execution import ActionExecutor, CallTrace, RunJournal
+from .execution import ActionExecutor, CallSpec, CallTrace, ProviderCallExecutor, RunJournal
 from .ids import new_id
 from .ledger import EventLedger, LedgerEvent
 from .locking import RunLock
@@ -91,7 +89,6 @@ from .models import (
     IssueDraft,
     IssueStatus,
     IssueUpdate,
-    LeadContinuityStatus,
     Obligation,
     ObligationDraft,
     ObligationStatus,
@@ -128,7 +125,6 @@ from .prompts import (
 )
 from .providers import (
     ModelProvider,
-    ProviderCallRequest,
     ProviderCallResult,
     ProviderDoctorResult,
     build_provider,
@@ -136,7 +132,6 @@ from .providers import (
 from .resources import ResourceGovernor
 from .scheduler import ActionScheduler, SelectionResult
 from .semantic_ci import run_semantic_ci
-from .state import StateReducer
 from .summit import SummitArchive
 from .util import (
     atomic_write_text,
@@ -182,9 +177,8 @@ class FrontierEngine:
         config: HarnessConfig,
         provider: ModelProvider,
         adapter: ArtifactAdapter,
-        ledger: EventLedger,
+        journal: RunJournal,
         blobs: BlobStore,
-        state: RunState,
         sources: list[StagedSource],
         on_event: EventCallback | None = None,
     ) -> None:
@@ -195,12 +189,8 @@ class FrontierEngine:
         self.blobs = blobs
         self.sources = sources
         self.on_event = on_event
-        self.journal = RunJournal(
-            ledger=ledger,
-            snapshot_path=run_dir / self.STATE_FILE,
-            max_event_payload_bytes=config.runtime.max_event_payload_bytes,
-            state=state,
-        )
+        self.journal = journal
+        state = journal.state
         self.scheduler = ActionScheduler(config.frontier)
         self.summit_archive = SummitArchive(
             max_lineages=config.summit.max_archive_lineages,
@@ -227,6 +217,16 @@ class FrontierEngine:
         )
         self.logger = logging.getLogger(f"frontier_harness.{state.run_id}")
         self.observer = LiveObserver(self.control, self.logger)
+        self.calls = ProviderCallExecutor(
+            config=config,
+            provider=provider,
+            blobs=blobs,
+            observer=self.observer,
+            run_dir=run_dir,
+            state=lambda: self.state,
+            calls_remaining=self._calls_remaining,
+            append=self._append,
+        )
         self.action_executor = ActionExecutor()
         self.checkpoint_executor = CheckpointExecutor()
         self.frontier_loop = FrontierLoop()
@@ -321,6 +321,7 @@ class FrontierEngine:
         run_dir.mkdir(parents=True, exist_ok=False)
         created_at = utc_now()
         ledger: EventLedger | None = None
+        journal: RunJournal | None = None
         try:
             atomic_write_text(
                 run_dir / cls.CONFIG_FILE,
@@ -350,13 +351,18 @@ class FrontierEngine:
                 run_id,
                 busy_timeout_ms=config.runtime.sqlite_busy_timeout_ms,
             )
+            journal = RunJournal(
+                ledger=ledger,
+                snapshot_path=run_dir / cls.STATE_FILE,
+                max_event_payload_bytes=config.runtime.max_event_payload_bytes,
+            )
             metadata = {
                 "engine_version": __version__,
                 "adapter": adapter_metadata,
                 "sources": [cls._serialize_source(item, run_dir) for item in staged],
                 "config_snapshot": cls.CONFIG_FILE,
             }
-            event = ledger.append(
+            event = journal.append(
                 et.RUN_CREATED,
                 {
                     "created_at": created_at,
@@ -367,14 +373,14 @@ class FrontierEngine:
                 },
                 actor="runtime",
             )
-            state = StateReducer().apply(None, event)
+            created_state = journal.state.model_copy(deep=True)
             task_source = capture_task_source(task)
-            task_event = ledger.append(
+            task_event = journal.append(
                 et.TASK_SOURCE_CAPTURED,
                 {"task_source": task_source.model_dump(mode="json")},
                 actor="runtime",
             )
-            state = StateReducer().apply(state, task_event)
+            state = journal.state
             atomic_write_text(
                 run_dir / "task-source.json",
                 json.dumps(task_source.model_dump(mode="json"), indent=2, ensure_ascii=False),
@@ -394,28 +400,25 @@ class FrontierEngine:
                     sort_keys=True,
                 ),
             )
-            atomic_write_text(
-                run_dir / cls.STATE_FILE,
-                json.dumps(state.model_dump(mode="json"), indent=2, ensure_ascii=False),
-            )
             engine = cls(
                 run_dir=run_dir,
                 config=config,
                 provider=provider or cls._create_provider(config),
                 adapter=adapter,
-                ledger=ledger,
+                journal=journal,
                 blobs=blobs,
-                state=state,
                 sources=staged,
                 on_event=on_event,
             )
             if on_event:
-                on_event(event, state)
+                on_event(event, created_state)
                 on_event(task_event, state)
             atomic_write_text(run_root / "LATEST", run_id + "\n")
             return engine
         except BaseException:
-            if ledger is not None:
+            if journal is not None:
+                journal.close()
+            elif ledger is not None:
                 ledger.close()
             shutil.rmtree(run_dir, ignore_errors=True)
             raise
@@ -469,15 +472,19 @@ class FrontierEngine:
             run_id,
             busy_timeout_ms=config.runtime.sqlite_busy_timeout_ms,
         )
-        event_snapshot = ledger.verified_events()
-        state = StateReducer().replay(event_snapshot)
+        journal = RunJournal(
+            ledger=ledger,
+            snapshot_path=run_dir / cls.STATE_FILE,
+            max_event_payload_bytes=config.runtime.max_event_payload_bytes,
+        )
+        state = journal.refresh(expected_run_id=run_id)
         extension = state.runtime.extension.last_event
-        if isinstance(extension, dict) and extension.get("new_budget"):
+        if extension is not None:
             # The extension event is authoritative even if a process ended
             # between appending it and replacing the config snapshot.
-            config.run.budget = BudgetContract.model_validate(extension["new_budget"])
+            config.run.budget = extension.new_budget.model_copy(deep=True)
         if state.run_id != run_id:
-            ledger.close()
+            journal.close()
             raise LedgerIntegrityError(
                 f"Run manifest says {run_id}, ledger reconstructs {state.run_id}"
             )
@@ -497,9 +504,8 @@ class FrontierEngine:
             config=config,
             provider=provider or cls._create_provider(config),
             adapter=adapter,
-            ledger=ledger,
+            journal=journal,
             blobs=blobs,
-            state=state,
             sources=sources,
             on_event=on_event,
         )
@@ -673,14 +679,6 @@ class FrontierEngine:
     # ------------------------------------------------------------------
     # Durable state and integrity
     # ------------------------------------------------------------------
-    def _save_state(self) -> None:
-        # Kept as a compatibility shim for callers that explicitly request a
-        # snapshot refresh. RunJournal owns normal snapshot writes.
-        atomic_write_text(
-            self.run_dir / self.STATE_FILE,
-            json.dumps(self.state.model_dump(mode="json"), indent=2, ensure_ascii=False),
-        )
-
     def _refresh_state_from_ledger(self) -> None:
         """Reconstruct the authoritative projection after acquiring the run lock."""
 
@@ -945,11 +943,7 @@ class FrontierEngine:
         if self.state.contract:
             names.extend(self.state.contract.semantic_profiles)
         names = [name for name in unique_preserving_order(names) if name in PROFILES]
-        return (
-            combine_profiles(names)
-            if names
-            else self.adapter.profile
-        )
+        return combine_profiles(names) if names else self.adapter.profile
 
     @property
     def _software(self) -> bool:
@@ -1231,13 +1225,11 @@ class FrontierEngine:
         crux_keymap = crux_keymap or {}
         for proposal in proposals:
             proposal = self._compile_epistemic_action(proposal)
-            resolved_issues, resolved_obligations, resolved_cruxes = (
-                self._resolve_action_links(
-                    proposal,
-                    issue_keymap=issue_keymap,
-                    obligation_keymap=obligation_keymap,
-                    crux_keymap=crux_keymap,
-                )
+            resolved_issues, resolved_obligations, resolved_cruxes = self._resolve_action_links(
+                proposal,
+                issue_keymap=issue_keymap,
+                obligation_keymap=obligation_keymap,
+                crux_keymap=crux_keymap,
             )
             rejection = self._action_rejection(
                 proposal,
@@ -1433,124 +1425,6 @@ class FrontierEngine:
     # ------------------------------------------------------------------
     # Provider boundary and trace capture
     # ------------------------------------------------------------------
-    def _capture_optional_file(
-        self,
-        path: Path | None,
-        *,
-        media_type: str,
-        original_name: str,
-    ) -> BlobRef | None:
-        if path is None or not path.is_file():
-            return None
-        return self.blobs.put_file(
-            path,
-            media_type=media_type,
-            original_name=original_name,
-        )
-
-    def _trace_from_result(
-        self,
-        *,
-        prompt_path: Path,
-        schema_path: Path,
-        boundary_path: Path,
-        result: ProviderCallResult[Any],
-    ) -> CallTrace:
-        return CallTrace(
-            prompt_blob=self._capture_optional_file(
-                prompt_path,
-                media_type="text/markdown; charset=utf-8",
-                original_name="role-prompt.md",
-            ),
-            schema_blob=self._capture_optional_file(
-                schema_path,
-                media_type="application/schema+json",
-                original_name="boundary.schema.json",
-            ),
-            boundary_blob=self._capture_optional_file(
-                boundary_path,
-                media_type="application/json",
-                original_name="boundary.json",
-            ),
-            raw_events_blob=(
-                self._capture_optional_file(
-                    result.raw_events_path,
-                    media_type="application/x-ndjson",
-                    original_name="codex-events.jsonl",
-                )
-                if self.config.runtime.retain_raw_codex_events
-                else None
-            ),
-            stderr_blob=self._capture_optional_file(
-                result.stderr_path,
-                media_type="text/plain; charset=utf-8",
-                original_name="codex-stderr.log",
-            ),
-            command=result.command,
-            thread_id=result.thread_id,
-            resumed=result.resumed,
-            continuity_mode="resumed" if result.resumed else "new-session",
-            provider_trace_summary=result.trace_summary.model_dump(mode="json"),
-        )
-
-    def _trace_from_error(
-        self,
-        *,
-        prompt_path: Path,
-        schema_path: Path,
-        boundary_path: Path,
-        error: BaseException,
-    ) -> tuple[Usage, CallTrace]:
-        if isinstance(error, ProviderCallError):
-            usage = error.usage
-            raw_events_path = error.raw_events_path
-            stderr_path = error.stderr_path
-            command = error.command
-            provider_trace_summary = error.trace_summary
-            thread_id = error.thread_id
-        else:
-            usage = Usage()
-            raw_events_path = None
-            stderr_path = None
-            command = []
-            provider_trace_summary = {}
-            thread_id = None
-        trace = CallTrace(
-            prompt_blob=self._capture_optional_file(
-                prompt_path,
-                media_type="text/markdown; charset=utf-8",
-                original_name="role-prompt.md",
-            ),
-            schema_blob=self._capture_optional_file(
-                schema_path,
-                media_type="application/schema+json",
-                original_name="boundary.schema.json",
-            ),
-            boundary_blob=self._capture_optional_file(
-                boundary_path,
-                media_type="application/json",
-                original_name="boundary.json",
-            ),
-            raw_events_blob=(
-                self._capture_optional_file(
-                    raw_events_path,
-                    media_type="application/x-ndjson",
-                    original_name="codex-events.jsonl",
-                )
-                if self.config.runtime.retain_raw_codex_events
-                else None
-            ),
-            stderr_blob=self._capture_optional_file(
-                stderr_path,
-                media_type="text/plain; charset=utf-8",
-                original_name="codex-stderr.log",
-            ),
-            command=command,
-            thread_id=thread_id,
-            provider_trace_summary=provider_trace_summary,
-        )
-        return usage, trace
-
     async def _invoke(
         self,
         workspace: CallWorkspace,
@@ -1567,213 +1441,26 @@ class FrontierEngine:
         max_provider_calls: int | None = None,
         resume_thread_id_override: str | None = None,
     ) -> tuple[ProviderCallResult[ResponseT], CallTrace]:
-        prompt_path = workspace.context_dir / "ROLE_PROMPT.md"
-        boundary_path = workspace.output_dir / "boundary.json"
-        schema_path = workspace.output_dir / "boundary.schema.json"
-        atomic_write_text(prompt_path, prompt)
-        provider_call_limit = min(
-            max_provider_calls or self.config.provider.schema_attempts,
-            self._calls_remaining(),
-        )
-        if provider_call_limit < 1:
-            raise ProviderError("No provider-call budget remains for this harness turn")
-        action_id_value = metadata.get("action_id")
-        action_id = str(action_id_value) if action_id_value else None
-        request = ProviderCallRequest[ResponseT](
-            call_id=workspace.call_id,
-            call_kind=call_kind,
-            role=role,
-            prompt=prompt,
-            cwd=workspace.cwd,
-            response_model=response_model,
-            output_path=boundary_path,
-            schema_path=schema_path,
-            sandbox=sandbox,
-            network_access=network_access,
-            image_paths=list(image_paths),
-            expected_artifact_path=workspace.expected_artifact_path,
-            resume_thread_id=(
-                resume_thread_id_override
-                or (
-                    self.state.lead_session.thread_id
-                    if use_lead
-                    and self.config.cognition.persistent_lead
-                    and self.config.provider.resume_lead_sessions
-                    and self.state.lead_session.thread_id
-                    else None
-                )
-            ),
-            preserve_session=(
-                use_lead
-                and self.config.cognition.persistent_lead
-                and self.config.provider.persist_lead_sessions
-            ),
-            lead_call=use_lead,
-            max_provider_calls=provider_call_limit,
-            activity_callback=self.observer.provider_callback(
-                call_id=workspace.call_id,
+        return await self.calls.invoke(
+            workspace,
+            CallSpec(
                 call_kind=call_kind,
-                action_id=action_id,
+                role=role,
+                prompt=prompt,
+                response_model=response_model,
+                sandbox=sandbox,
+                network_access=network_access,
+                image_paths=list(image_paths),
+                metadata=metadata,
+                use_lead=use_lead,
+                max_provider_calls=max_provider_calls,
+                resume_thread_id=resume_thread_id_override,
             ),
-            metadata={
-                **metadata,
-                "provider_session_dir": str(self.run_dir / "provider-sessions"),
-                "provider_lead_cwd": str(self.run_dir / "provider-sessions" / "lead-workspace"),
-            },
         )
-        reconstructed = False
-        resume_failure_usage = Usage()
-        resume_failure_trace = CallTrace()
-        self.observer.begin_call(
-            phase=self.state.phase.value,
-            call_id=workspace.call_id,
-            call_kind=call_kind,
-            action_id=action_id,
-        )
-        try:
-            result = await self.provider.run(request)
-        except (ProviderCallError, ProviderError) as resume_error:
-            if not (
-                use_lead
-                and request.resume_thread_id
-                and self.config.provider.resume_fallback_to_reconstruction
-                and self.config.cognition.fallback_to_sparse
-            ):
-                usage, trace = self._trace_from_error(
-                    prompt_path=prompt_path,
-                    schema_path=schema_path,
-                    boundary_path=boundary_path,
-                    error=resume_error,
-                )
-                resume_error.frontier_usage = usage  # type: ignore[attr-defined]
-                resume_error.frontier_trace = trace  # type: ignore[attr-defined]
-                self.observer.finish_call(
-                    workspace.call_id, phase=self.state.phase.value, failed=True
-                )
-                raise
-            reconstructed = True
-            resume_failure_usage, resume_failure_trace = self._trace_from_error(
-                prompt_path=prompt_path,
-                schema_path=schema_path,
-                boundary_path=boundary_path,
-                error=resume_error,
-            )
-            remaining_provider_calls = request.max_provider_calls - getattr(
-                resume_error, "boundary_attempts", 1
-            )
-            if remaining_provider_calls < 1:
-                resume_error.frontier_usage = resume_failure_usage  # type: ignore[attr-defined]
-                resume_error.frontier_trace = resume_failure_trace  # type: ignore[attr-defined]
-                self.observer.finish_call(
-                    workspace.call_id, phase=self.state.phase.value, failed=True
-                )
-                raise
-            recovery_prompt = (
-                "CONTINUITY RECOVERY: the prior Lead session could not be resumed. "
-                "Reconstruct the exact current task model from the explicit capsule, preserve "
-                "the artifact and all accepted evidence, and include a strict continuity acknowledgement.\n\n"
-                + prompt
-            )
-            atomic_write_text(prompt_path, recovery_prompt)
-            request = request.model_copy(
-                update={
-                    "prompt": recovery_prompt,
-                    "resume_thread_id": None,
-                    "preserve_session": True,
-                    "max_provider_calls": remaining_provider_calls,
-                    "metadata": {**request.metadata, "continuity_recovery": True},
-                }
-            )
-            try:
-                result = await self.provider.run(request)
-                if resume_failure_usage.calls or resume_failure_usage.wall_seconds:
-                    result = result.model_copy(
-                        update={
-                            "usage": resume_failure_usage.plus(result.usage),
-                            "duration_seconds": (
-                                resume_failure_usage.wall_seconds + result.duration_seconds
-                            ),
-                        }
-                    )
-            except BaseException as recovery_error:
-                recovery_usage, recovery_trace = self._trace_from_error(
-                    prompt_path=prompt_path,
-                    schema_path=schema_path,
-                    boundary_path=boundary_path,
-                    error=recovery_error,
-                )
-                usage = resume_failure_usage.plus(recovery_usage)
-                recovery_trace.continuity_mode = "reconstruction-failed"
-                recovery_error.resume_error = resume_error  # type: ignore[attr-defined]
-                recovery_error.frontier_usage = usage  # type: ignore[attr-defined]
-                recovery_error.frontier_trace = recovery_trace  # type: ignore[attr-defined]
-                self.observer.finish_call(
-                    workspace.call_id, phase=self.state.phase.value, failed=True
-                )
-                raise
-        except BaseException as exc:
-            usage, trace = self._trace_from_error(
-                prompt_path=prompt_path,
-                schema_path=schema_path,
-                boundary_path=boundary_path,
-                error=exc,
-            )
-            exc.frontier_usage = usage  # type: ignore[attr-defined]
-            exc.frontier_trace = trace  # type: ignore[attr-defined]
-            self.observer.finish_call(workspace.call_id, phase=self.state.phase.value, failed=True)
-            raise
-        trace = self._trace_from_result(
-            prompt_path=prompt_path,
-            schema_path=schema_path,
-            boundary_path=boundary_path,
-            result=result,
-        )
-        self.observer.finish_call(workspace.call_id, phase=self.state.phase.value)
-        if use_lead and self.config.cognition.persistent_lead:
-            ack = getattr(result.response, "continuity_ack", None)
-            ack_status, ack_problems = validate_lead_ack(
-                ack,
-                state=self.state,
-                artifact=self.state.current_artifact,
-            )
-            if reconstructed:
-                status = (
-                    LeadContinuityStatus.RECONSTRUCTED_VERIFIED
-                    if ack_status == LeadContinuityStatus.CONTINUOUS
-                    else LeadContinuityStatus.DEGRADED
-                )
-                trace.continuity_mode = "reconstructed"
-            else:
-                status = ack_status
-                trace.continuity_mode = "resumed" if result.resumed else "new-lead"
-            lead = self.state.lead_session.model_copy(deep=True)
-            lead.thread_id = result.thread_id or lead.thread_id
-            lead.status = status
-            lead.turns += 1
-            lead.last_call_id = workspace.call_id
-            lead.last_ack = ack
-            if reconstructed and status != LeadContinuityStatus.RECONSTRUCTED_VERIFIED:
-                lead.reconstruction_failures += 1
-            lead.degraded_reason = "; ".join(ack_problems) if ack_problems else None
-            self._append(
-                et.LEAD_RECONSTRUCTION if reconstructed else et.LEAD_SESSION_UPDATED,
-                {
-                    "lead_session": lead.model_dump(mode="json"),
-                    "ack_problems": ack_problems,
-                    "call_id": workspace.call_id,
-                    "resume_failure_trace": (
-                        resume_failure_trace.payload() if reconstructed else None
-                    ),
-                },
-                actor="continuity",
-            )
-        return result, trace
 
     @staticmethod
     def _failure_parts(error: BaseException) -> tuple[Usage, CallTrace]:
-        usage = getattr(error, "frontier_usage", Usage())
-        trace = getattr(error, "frontier_trace", CallTrace())
-        return cast(Usage, usage), cast(CallTrace, trace)
+        return ProviderCallExecutor.failure_parts(error)
 
     def _capture_recovery_artifact(
         self,
@@ -2025,9 +1712,8 @@ class FrontierEngine:
             return True, unique_preserving_order(["summit.mode=on", *reasons])
         if self.config.summit.mode != "auto" or not reasons:
             return False, reasons
-        concrete_enough = (
-            not self.config.summit.require_concrete_auto_trigger
-            or bool(output.ceiling_scan and output.ceiling_scan.concrete_trigger)
+        concrete_enough = not self.config.summit.require_concrete_auto_trigger or bool(
+            output.ceiling_scan and output.ceiling_scan.concrete_trigger
         )
         return concrete_enough, reasons
 
@@ -2043,15 +1729,11 @@ class FrontierEngine:
         reasons: Sequence[str],
     ) -> list[ActionProposal]:
         proposals = list(output.actions)
-        has_summit_action = any(
-            item.topology == CognitiveTopology.SUMMIT for item in proposals
-        )
-        target_cruxes = [
-            item.crux_id for item in cruxes if item.status == CruxStatus.ACTIVE
-        ][:1]
-        target_obligations = [
-            item.obligation_id for item in obligations if item.release_blocking
-        ][:2]
+        has_summit_action = any(item.topology == CognitiveTopology.SUMMIT for item in proposals)
+        target_cruxes = [item.crux_id for item in cruxes if item.status == CruxStatus.ACTIVE][:1]
+        target_obligations = [item.obligation_id for item in obligations if item.release_blocking][
+            :2
+        ]
         summit_reason = reasons[0] if reasons else "summit.mode=on"
         if summit_active and not lineages and not has_summit_action:
             proposals.append(
@@ -2124,8 +1806,7 @@ class FrontierEngine:
         qualitative_architecture = bool(set(semantic_profiles).intersection({"creative", "media"}))
         full_scope = output.artifact_scope in {"whole_artifact", "release"}
         independent_checkpoint_required = bool(
-            (full_scope or qualitative_architecture)
-            and (high_open or active_crux or full_scope)
+            (full_scope or qualitative_architecture) and (high_open or active_crux or full_scope)
         )
         stop_requested = bool(
             output.quality_floor_reached
@@ -2159,18 +1840,20 @@ class FrontierEngine:
         try:
             capsule = self._capsules.populate(
                 workspace,
-                task=self.state.source_prompt,
-                state=self.state,
-                assignment=(
-                    "Orient to the immutable request and construct the smallest decisive "
-                    "artifact that can falsify the highest-leverage architectural choice. "
-                    "Do not build the whole deliverable while a cheaper representative slice "
-                    "can still expose a fatal direction error. Compile only the minimum "
-                    "obligations/cruxes needed and expose decision-sensitive unresolved work."
+                CapsuleSpec(
+                    task=self.state.source_prompt,
+                    state=self.state,
+                    assignment=(
+                        "Orient to the immutable request and construct the smallest decisive "
+                        "artifact that can falsify the highest-leverage architectural choice. "
+                        "Do not build the whole deliverable while a cheaper representative slice "
+                        "can still expose a fatal direction error. Compile only the minimum "
+                        "obligations/cruxes needed and expose decision-sensitive unresolved work."
+                    ),
+                    goal_contract=None,
+                    task_source=self.state.task_source,
+                    purpose="bootstrap",
                 ),
-                goal_contract=None,
-                task_source=self.state.task_source,
-                lens_purpose="bootstrap",
             )
             prompt = bootstrap_prompt(
                 workspace,
@@ -3051,21 +2734,23 @@ class FrontierEngine:
             apex_brief = self._apex_brief(stop_reason)
             capsule = self._capsules.populate(
                 workspace,
-                task=self.state.source_prompt,
-                state=self.state,
-                assignment=(
-                    "Rebuild the final deliverable coherently from the exact task, artifact spine, accepted decisions, and scoped evidence."
+                CapsuleSpec(
+                    task=self.state.source_prompt,
+                    state=self.state,
+                    assignment=(
+                        "Rebuild the final deliverable coherently from the exact task, artifact spine, accepted decisions, and scoped evidence."
+                    ),
+                    goal_contract=self.state.contract,
+                    evidence_action_ids=[
+                        record.spec.action_id
+                        for record in self.state.actions.values()
+                        if record.status == ActionStatus.COMPLETE
+                    ],
+                    extra_notes=f"Frontier stop reason: {stop_reason}",
+                    task_source=self.state.task_source,
+                    apex_brief=apex_brief,
+                    purpose="synthesis",
                 ),
-                goal_contract=self.state.contract,
-                evidence_action_ids=[
-                    record.spec.action_id
-                    for record in self.state.actions.values()
-                    if record.status == ActionStatus.COMPLETE
-                ],
-                extra_notes=f"Frontier stop reason: {stop_reason}",
-                task_source=self.state.task_source,
-                apex_brief=apex_brief,
-                lens_purpose="synthesis",
             )
             prompt = final_prompt(
                 workspace,
@@ -3456,23 +3141,25 @@ class FrontierEngine:
         try:
             capsule = self._capsules.populate(
                 workspace,
-                task=self.state.source_prompt,
-                state=self.state,
-                assignment=(
-                    "Freshly challenge only fatal errors, major omissions, task drift, unsupported load-bearing claims, invalid completion evidence, semantic regressions, or conditions under which the strongest rejected alternative dominates. Do not cosmetically rewrite."
+                CapsuleSpec(
+                    task=self.state.source_prompt,
+                    state=self.state,
+                    assignment=(
+                        "Freshly challenge only fatal errors, major omissions, task drift, unsupported load-bearing claims, invalid completion evidence, semantic regressions, or conditions under which the strongest rejected alternative dominates. Do not cosmetically rewrite."
+                    ),
+                    goal_contract=self.state.contract,
+                    task_source=self.state.task_source,
+                    semantic_ci={
+                        "passed": self.state.runtime.verification.semantic_ci_passed,
+                        "completion_gaps": self.state.runtime.verification.semantic_ci_gaps,
+                        "findings": [
+                            item.model_dump(mode="json")
+                            for item in self.state.semantic_regression_findings
+                        ],
+                    },
+                    completion_case=self.state.completion_case,
+                    purpose="release",
                 ),
-                goal_contract=self.state.contract,
-                task_source=self.state.task_source,
-                semantic_ci={
-                    "passed": self.state.runtime.verification.semantic_ci_passed,
-                    "completion_gaps": self.state.runtime.verification.semantic_ci_gaps,
-                    "findings": [
-                        item.model_dump(mode="json")
-                        for item in self.state.semantic_regression_findings
-                    ],
-                },
-                completion_case=self.state.completion_case,
-                lens_purpose="release",
             )
             prompt = release_prompt(workspace, profile=self._profile)
             role = (
@@ -3652,22 +3339,24 @@ class FrontierEngine:
             prior_text = self.adapter.artifact_text(current)
             capsule = self._capsules.populate(
                 workspace,
-                task=self.state.source_prompt,
-                state=self.state,
-                assignment="Perform one bounded repair pass for the material release findings.",
-                goal_contract=self.state.contract,
-                extra_notes=notes,
-                task_source=self.state.task_source,
-                semantic_ci={
-                    "passed": self.state.runtime.verification.semantic_ci_passed,
-                    "completion_gaps": self.state.runtime.verification.semantic_ci_gaps,
-                    "findings": [
-                        item.model_dump(mode="json")
-                        for item in self.state.semantic_regression_findings
-                    ],
-                },
-                completion_case=self.state.completion_case,
-                lens_purpose="repair",
+                CapsuleSpec(
+                    task=self.state.source_prompt,
+                    state=self.state,
+                    assignment="Perform one bounded repair pass for the material release findings.",
+                    goal_contract=self.state.contract,
+                    extra_notes=notes,
+                    task_source=self.state.task_source,
+                    semantic_ci={
+                        "passed": self.state.runtime.verification.semantic_ci_passed,
+                        "completion_gaps": self.state.runtime.verification.semantic_ci_gaps,
+                        "findings": [
+                            item.model_dump(mode="json")
+                            for item in self.state.semantic_regression_findings
+                        ],
+                    },
+                    completion_case=self.state.completion_case,
+                    purpose="repair",
+                ),
             )
             prompt = repair_prompt(
                 workspace,

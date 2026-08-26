@@ -122,23 +122,43 @@ class StateReducer:
         )
         optional: dict[str, Any] = {
             "bootstrap_error": bootstrap.error,
-            "bootstrap_recovery_artifact": bootstrap.recovery_artifact,
+            "bootstrap_recovery_artifact": (
+                bootstrap.recovery_artifact.model_dump(mode="json")
+                if bootstrap.recovery_artifact
+                else None
+            ),
             "bootstrap_recovery_thread_id": bootstrap.recovery_thread_id,
             "bootstrap_recovery_error": bootstrap.recovery_error,
             "checkpoint_error": planning.checkpoint_error,
-            "frontier_replan_pending": planning.frontier_replan_pending,
+            "frontier_replan_pending": (
+                planning.frontier_replan_pending.model_dump(mode="json")
+                if planning.frontier_replan_pending
+                else None
+            ),
             "verification_replan_decision": verification.replan_decision,
             "semantic_ci_passed": verification.semantic_ci_passed,
-            "semantic_ci_adjudication": verification.adjudication,
+            "semantic_ci_adjudication": (
+                verification.adjudication.model_dump(mode="json")
+                if verification.adjudication
+                else None
+            ),
             "finalization_error": release.finalization_error,
             "release_error": release.release_error,
             "repair_error": release.repair_error,
             "release_replan_pending": (
                 release.replan_pending.model_dump(mode="json") if release.replan_pending else None
             ),
-            "resource_decision": resources.decision,
-            "repair_loop_stop": resources.repair_loop_stop,
-            "extension": extension.last_event,
+            "resource_decision": (
+                resources.decision.model_dump(mode="json") if resources.decision else None
+            ),
+            "repair_loop_stop": (
+                resources.repair_loop_stop.model_dump(mode="json")
+                if resources.repair_loop_stop
+                else None
+            ),
+            "extension": (
+                extension.last_event.model_dump(mode="json") if extension.last_event else None
+            ),
         }
         cls._put_non_none(state.metadata, optional)
         cls._put_truthy(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ from ..ledger import EventLedger, LedgerEvent
 from ..models import RunState
 from ..state import StateReducer
 from ..util import atomic_write_text, canonical_json
+
+logger = logging.getLogger(__name__)
 
 
 class RunJournal:
@@ -39,6 +42,7 @@ class RunJournal:
         self._max_event_payload_bytes = max_event_payload_bytes
         self._reducer = reducer or StateReducer()
         self._state = state
+        self._snapshot_error: str | None = None
 
     @property
     def state(self) -> RunState:
@@ -56,6 +60,12 @@ class RunJournal:
         """
 
         return self._ledger
+
+    @property
+    def snapshot_error(self) -> str | None:
+        """Latest derived-cache write failure, if one has not since recovered."""
+
+        return self._snapshot_error
 
     def append(
         self,
@@ -92,7 +102,7 @@ class RunJournal:
         if projected is None:
             raise LedgerIntegrityError("Committed event was not projected")
         self._state = projected
-        self._write_snapshot()
+        self.sync_snapshot()
         return event
 
     def refresh(self, *, expected_run_id: str | None = None) -> RunState:
@@ -102,7 +112,7 @@ class RunJournal:
                 f"Loaded run {expected_run_id}, but the ledger reconstructs {projected.run_id}"
             )
         self._state = projected
-        self._write_snapshot()
+        self.sync_snapshot()
         return projected
 
     def verified_projection(self) -> tuple[list[LedgerEvent], RunState]:
@@ -121,8 +131,28 @@ class RunJournal:
     def close(self) -> None:
         self._ledger.close()
 
-    def _write_snapshot(self) -> None:
-        atomic_write_text(
-            self._snapshot_path,
-            json.dumps(self.state.model_dump(mode="json"), indent=2, ensure_ascii=False),
-        )
+    def sync_snapshot(self, *, strict: bool = False) -> bool:
+        """Refresh the disposable snapshot without changing append semantics.
+
+        The SQLite ledger has already committed when this runs. An operating
+        system failure while replacing ``state.json`` must therefore not make
+        callers believe the semantic event failed and retry it. Loading always
+        replays the ledger; this cache can safely be repaired later.
+        """
+
+        try:
+            atomic_write_text(
+                self._snapshot_path,
+                json.dumps(self.state.model_dump(mode="json"), indent=2, ensure_ascii=False),
+            )
+        except OSError as exc:
+            self._snapshot_error = f"{type(exc).__name__}: {exc}"
+            if strict:
+                raise
+            logger.warning(
+                "authoritative event committed but state snapshot refresh failed: %s",
+                exc,
+            )
+            return False
+        self._snapshot_error = None
+        return True

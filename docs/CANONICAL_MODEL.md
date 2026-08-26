@@ -120,6 +120,11 @@ RunCoordinator ──▶ FrontierLoop ──▶ ActionExecutor
           challenge · repair · seal
 ```
 
+`ProviderCallExecutor` sits behind every cognitive call. It owns request
+construction, schema retries, resumable-Lead recovery, live call telemetry,
+and content-addressed trace capture; it never interprets the result or mutates
+semantic state.
+
 | Boundary | Sole responsibility | It must not decide |
 | --- | --- | --- |
 | `RunCoordinator` | Resume and cross semantic phase boundaries safely. | What evidence means or which action wins. |
@@ -127,7 +132,7 @@ RunCoordinator ──▶ FrontierLoop ──▶ ActionExecutor
 | `ActionExecutor` | Turn one selected intent into a durable attempt, raw result, scoped evidence, receipt, and semantic event. | Shared state directly. |
 | `CheckpointExecutor` | Integrate completed observations into the one artifact and next frontier. | Whether a provider process happened to look busy. |
 | `ReleasePolicy` / `ReleasePipeline` | Judge the exact final proposition, route failures causally, and fail closed before external mutation. | Upstream construction detail. |
-| `RunJournal` | Atomically append a versioned event, validate its projection, and replace the derived snapshot. | Semantic policy. |
+| `RunJournal` | Atomically append a versioned event after validating its projection, then refresh the best-effort derived snapshot. | Semantic policy. |
 | Kernel projectors | Deterministically derive typed state from one event category. | I/O, scheduling, or model calls. |
 | Adapters | Translate artifact capture, checks, measurement, materialization, and optional apply for one domain. | Controller policy. |
 | Providers | Execute a bounded cognitive call and return its response, trace, usage, and raw boundary. | Run state. |
@@ -142,7 +147,10 @@ intent → attempt.started → provider result → attempt.finished
 `attempt.finished` precedes semantic integration. If the process dies between
 those points, the expensive provider result and raw trace still exist and the
 run can distinguish “the model call failed” from “integration was interrupted.”
-No engine path writes the ledger and state snapshot separately.
+No engine path writes the ledger and state snapshot separately. The ledger
+commit is the semantic success boundary. A later `state.json` replacement
+failure is reported as degraded cache health, never as a failed event that a
+caller should retry; replay repairs the snapshot.
 
 Events carry an explicit schema version. Version 1 retains its historical hash
 material exactly; newer versions bind the schema version into the hash. This
@@ -298,6 +306,11 @@ The lens is an auditable projection, never an authority. It declares what it
 included, what it omitted, and where the omitted lossless state can be opened.
 Global or holistic questions receive a global view; the system must not use a
 targeted slice to make a whole-artifact judgment.
+
+The exact lens descriptor used for a call is retained as a content-addressed
+blob beside its prompt, schema, raw provider boundary, and trace. A receipt can
+therefore prove not only which artifact it observed, but which projection and
+known omissions conditioned the observation.
 
 ### Act
 

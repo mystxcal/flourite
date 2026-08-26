@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import stat
 import zipfile
@@ -244,9 +245,7 @@ def test_release_failure_routes_to_earliest_causal_boundary() -> None:
     assert recovery is not None
     assert recovery.route == RecoveryRoute.RECONSTRUCT
     assert recovery.scope == FailureScope.ARCHITECTURE
-    assert recovery.invalidated_invariants == [
-        "The card grammar produces cinematic motion."
-    ]
+    assert recovery.invalidated_invariants == ["The card grammar produces cinematic motion."]
     assert recovery.next_discriminators == [
         "Render and watch one representative 20-second sequence."
     ]
@@ -316,9 +315,13 @@ def test_fake_end_to_end_resume_verify_and_export(tmp_path: Path, fake_config) -
         assert completed
         assert all(record.attempts for record in completed)
         assert all(
-            record.attempts[-1].status == ActionAttemptStatus.SUCCEEDED
-            for record in completed
+            record.attempts[-1].status == ActionAttemptStatus.SUCCEEDED for record in completed
         )
+        assert all(record.attempts[-1].context_lens_blob is not None for record in completed)
+        retained_lens = completed[0].attempts[-1].context_lens_blob
+        assert retained_lens is not None
+        lens_payload = json.loads(engine.blobs.read_text(retained_lens))
+        assert lens_payload["digest"] == completed[0].receipt.context_lens_digest
         event_types = [event.event_type for event in engine.events()]
         assert event_types.index(et.ACTION_ATTEMPT_FINISHED) < event_types.index(
             et.ACTION_COMPLETED
@@ -696,9 +699,7 @@ def test_structural_release_failure_reopens_frontier_without_local_repair(
         assert provider.repair_calls == 0
         assert provider.release_calls == 2
         assert engine.state.metadata["mutation_gate_passed"] is True
-        assert engine.state.metadata["release_recovery_history"][0]["route"] == (
-            "reconstruct"
-        )
+        assert engine.state.metadata["release_recovery_history"][0]["route"] == ("reconstruct")
         assert engine.state.metadata["release_reopened_obligations"]
         event_types = [event.event_type for event in engine.ledger.events()]
         assert "release.recovery_requested" in event_types
@@ -788,9 +789,7 @@ def test_semantic_failure_blocks_mutation_even_when_release_gate_is_disabled(
     )
     try:
         engine.state.runtime.verification.semantic_ci_passed = False
-        engine.state.runtime.verification.semantic_ci_gaps = [
-            "missing obligation evidence"
-        ]
+        engine.state.runtime.verification.semantic_ci_gaps = ["missing obligation evidence"]
         decision = engine._evaluate_mutation_gate(
             checks=[],
             release_required=False,
@@ -1147,9 +1146,7 @@ def test_run_lookup_prefers_flourite_and_falls_back_to_legacy_root(
     assert FrontierEngine.resolve_run_dir("latest") == flourite_run
 
 
-def test_software_preflight_runs_before_the_first_worker_wave(
-    fake_config, git_repo: Path
-) -> None:
+def test_software_preflight_runs_before_the_first_worker_wave(fake_config, git_repo: Path) -> None:
     config = fake_config(
         run={"adapter": "software"},
         software={"preflight_checks": ["true"], "checks": []},

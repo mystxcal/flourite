@@ -1125,6 +1125,7 @@ class ActionAttempt(StrictModel):
     started_at: str
     completed_at: str | None = None
     result_blob: BlobRef | None = None
+    context_lens_blob: BlobRef | None = None
     boundary_blob: BlobRef | None = None
     raw_events_blob: BlobRef | None = None
     error: str | None = None
@@ -1305,7 +1306,7 @@ class BootstrapRuntimeState(StrictModel):
     error: str | None = None
     artifact_scope: ArtifactScope = "targeted"
     independent_checkpoint_required: bool = False
-    recovery_artifact: dict[str, Any] | None = None
+    recovery_artifact: ArtifactRef | None = None
     recovery_thread_id: str | None = None
     recovery_error: str | None = None
 
@@ -1323,6 +1324,37 @@ class CheckStageState(StrictModel):
     failures: list[str] = Field(default_factory=list)
 
 
+class SemanticAdjudication(StrictModel):
+    kind: Literal["artifact-bound evidence reconciliation", "fresh_release_challenge"]
+    releaseable: bool | None = None
+    rationale: str = ""
+
+
+class FrontierReplanRequest(StrictModel):
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str
+    actions: list[str] = Field(default_factory=list)
+
+
+class RepairLoopStop(StrictModel):
+    reason: str
+    repairs_used: int = Field(ge=0)
+    max_material_repairs: int | None = Field(default=None, ge=0)
+    artifact_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    rejection_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class RunExtensionRecord(StrictModel):
+    requested_at: str
+    reason: str
+    additional_calls: int = Field(gt=0)
+    additional_rounds: int = Field(ge=0)
+    old_budget: BudgetContract
+    new_budget: BudgetContract
+    previous_seal_blob: BlobRef
+    previous_seal_history_path: str
+
+
 class VerificationRuntimeState(StrictModel):
     stages: dict[str, CheckStageState] = Field(default_factory=dict)
     replan_pending: bool = False
@@ -1331,14 +1363,14 @@ class VerificationRuntimeState(StrictModel):
     semantic_ci_passed: bool | None = None
     semantic_ci_gaps: list[str] = Field(default_factory=list)
     deterministic_failures: list[str] = Field(default_factory=list)
-    adjudication: dict[str, Any] | None = None
+    adjudication: SemanticAdjudication | None = None
 
 
 class PlanningRuntimeState(StrictModel):
     checkpoint_error: str | None = None
     clean_synthesis_needed: bool = False
-    frame_breaks: list[dict[str, Any]] = Field(default_factory=list)
-    frontier_replan_pending: dict[str, Any] | None = None
+    frame_breaks: list[str] = Field(default_factory=list)
+    frontier_replan_pending: FrontierReplanRequest | None = None
     frontier_replan_fingerprints: list[str] = Field(default_factory=list)
 
 
@@ -1358,15 +1390,15 @@ class ReleaseRuntimeState(StrictModel):
 
 
 class ResourceRuntimeState(StrictModel):
-    decision: dict[str, Any] | None = None
+    decision: ResourceDecision | None = None
     extension_recommended: bool = False
-    repair_loop_stop: dict[str, Any] | None = None
+    repair_loop_stop: RepairLoopStop | None = None
 
 
 class ExtensionRuntimeState(StrictModel):
     count: int = 0
     replan_pending: bool = False
-    last_event: dict[str, Any] | None = None
+    last_event: RunExtensionRecord | None = None
 
 
 class CompletionRuntimeState(StrictModel):

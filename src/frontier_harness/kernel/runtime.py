@@ -8,9 +8,13 @@ from .. import events as et
 from ..ledger import LedgerEvent
 from ..models import (
     BudgetContract,
+    FrontierReplanRequest,
     ObligationStatus,
     ReleaseRecovery,
+    RepairLoopStop,
+    ResourceDecision,
     ResourceState,
+    RunExtensionRecord,
     RunPhase,
     RunState,
 )
@@ -43,18 +47,19 @@ class RuntimeProjector:
         elif event.event_type in {et.RESOURCE_INITIALIZED, et.RESOURCE_DECIDED}:
             state.resource_state = ResourceState.model_validate(payload["resource_state"])
             if event.event_type == et.RESOURCE_DECIDED:
-                state.runtime.resources.decision = payload.get("decision", {})
-                state.runtime.resources.extension_recommended = bool(
-                    payload.get("decision", {}).get("extension_recommended")
-                )
+                decision = ResourceDecision.model_validate(payload["decision"])
+                state.runtime.resources.decision = decision
+                state.runtime.resources.extension_recommended = decision.extension_recommended
         elif event.event_type == et.REPAIR_LOOP_STOPPED:
-            state.runtime.resources.repair_loop_stop = payload
+            state.runtime.resources.repair_loop_stop = RepairLoopStop.model_validate(payload)
         elif event.event_type == et.FRONTIER_REPLAN_REQUESTED:
             fingerprint = str(payload["fingerprint"])
             history = state.runtime.planning.frontier_replan_fingerprints
             if fingerprint not in history:
                 history.append(fingerprint)
-            state.runtime.planning.frontier_replan_pending = payload
+            state.runtime.planning.frontier_replan_pending = FrontierReplanRequest.model_validate(
+                payload
+            )
         elif event.event_type == et.RELEASE_RECOVERY_REQUESTED:
             self._release_recovery(state, event)
         elif event.event_type == et.RUN_COMPLETED:
@@ -114,7 +119,7 @@ class RuntimeProjector:
         state.runtime.resources.extension_recommended = False
         state.runtime.resources.repair_loop_stop = None
         state.runtime.extension.count += 1
-        state.runtime.extension.last_event = payload
+        state.runtime.extension.last_event = RunExtensionRecord.model_validate(payload)
 
     @staticmethod
     def _release_recovery(state: RunState, event: LedgerEvent) -> None:

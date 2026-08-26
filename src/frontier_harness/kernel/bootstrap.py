@@ -57,7 +57,11 @@ class BootstrapProjector:
             state.usage = state.usage.plus(Usage.model_validate(payload.get("usage", {})))
             runtime = state.runtime.bootstrap
             runtime.error = payload.get("error", "bootstrap failed")
-            runtime.recovery_artifact = payload.get("recovery_artifact")
+            runtime.recovery_artifact = (
+                ArtifactRef.model_validate(payload["recovery_artifact"])
+                if payload.get("recovery_artifact")
+                else None
+            )
             runtime.recovery_thread_id = payload.get("provider_thread_id")
             runtime.recovery_error = payload.get("recovery_capture_error")
             state.phase = RunPhase.CREATED

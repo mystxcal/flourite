@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import get_args
 
 from frontier_harness.models import (
+    ArtifactRef,
+    BootstrapRuntimeState,
     EvidenceRecord,
+    ExtensionRuntimeState,
     FinalOutput,
+    FrontierReplanRequest,
     IndependenceClass,
+    PlanningRuntimeState,
+    RepairLoopStop,
+    ResourceDecision,
+    ResourceRuntimeState,
+    RunExtensionRecord,
     RunState,
+    SemanticAdjudication,
+    VerificationRuntimeState,
 )
 from frontier_harness.orchestration.release import ReleasePolicy
 
@@ -35,10 +47,56 @@ def test_engine_remains_a_capability_facade_not_a_semantic_god_method() -> None:
     assert max(sizes.values()) <= 450
 
 
+def test_canonical_runtime_boundaries_remain_cognitively_bounded() -> None:
+    capsule = _class_method_sizes(SOURCE / "capsule.py", "CapsuleBuilder")
+    checkpoint = _class_method_sizes(
+        SOURCE / "orchestration" / "checkpoint.py",
+        "CheckpointExecutor",
+    )
+    provider = _class_method_sizes(
+        SOURCE / "execution" / "calls.py",
+        "ProviderCallExecutor",
+    )
+    engine = _class_method_sizes(SOURCE / "engine.py", "FrontierEngine")
+
+    assert capsule["populate"] <= 70
+    assert checkpoint["_integrate"] <= 130
+    assert checkpoint["_project_semantics"] <= 90
+    assert provider["invoke"] <= 65
+    assert provider["_run_with_recovery"] <= 90
+    assert engine["_invoke"] <= 40
+
+
 def test_engine_depends_on_adapter_capabilities_not_concrete_adapters() -> None:
     source = (SOURCE / "engine.py").read_text(encoding="utf-8")
     assert "MarkdownAdapter" not in source
     assert "SoftwareAdapter" not in source
+
+
+def test_engine_has_one_authoritative_event_write_path() -> None:
+    source = (SOURCE / "engine.py").read_text(encoding="utf-8")
+    assert "ledger.append(" not in source
+    assert source.count("self.journal.append(") == 1
+    assert source.count("journal.append(") == 3
+
+
+def test_runtime_policy_fields_are_typed_domain_objects() -> None:
+    assert ArtifactRef in get_args(
+        BootstrapRuntimeState.model_fields["recovery_artifact"].annotation
+    )
+    assert SemanticAdjudication in get_args(
+        VerificationRuntimeState.model_fields["adjudication"].annotation
+    )
+    assert FrontierReplanRequest in get_args(
+        PlanningRuntimeState.model_fields["frontier_replan_pending"].annotation
+    )
+    assert ResourceDecision in get_args(ResourceRuntimeState.model_fields["decision"].annotation)
+    assert RepairLoopStop in get_args(
+        ResourceRuntimeState.model_fields["repair_loop_stop"].annotation
+    )
+    assert RunExtensionRecord in get_args(
+        ExtensionRuntimeState.model_fields["last_event"].annotation
+    )
 
 
 def test_release_policy_is_pure_and_fail_closed() -> None:

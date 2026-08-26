@@ -8,7 +8,7 @@ import pytest
 from frontier_harness.adapters.generic import MarkdownAdapter
 from frontier_harness.adapters.profiles import get_profile
 from frontier_harness.blobs import BlobStore
-from frontier_harness.capsule import CapsuleBuilder, stage_sources
+from frontier_harness.capsule import CapsuleBuilder, CapsuleSpec, stage_sources
 from frontier_harness.models import ContextLens
 
 
@@ -59,10 +59,10 @@ def test_staged_sources_are_immutable_and_exclusions_are_pruned(tmp_path: Path) 
     builder = CapsuleBuilder(adapter=adapter, blobs=blobs, sources=staged)
     manifest = builder.populate(
         workspace,
-        task="Use the supplied brief.",
-        state=None,
-        assignment="Read the brief.",
-        goal_contract=None,
+        CapsuleSpec(
+            task="Use the supplied brief.",
+            assignment="Read the brief.",
+        ),
     )
     assert (workspace.context_dir / "VERIFICATION_CONTRACT.json").read_text() == "{}"
     lens = ContextLens.model_validate(
