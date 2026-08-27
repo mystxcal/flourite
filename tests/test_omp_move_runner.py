@@ -39,7 +39,6 @@ class FakeOmpProvider:
             )
             value = {
                 "artifact_changed": True,
-                "workspace_path": ".sfh_output/workspace.md",
                 "workspace_summary": "Complete first candidate",
                 "observations": [
                     {
@@ -88,6 +87,18 @@ class FakeOmpProvider:
         )
 
 
+class CommitRepairProvider(FakeOmpProvider):
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        result = await super().run(request)
+        if request.call_kind == "lead" and "-repair-" not in request.call_id:
+            value = result.response.model_dump(mode="python")
+            value["observations"][0]["evidence_path"] = "/outside-the-live-workspace"
+            return result.model_copy(
+                update={"response": request.response_model.model_validate(value)}
+            )
+        return result
+
+
 class VanishingSessionProvider(FakeOmpProvider):
     async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
         self.requests.append(request)
@@ -117,7 +128,6 @@ class VanishingSessionProvider(FakeOmpProvider):
             )
             value: dict[str, Any] = {
                 "artifact_changed": True,
-                "workspace_path": ".sfh_output/workspace.md",
                 "workspace_summary": f"Lead call {call}",
                 "observations": [],
             }
@@ -197,6 +207,40 @@ async def test_omp_runner_connects_transport_adapter_and_kernel(tmp_path: Path) 
     assert provider.requests[0].preserve_session is True
     assert provider.requests[1].preserve_session is False
     assert (tmp_path / "provider-sessions.json").is_file()
+
+
+async def test_commit_error_is_repaired_in_the_same_live_codex_workspace(
+    tmp_path: Path,
+) -> None:
+    blobs = BlobStore(tmp_path / "blobs")
+    adapter = MarkdownAdapter(
+        profile=get_profile("generic"),
+        run_dir=tmp_path,
+        blobs=blobs,
+        workspace=None,
+    )
+    provider = CommitRepairProvider()
+    runner = OmpMoveRunner(
+        provider=provider,  # type: ignore[arg-type]
+        adapter=adapter,
+        run_dir=tmp_path,
+    )
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_repair"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=runner,
+    )
+    kernel.start("Build and verify the artifact.", envelope=ComputeEnvelope(max_model_turns=20))
+
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.SATISFIED
+    repair = next(item for item in provider.requests if "-repair-" in item.call_id)
+    assert repair.resume_thread_id == "thread-lead"
+    assert "Exact error:" in repair.prompt
 
 
 async def test_vanished_lead_session_reconstructs_from_durable_context(

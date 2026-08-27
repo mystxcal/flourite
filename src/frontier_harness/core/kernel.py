@@ -334,6 +334,39 @@ class IntelligenceKernel:
         visible_observations: list[Observation],
         result: MoveExecutionResult,
     ) -> None:
+        previous_moves = sorted(
+            (
+                prior
+                for prior in self.state.moves.values()
+                if prior.move_id != move.move_id
+                and prior.trajectory_id == move.trajectory_id
+                and prior.status.terminal
+            ),
+            key=lambda prior: prior.proposed_at,
+        )
+        previous = previous_moves[-1] if previous_moves else None
+        repeated_failure = bool(
+            not result.success
+            and previous is not None
+            and previous.status == MoveStatus.FAILED
+            and previous.error == result.error
+        )
+        if not result.success and not repeated_failure:
+            result = result.model_copy(
+                update={
+                    "next_move": MoveDirective(
+                        mode=MoveMode.LEAD,
+                        intent="Repair the failed operation and continue the objective",
+                        instructions=(
+                            "A runtime operation failed. Diagnose it from the exact error and "
+                            "available evidence, use tools to repair it directly, preserve useful "
+                            "work, and continue the original objective. Error: "
+                            f"{result.error or 'unknown failure'}"
+                        ),
+                        trajectory_id=move.trajectory_id,
+                    )
+                }
+            )
         payload = MoveResultCompiler(
             state=self.state,
             blobs=self.blobs,
@@ -345,7 +378,7 @@ class IntelligenceKernel:
             actor="runtime",
             action_id=move.move_id,
         )
-        if not result.success and not self.state.status.terminal:
+        if repeated_failure and not self.state.status.terminal:
             self.journal.append(
                 "run.failed",
                 RunTerminated(

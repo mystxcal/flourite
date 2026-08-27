@@ -2,13 +2,34 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+import typer
 from typer.testing import CliRunner
 
+import frontier_harness.cli as cli
 from frontier_harness.cli import app
 from frontier_harness.config import load_config
 
 runner = CliRunner()
+
+
+def test_failed_engine_returns_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class Engine:
+        run_dir = tmp_path / "run"
+
+        def close(self) -> None:
+            pass
+
+    async def execute(_engine: object, _output: object, *, follow: bool):
+        assert follow is False
+        return SimpleNamespace(status=SimpleNamespace(value="failed")), None
+
+    monkeypatch.setattr(cli, "_execute_with_activity", execute)
+    with pytest.raises(typer.Exit) as failure:
+        cli._run_engine(Engine(), None, quiet=True)  # type: ignore[arg-type]
+    assert failure.value.exit_code == 1
 
 
 def test_init_and_doctor_fake(tmp_path: Path) -> None:

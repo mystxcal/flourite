@@ -126,14 +126,16 @@ def _run_engine(engine: KernelEngine, output: Path | None, *, quiet: bool) -> No
         state, path = asyncio.run(_execute_with_activity(engine, output, follow=not quiet))
         if quiet:
             console.print(path or engine.run_dir)
-            return
-        console.print(
-            phase_line(
-                state.status.value,
-                str(path or state.terminal_reason or engine.run_dir),
-                state="done" if state.status.value == "satisfied" else "warn",
+        else:
+            console.print(
+                phase_line(
+                    state.status.value,
+                    str(path or state.terminal_reason or engine.run_dir),
+                    state="done" if state.status.value == "satisfied" else "warn",
+                )
             )
-        )
+        if state.status.value == "failed":
+            raise typer.Exit(1)
     except FrontierError as exc:
         error_console.print(phase_line("error", str(exc), state="error"))
         error_console.print(phase_line("retained", str(engine.run_dir), state="muted"))

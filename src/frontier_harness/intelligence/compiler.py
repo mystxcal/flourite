@@ -306,7 +306,7 @@ class MoveResultCompiler:
         directives = self._directives(result)
         if repeated_low_information and directives and not has_finish_claim:
             directives = [self._navigation_escape(move)]
-        if not result.success or not directives or has_finish_claim:
+        if not directives or has_finish_claim:
             return CompiledContinuations()
         moves: list[Move] = []
         trajectories: list[Trajectory] = []

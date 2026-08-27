@@ -26,7 +26,7 @@ from ..core.types import (
 )
 from ..errors import ProviderCallError
 from ..models import ArtifactRef, EvidenceRecord, Role, SandboxPolicy
-from ..providers.base import ProviderCallRequest
+from ..providers.base import ProviderCallRequest, ProviderCallResult
 from ..providers.omp_codex import OmpCodexProvider
 from ..runtime.sources import StagedInput
 from ..util import atomic_write_text, utc_now
@@ -97,7 +97,6 @@ class ModelOutputBase(CoreModel):
 
 
 class LeadModelOutput(ModelOutputBase):
-    workspace_path: str
     workspace_summary: str
 
 
@@ -166,6 +165,8 @@ class OmpMoveRunner:
             call_kind=move.mode.value,
             current_artifact=parent,
         )
+        retain_workspace = False
+        usage = ComputeUsage()
         try:
             self._write_context(workspace, context)
             output_type = self._output_type(move.mode)
@@ -219,33 +220,76 @@ class OmpMoveRunner:
                             retry_exc,
                             usage=failed_resume_usage.plus(self._failed_usage(retry_exc)),
                         )
+                        retain_workspace = True
+                        failed.observations.append(self._retained_workspace(workspace, retry_exc))
                         atomic_write_text(cache_path, failed.model_dump_json(indent=2))
                         return failed
                 else:
                     failed = self._provider_failure(exc, usage=failed_resume_usage)
+                    retain_workspace = True
+                    failed.observations.append(self._retained_workspace(workspace, exc))
                     atomic_write_text(cache_path, failed.model_dump_json(indent=2))
                     return failed
             if move.mode == MoveMode.LEAD and provider_result.thread_id:
                 sessions[move.trajectory_id] = provider_result.thread_id
                 self._write_sessions(sessions)
-            successful_usage = ComputeUsage(
-                wall_seconds=provider_result.duration_seconds,
-                input_tokens=provider_result.usage.input_tokens,
-                output_tokens=provider_result.usage.output_tokens,
-                model_turns=max(
-                    provider_result.usage.model_requests,
-                    provider_result.trace_summary.model_turns,
-                ),
-                tool_calls=len(provider_result.trace_summary.tool_calls),
-            )
-            result = self._convert(
-                move=move,
-                state=state,
-                workspace=workspace,
-                parent=parent,
-                output=provider_result.response,
-                usage=failed_resume_usage.plus(successful_usage),
-            )
+            usage = failed_resume_usage
+            previous_commit_error: str | None = None
+            repair = 0
+            while True:
+                usage = usage.plus(self._provider_usage(provider_result))
+                try:
+                    result = self._convert(
+                        move=move,
+                        state=state,
+                        workspace=workspace,
+                        parent=parent,
+                        output=provider_result.response,
+                        usage=usage,
+                    )
+                    break
+                except Exception as exc:
+                    commit_error = f"{type(exc).__name__}: {exc}"
+                    if commit_error == previous_commit_error:
+                        retain_workspace = True
+                        failed = self._runtime_failure(exc, workspace, usage)
+                        atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                        return failed
+                    if state.usage.plus(usage).exhausted(state.objective.envelope):
+                        retain_workspace = True
+                        failed = self._runtime_failure(exc, workspace, usage)
+                        atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                        return failed
+                    previous_commit_error = commit_error
+                    repair += 1
+                    repair_request = request.model_copy(
+                        update={
+                            "call_id": f"{move.move_id}-repair-{repair}",
+                            "prompt": (
+                                "The runtime could not commit your last result. Do not explain "
+                                "or restart. Inspect the live workspace, fix the problem directly, "
+                                "and return the corrected typed result.\n\n"
+                                f"Exact error: {commit_error}"
+                            ),
+                            "resume_thread_id": provider_result.thread_id
+                            or sessions.get(move.trajectory_id),
+                            "preserve_session": True,
+                            "output_path": runtime_dir / f"response-repair-{repair}.json",
+                        }
+                    )
+                    try:
+                        provider_result = await self.provider.run(repair_request)
+                    except ProviderCallError as repair_error:
+                        failed = self._provider_failure(
+                            repair_error,
+                            usage=usage.plus(self._failed_usage(repair_error)),
+                        )
+                        retain_workspace = True
+                        failed.observations.append(
+                            self._retained_workspace(workspace, repair_error)
+                        )
+                        atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                        return failed
             if reconstructed_session:
                 result.observations.append(
                     ObservationDraft(
@@ -263,8 +307,53 @@ class OmpMoveRunner:
                 result.model_dump_json(indent=2),
             )
             return result
+        except Exception as exc:
+            retain_workspace = True
+            failed = self._runtime_failure(exc, workspace, usage)
+            atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+            return failed
         finally:
-            self.adapter.close_call(workspace)
+            if not retain_workspace:
+                self.adapter.close_call(workspace)
+
+    @staticmethod
+    def _provider_usage(result: ProviderCallResult[Any]) -> ComputeUsage:
+        return ComputeUsage(
+            wall_seconds=result.duration_seconds,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            model_turns=max(
+                result.usage.model_requests,
+                result.trace_summary.model_turns,
+            ),
+            tool_calls=len(result.trace_summary.tool_calls),
+        )
+
+    @staticmethod
+    def _retained_workspace(workspace: CallWorkspace, error: Exception) -> ObservationDraft:
+        return ObservationDraft(
+            kind=ObservationKind.ERROR,
+            summary=(
+                f"The failed live workspace was retained at {workspace.cwd}. "
+                f"Continue there or recover its useful changes. Error: {type(error).__name__}: "
+                f"{error}"
+            ),
+            source="runtime",
+            metadata={"retained_workspace": str(workspace.cwd)},
+        )
+
+    def _runtime_failure(
+        self,
+        error: Exception,
+        workspace: CallWorkspace,
+        usage: ComputeUsage,
+    ) -> MoveExecutionResult:
+        return MoveExecutionResult(
+            success=False,
+            error=f"{type(error).__name__}: {error}",
+            usage=usage,
+            observations=[self._retained_workspace(workspace, error)],
+        )
 
     @staticmethod
     def _failed_usage(error: ProviderCallError) -> ComputeUsage:
@@ -531,7 +620,7 @@ write the current best artifact to `{expected_artifact}`. For a software artifac
 the isolated repository itself. Before returning, write a compact decision map to
 `.sfh_output/workspace.md`; it should capture the current best, strategy, causal evidence,
 failed approaches worth remembering, unresolved load-bearing uncertainty, and the next
-frontier. Set `workspace_path` to that file. Choose one next move or make an evidenced
+frontier. Choose one next move or make an evidenced
 finish claim. If no move is obvious, broaden or reframe rather than inferring completion.
 Use `blocker` only for a concrete external dependency that tools and further reasoning
 cannot resolve; difficulty, uncertainty, and failed attempts are not blockers.
@@ -784,7 +873,9 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
     ) -> WorkspaceDraft | None:
         if not isinstance(output, LeadModelOutput):
             return None
-        path = self.adapter.resolve_declared_path(workspace, output.workspace_path)
+        path = workspace.cwd / ".sfh_output" / "workspace.md"
+        if not path.is_file():
+            raise ValueError("lead did not write the required .sfh_output/workspace.md")
         return WorkspaceDraft(
             document=path.read_text(encoding="utf-8"),
             summary=output.workspace_summary,
