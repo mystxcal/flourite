@@ -13,6 +13,7 @@ from frontier_harness.core.types import (
     ContentRef,
     Move,
     MoveMode,
+    MoveStatus,
     ObservationKind,
     RunState,
     RunStatus,
@@ -525,3 +526,24 @@ async def test_repeated_low_information_lead_moves_trigger_fresh_navigation(
     ]
     assert len(signals) == 2
     assert signals[-1].metadata["repeated"] is True
+
+
+async def test_failed_move_terminates_instead_of_reframing_forever(
+    tmp_path: Path,
+) -> None:
+    kernel, _runner = kernel_for(
+        tmp_path,
+        [
+            MoveExecutionResult(
+                success=False,
+                error="ProviderError: transport unavailable",
+            )
+        ],
+    )
+
+    await kernel.run(max_steps=10)
+
+    assert kernel.state.status == RunStatus.FAILED
+    assert kernel.state.terminal_reason == "ProviderError: transport unavailable"
+    assert len(kernel.state.moves) == 1
+    assert next(iter(kernel.state.moves.values())).status == MoveStatus.FAILED

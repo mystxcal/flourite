@@ -142,6 +142,14 @@ class OmpMoveRunner:
         self.lead_cwd.mkdir(parents=True, exist_ok=True)
         self.adapter.prepare()
 
+    async def preflight(self) -> str | None:
+        """Return a concrete provider-readiness failure before any move is spent."""
+
+        result = await self.provider.doctor()
+        if result.ok:
+            return None
+        return "; ".join(result.details) or "provider preflight failed"
+
     async def run(
         self,
         *,

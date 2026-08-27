@@ -345,3 +345,13 @@ class IntelligenceKernel:
             actor="runtime",
             action_id=move.move_id,
         )
+        if not result.success and not self.state.status.terminal:
+            self.journal.append(
+                "run.failed",
+                RunTerminated(
+                    status="failed",
+                    reason=result.error or "move execution failed without a reason",
+                ),
+                actor="runtime",
+                action_id=move.move_id,
+            )

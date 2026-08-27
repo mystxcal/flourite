@@ -304,6 +304,20 @@ class KernelEngine:
             steps = 0
             published_seq = self.state.last_event_seq
             try:
+                if isinstance(self.runner, OmpMoveRunner):
+                    try:
+                        readiness_error = await self.runner.preflight()
+                    except Exception as exc:
+                        readiness_error = f"{type(exc).__name__}: {exc}"
+                    if readiness_error is not None and not self.state.status.terminal:
+                        self.journal.append(
+                            "run.failed",
+                            RunTerminated(
+                                status="failed",
+                                reason=f"provider preflight failed: {readiness_error}",
+                            ),
+                            actor="runtime",
+                        )
                 while not self.state.status.terminal:
                     self._apply_commands()
                     self._publish_events(after_seq=published_seq)
