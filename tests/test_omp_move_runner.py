@@ -172,6 +172,22 @@ class VanishingSessionProvider(FakeOmpProvider):
         )
 
 
+def test_generic_call_capsule_survives_controller_restart(tmp_path: Path) -> None:
+    adapter = MarkdownAdapter(
+        profile=get_profile("generic"),
+        run_dir=tmp_path,
+        blobs=BlobStore(tmp_path / "blobs"),
+        workspace=None,
+    )
+    first = adapter.open_call(call_id="same", call_kind="lead", current_artifact=None)
+    (first.cwd / "unfinished.txt").write_text("keep me\n", encoding="utf-8")
+
+    resumed = adapter.open_call(call_id="same", call_kind="lead", current_artifact=None)
+
+    assert resumed.metadata["resumed"] is True
+    assert (resumed.cwd / "unfinished.txt").read_text() == "keep me\n"
+
+
 async def test_omp_runner_connects_transport_adapter_and_kernel(tmp_path: Path) -> None:
     blobs = BlobStore(tmp_path / "blobs")
     adapter = MarkdownAdapter(

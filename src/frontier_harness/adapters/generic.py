@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 from ..blobs import BlobStore
@@ -47,7 +46,20 @@ class MarkdownAdapter(ArtifactAdapter):
     ) -> CallWorkspace:
         root = self.run_dir / "capsules" / call_id
         if root.exists():
-            shutil.rmtree(root)
+            context = root / "input"
+            output = root / "output"
+            context.mkdir(parents=True, exist_ok=True)
+            output.mkdir(parents=True, exist_ok=True)
+            return CallWorkspace(
+                call_id=call_id,
+                call_kind=call_kind,
+                root=root,
+                cwd=root,
+                context_dir=context,
+                output_dir=output,
+                expected_artifact_path=output / "artifact.md",
+                metadata={"profile": self.profile.name, "resumed": True},
+            )
         context = root / "input"
         output = root / "output"
         context.mkdir(parents=True)

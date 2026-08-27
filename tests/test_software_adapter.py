@@ -91,6 +91,31 @@ def test_software_snapshot_isolation_capture_and_idempotent_apply(
     assert second["reason"] == "final patch was already applied exactly"
 
 
+def test_reopening_an_interrupted_call_preserves_live_work(tmp_path: Path, git_repo: Path) -> None:
+    adapter = _adapter(tmp_path, git_repo)
+    adapter.prepare()
+    first = adapter.open_call(
+        call_id="interrupted",
+        call_kind="lead",
+        current_artifact=None,
+    )
+    (first.cwd / "app.txt").write_text("valuable unfinished work\n", encoding="utf-8")
+    (first.output_dir / "workspace.md").write_text("live map\n", encoding="utf-8")
+
+    resumed = adapter.open_call(
+        call_id="interrupted",
+        call_kind="lead",
+        current_artifact=None,
+    )
+    try:
+        assert resumed.metadata["resumed"] is True
+        assert (resumed.cwd / "app.txt").read_text() == "valuable unfinished work\n"
+        assert (resumed.output_dir / "workspace.md").read_text() == "live map\n"
+        assert resumed.baseline_commit == first.baseline_commit
+    finally:
+        adapter.close_call(resumed)
+
+
 def test_apply_refuses_source_change_after_snapshot(tmp_path: Path, git_repo: Path) -> None:
     adapter = _adapter(tmp_path, git_repo)
     adapter.prepare()

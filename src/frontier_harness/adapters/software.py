@@ -339,8 +339,22 @@ class SoftwareAdapter(ArtifactAdapter):
         _, snapshot_commit = self._require_prepared()
         path = self.worktrees_dir / call_id
         if path.exists():
-            self._git(self.seed_repo, ["worktree", "remove", "--force", str(path)], check=False)
-            shutil.rmtree(path, ignore_errors=True)
+            baseline_commit = self._git(path, ["rev-parse", "HEAD"]).stdout.decode().strip()
+            context = path / ".sfh_context"
+            output = path / ".sfh_output"
+            context.mkdir(parents=True, exist_ok=True)
+            output.mkdir(parents=True, exist_ok=True)
+            return CallWorkspace(
+                call_id=call_id,
+                call_kind=call_kind,
+                root=path,
+                cwd=path,
+                context_dir=context,
+                output_dir=output,
+                expected_artifact_path=output / "artifact-summary.md",
+                baseline_commit=baseline_commit,
+                metadata={"snapshot_commit": snapshot_commit, "resumed": True},
+            )
         self._git(
             self.seed_repo,
             ["worktree", "add", "--detach", str(path), snapshot_commit],
