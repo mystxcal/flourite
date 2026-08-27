@@ -51,6 +51,7 @@ class KernelEngine:
     LEDGER_FILE = "ledger.sqlite3"
     SOURCES_FILE = "sources.json"
     CONTROL_FILE = "control.sqlite3"
+    PROVIDER_READY_DIR = "provider-ready"
 
     def __init__(
         self,
@@ -246,16 +247,23 @@ class KernelEngine:
                 run_dir=run_dir,
                 sources=sources,
             )
+        ledger = EventLedger(
+            run_dir / cls.LEDGER_FILE,
+            run_id,
+            busy_timeout_ms=config.runtime.sqlite_busy_timeout_ms,
+        )
+        checkpoint = KernelJournal.load_checkpoint(
+            ledger=ledger,
+            snapshot_path=run_dir / cls.STATE_FILE,
+        )
         journal = KernelJournal(
-            ledger=EventLedger(
-                run_dir / cls.LEDGER_FILE,
-                run_id,
-                busy_timeout_ms=config.runtime.sqlite_busy_timeout_ms,
-            ),
+            ledger=ledger,
             snapshot_path=run_dir / cls.STATE_FILE,
             max_event_payload_bytes=config.kernel.max_event_payload_bytes,
+            state=checkpoint,
         )
-        journal.refresh()
+        if checkpoint is None:
+            journal.refresh()
         engine = cls(
             run_dir=run_dir,
             config=config,
@@ -304,7 +312,9 @@ class KernelEngine:
             steps = 0
             published_seq = self.state.last_event_seq
             try:
-                if isinstance(self.runner, OmpMoveRunner):
+                generation = os.environ.get("FLOURITE_COMPONENT_GENERATION", "direct")
+                readiness_receipt = self.run_dir / self.PROVIDER_READY_DIR / f"{generation}.json"
+                if isinstance(self.runner, OmpMoveRunner) and not readiness_receipt.exists():
                     try:
                         readiness_error = await self.runner.preflight()
                     except Exception as exc:
@@ -317,6 +327,14 @@ class KernelEngine:
                                 reason=f"provider preflight failed: {readiness_error}",
                             ),
                             actor="runtime",
+                        )
+                    elif readiness_error is None:
+                        atomic_write_text(
+                            readiness_receipt,
+                            json.dumps(
+                                {"generation": generation, "ready_at": utc_now()},
+                                sort_keys=True,
+                            ),
                         )
                 while not self.state.status.terminal:
                     self._apply_commands()

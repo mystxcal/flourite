@@ -18,6 +18,13 @@ flowchart LR
       OBJ["Objective<br/>immutable text + amendments"]
       LOG["Hash-chained journal<br/>semantic source of truth"]
       BLOBS["Content-addressed store<br/>artifacts · evidence · traces"]
+      PROTO["Step protocol<br/>stable activity contract"]
+    end
+
+    subgraph R["Replaceable runtime"]
+      SUP["Stable supervisor<br/>one run · no semantic authority"]
+      REG["Atomic component registry<br/>immutable generations"]
+      WORK["Disposable activity worker<br/>one leased generation"]
     end
 
     subgraph S["Live search state"]
@@ -42,11 +49,17 @@ flowchart LR
     end
 
     OP --> OBJ
+    OP -->|"bind / rollback"| REG
+    REG -->|"lease at boundary"| SUP
+    SUP --> WORK
+    PROTO --> SUP
+    PROTO --> WORK
     OBJ --> CTX
     WS --> CTX
     ART --> CTX
     OBS --> CTX
     TRAJ --> CTX
+    WORK --> CTX
     CTX --> LEAD
     CTX -. "stagnation / no live continuation" .-> NAV
     CTX -. "concrete finish claim" .-> CHAL
@@ -69,6 +82,35 @@ flowchart LR
 ```
 
 This is one learning loop, not a sequence of phases.
+
+## Ship of Theseus runtime
+
+The durable run pins a protocol and state—not a Python implementation. Each
+semantic activity leases one immutable component generation and runs in a fresh
+worker process. A live binding change is one atomic registry update:
+
+```text
+activity n leases generation g
+         ↓
+g runs to the next journal boundary
+         ↓
+supervisor resolves the registry again
+         ↓
+activity n+1 may lease generation g+1
+```
+
+This makes planners, prompts, providers, adapters, evaluators, recovery policy,
+and the kernel implementation replaceable without restarting or reconstructing
+the run. In-flight code never changes underneath a tool call. New code must
+implement the same narrow step protocol, is captured as a content-addressed
+snapshot, and is validated before it can become active. A worker that cannot
+start cannot mutate the run; the registry can fall back to the prior distinct
+generation. The journal remains the authority throughout.
+
+The supervisor is intentionally stupid. It chooses a generation, starts one
+worker, checks its receipt against the journal, and repeats. It does not plan,
+judge quality, or interpret model output. Replacing intelligence machinery
+therefore cannot create a second semantic controller.
 
 ## Canonical state
 
@@ -226,6 +268,8 @@ reconstructible from the journal.
 | OMP provider | Transport attempts, schema retry, safe telemetry, exact usage | Search policy or semantic progress |
 | Adapter | Artifact capture, direct checks, materialization, explicit apply | Universal search policy |
 | `KernelEngine` | Run lifecycle, commands, locks, activity, source staging | Deciding what an observation means |
+| Step supervisor | Lease a component generation, run one activity, verify its receipt, repeat | Planning, semantic state, or model judgment |
+| Component registry | Immutable code snapshots and one atomic active pointer | In-flight mutation or semantic authority |
 | Blob store | Immutable bytes and digest verification | Semantic authority |
 | Live UI | Projection and operator input | Hidden state or progress claims |
 
@@ -236,7 +280,7 @@ src/frontier_harness/
   core/          types · atomic transition · reducer · journal · intelligence kernel
   intelligence/ context lens · OMP runner · result compiler · typed contracts
   providers/     OMP transport · safe event projection · trace accounting
-  runtime/       lifecycle · commands · typed activity · sources · materialization
+  runtime/       lifecycle · component leases · disposable workers · commands · sources
   adapters/      domain observation and artifact behavior
   live.py        disposable operator projection
 ```

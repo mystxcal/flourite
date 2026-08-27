@@ -5,6 +5,13 @@ flowchart LR
       OBJ["Objective<br/>immutable text + amendments"]
       LOG["Hash-chained journal<br/>semantic source of truth"]
       BLOBS["Content-addressed store<br/>artifacts · evidence · traces"]
+      PROTO["Step protocol<br/>stable activity contract"]
+    end
+
+    subgraph R["Replaceable runtime"]
+      SUP["Stable supervisor<br/>one run · no semantic authority"]
+      REG["Atomic component registry<br/>immutable generations"]
+      WORK["Disposable activity worker<br/>one leased generation"]
     end
 
     subgraph S["Live search state"]
@@ -29,11 +36,17 @@ flowchart LR
     end
 
     OP --> OBJ
+    OP -->|"bind / rollback"| REG
+    REG -->|"lease at boundary"| SUP
+    SUP --> WORK
+    PROTO --> SUP
+    PROTO --> WORK
     OBJ --> CTX
     WS --> CTX
     ART --> CTX
     OBS --> CTX
     TRAJ --> CTX
+    WORK --> CTX
     CTX --> LEAD
     CTX -. "stagnation / no live continuation" .-> NAV
     CTX -. "concrete finish claim" .-> CHAL

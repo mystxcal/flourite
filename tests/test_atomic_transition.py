@@ -133,3 +133,31 @@ def test_atomic_move_replays_to_the_same_projection(tmp_path: Path) -> None:
         assert reopened.ledger.count() == event_count
     finally:
         reopened.close()
+
+
+def test_projection_checkpoint_is_accepted_only_for_the_exact_journal_head(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    expected = journal.state.model_dump(mode="json")
+    journal.close()
+
+    ledger = EventLedger(tmp_path / "ledger.sqlite3", "run_1")
+    try:
+        cached = KernelJournal.load_checkpoint(
+            ledger=ledger,
+            snapshot_path=tmp_path / "state.json",
+        )
+        assert cached is not None
+        assert cached.model_dump(mode="json") == expected
+
+        (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+        assert (
+            KernelJournal.load_checkpoint(
+                ledger=ledger,
+                snapshot_path=tmp_path / "state.json",
+            )
+            is None
+        )
+    finally:
+        ledger.close()

@@ -39,8 +39,10 @@ best-effort atomic state.json refresh
 ```
 
 A later filesystem error while refreshing `state.json` does not rewrite the
-already committed truth. Replay repairs the cache. Provider results are cached
-by move id so recovery can reapply the same expensive result idempotently.
+already committed truth. A small checkpoint binds the projection digest to the
+exact journal head; a mismatch falls back to replay and repairs the cache.
+Provider results are cached by move id so recovery can reapply the same
+expensive result idempotently.
 
 ## Content
 
@@ -62,6 +64,11 @@ durable and receipts are mutable. Activity rows are bounded presentation data.
 A steer becomes authoritative only when `steering.received` enters the journal.
 Provider and tool activity can disappear without changing the meaning or
 recoverability of the run.
+
+`components.json` is a separate atomic pointer to immutable implementation
+generations. `component-receipts.jsonl` records which generation executed each
+activity. Neither can claim semantic progress: only a legal journal transition
+can do that.
 
 Historical pre-kernel ledgers keep their original event models and loaders;
 new runs use the canonical events above.

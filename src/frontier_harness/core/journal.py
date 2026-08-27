@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from ..errors import LedgerIntegrityError
 from ..ledger import EventLedger, LedgerEvent
-from ..util import atomic_write_text, canonical_json
+from ..util import atomic_write_bytes, atomic_write_text, canonical_json, sha256_bytes
 from .reducer import KernelReducer
 from .types import RunState
 
@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 class KernelJournal:
     """The only semantic write boundary for a kernel run."""
+
+    CHECKPOINT_SUFFIX = ".checkpoint.json"
 
     def __init__(
         self,
@@ -37,6 +39,39 @@ class KernelJournal:
         self._state = state
         self._reducer = reducer or KernelReducer()
         self._snapshot_error: str | None = None
+
+    @property
+    def checkpoint_path(self) -> Path:
+        return self._snapshot_path.with_suffix(self.CHECKPOINT_SUFFIX)
+
+    @classmethod
+    def load_checkpoint(
+        cls,
+        *,
+        ledger: EventLedger,
+        snapshot_path: Path,
+    ) -> RunState | None:
+        """Load a projection only when it is bound to the exact journal head."""
+
+        checkpoint_path = snapshot_path.with_suffix(cls.CHECKPOINT_SUFFIX)
+        try:
+            snapshot = snapshot_path.read_bytes()
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            state = RunState.model_validate_json(snapshot)
+            head = ledger.last_event()
+            if head is None:
+                return None
+            if checkpoint != {
+                "event_hash": head.event_hash,
+                "event_seq": head.seq,
+                "state_sha256": sha256_bytes(snapshot),
+            }:
+                return None
+            if state.run_id != ledger.run_id or state.last_event_seq != head.seq:
+                return None
+            return state
+        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+            return None
 
     @property
     def state(self) -> RunState:
@@ -104,15 +139,26 @@ class KernelJournal:
 
     def sync_snapshot(self, *, strict: bool = False) -> bool:
         try:
+            snapshot = json.dumps(
+                self.state.model_dump(mode="json", exclude_computed_fields=True),
+                indent=2,
+                ensure_ascii=False,
+            ).encode("utf-8")
+            head = self._ledger.last_event()
+            if head is None:
+                raise LedgerIntegrityError("cannot checkpoint an empty journal")
+            atomic_write_bytes(self._snapshot_path, snapshot)
             atomic_write_text(
-                self._snapshot_path,
-                json.dumps(
-                    self.state.model_dump(mode="json", exclude_computed_fields=True),
-                    indent=2,
-                    ensure_ascii=False,
+                self.checkpoint_path,
+                canonical_json(
+                    {
+                        "event_hash": head.event_hash,
+                        "event_seq": head.seq,
+                        "state_sha256": sha256_bytes(snapshot),
+                    }
                 ),
             )
-        except OSError as exc:
+        except (LedgerIntegrityError, OSError) as exc:
             self._snapshot_error = f"{type(exc).__name__}: {exc}"
             if strict:
                 raise

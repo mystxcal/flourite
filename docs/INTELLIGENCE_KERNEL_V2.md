@@ -633,19 +633,16 @@ core/types.py        canonical data contracts
 core/reducer.py      event -> RunState, and nothing else
 core/kernel.py       the one transition loop
 intelligence/        context · model runner · result compiler
-runtime/engine.py    lifecycle · commands · recovery · materialization
+runtime/             lifecycle · component leases · workers · commands · recovery
 providers/           OMP transport · safe events · usage accounting
 adapters/            task-native artifacts · checks · explicit apply
 cli.py + live.py     commands and disposable operator projection
 ```
 
-Dependencies point inward. The core does not import a domain adapter, provider,
-CLI or named evaluation strategy. Cognitive modes depend on the core contracts;
-the runtime supplies concrete providers and environments.
-
 Dependencies point inward. The core never imports a provider, adapter, CLI, or
-named evaluation strategy. There is one executable controller and one durable
-state model.
+named evaluation strategy. There is one semantic controller and one durable
+state model. A non-semantic supervisor may replace the controller's code between
+activities, but it cannot make or apply a semantic decision itself.
 
 ## 16. Discriminative acceptance tests
 

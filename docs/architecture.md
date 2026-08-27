@@ -1,14 +1,19 @@
 # Architecture overview
 
-Flourite has one controller: `KernelEngine` hosts an `IntelligenceKernel` over
-an append-only journal. The kernel owns semantic decisions; the host owns files,
-processes, commands, and materialization.
+Flourite has one semantic controller: `KernelEngine` hosts an
+`IntelligenceKernel` over an append-only journal. The kernel owns semantic
+decisions. A stable, non-semantic supervisor leases one immutable implementation
+generation per activity, so any runtime component can be replaced at a journal
+boundary without restarting the run.
 
 ```text
 operator task + sources + hard envelope
                  │
                  ▼
       objective + current workspace
+                 │
+                 ▼
+      component lease + fresh worker
                  │
                  ▼
         one model/tool move
@@ -28,6 +33,8 @@ operator task + sources + hard envelope
              satisfied  normal construction
 ```
 
-The journal is authoritative. `state.json`, the live dashboard, exports, and
-materialized artifacts are projections. See [the canonical model](CANONICAL_MODEL.md)
-for the full object and [the event model](event-model.md) for legal transitions.
+The journal is authoritative. The active component pointer is atomic, workers
+are disposable, and in-flight code never changes underneath a model/tool call.
+`state.json`, the live dashboard, exports, and materialized artifacts are
+projections. See [the canonical model](CANONICAL_MODEL.md) for the full object
+and [the event model](event-model.md) for legal transitions.

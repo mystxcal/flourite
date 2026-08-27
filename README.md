@@ -37,6 +37,7 @@ Flourite is an independent open-source project, not an OpenAI product.
 | Criticism as more prose | Findings that change the next construction move |
 | Stop at a call or round limit | Stop when the claim survives direct challenge, or an explicit operator limit is exhausted |
 | Crash between model output and integration | Commit the whole semantic move atomically or not at all |
+| Restart a run to change its machinery | Replace code atomically; the next activity leases it live |
 
 The model remains the intelligence. Flourite handles the parts long runs are
 bad at handling for themselves: exact goal continuity, recovery, global
@@ -138,6 +139,20 @@ flourite resume latest
 flourite stop latest
 ```
 
+The run itself is a Ship of Theseus. Its objective, journal, and component
+protocol remain stable; the implementation does not have to. To replace code
+without rebuilding or restarting the run:
+
+```sh
+flourite component bind latest /path/to/flourite
+flourite component status latest
+```
+
+The active activity finishes with the immutable generation it leased. The next
+activity starts in a fresh process from the newly validated generation. A bad
+generation cannot partially replace a running worker, and every lease leaves a
+receipt beside the journal.
+
 ## How it works
 
 Flourite keeps five kinds of state:
@@ -211,6 +226,9 @@ analysis.
 | `flourite pause` | Pause at the next safe boundary |
 | `flourite resume` | Continue from the ledger |
 | `flourite stop` | Stop safely while retaining the run |
+| `flourite component bind` | Replace implementation code at the next activity boundary |
+| `flourite component status` | Show the implementation the next activity will lease |
+| `flourite component rollback` | Atomically return to the previous implementation |
 | `flourite verify` | Replay the ledger and verify every referenced blob |
 | `flourite events` | Print the immutable event stream as JSONL |
 | `flourite export` | Create a redacted diagnostic or lossless audit bundle |

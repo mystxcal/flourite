@@ -18,7 +18,9 @@ from .errors import FrontierError
 from .exporter import export_kernel_run
 from .presentation import data_table, key_value_table, make_console, phase_line, print_brand
 from .providers import build_provider
+from .runtime.components import ComponentRegistry
 from .runtime.engine import KernelEngine
+from .runtime.supervisor import StepSupervisor
 from .util import atomic_write_text
 
 app = typer.Typer(
@@ -27,6 +29,12 @@ app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="markdown",
 )
+component_app = typer.Typer(
+    name="component",
+    help="Inspect or replace a run's implementation at the next activity boundary.",
+    no_args_is_help=True,
+)
+app.add_typer(component_app, name="component")
 console = make_console()
 error_console = make_console(stderr=True)
 
@@ -106,19 +114,25 @@ async def _execute_with_activity(
     *,
     follow: bool,
 ) -> tuple[Any, Path | None]:
+    ComponentRegistry(engine.run_dir).initialize()
+    supervisor = StepSupervisor(engine.run_dir)
     existing = engine.control.recent_activity(limit=engine.control.MAX_ACTIVITY_ROWS)
     latest = existing[-1].seq if existing else 0
-    task = asyncio.create_task(engine.execute())
-    while not task.done():
+    try:
+        task = asyncio.create_task(supervisor.execute())
+        while not task.done():
+            if follow:
+                latest = _print_new_activity(engine, latest)
+            with suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
         if follow:
-            latest = _print_new_activity(engine, latest)
-        with suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
-    if follow:
-        _print_new_activity(engine, latest)
-    state = await task
-    path = engine.materialize_current(output) if state.current_workspace is not None else None
-    return state, path
+            _print_new_activity(engine, latest)
+        await task
+        state = engine.journal.refresh()
+        path = engine.materialize_current(output) if state.current_workspace is not None else None
+        return state, path
+    finally:
+        supervisor.close()
 
 
 def _run_engine(engine: KernelEngine, output: Path | None, *, quiet: bool) -> None:
@@ -217,6 +231,95 @@ def _load_engine(run_ref: str | Path, *, run_root: Path | None = None) -> Kernel
         return KernelEngine.load(run_ref, run_root=run_root)
     except (FrontierError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+def _component_registry(run_ref: str, run_root: Path | None) -> ComponentRegistry:
+    try:
+        run_dir = KernelEngine.resolve_run_dir(run_ref, run_root=run_root)
+    except FrontierError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    return ComponentRegistry(run_dir)
+
+
+@component_app.command("status")
+def component_status(
+    run_ref: Annotated[str, typer.Argument(help="Run ID, path, or 'latest'.")],
+    run_root: Annotated[Path | None, typer.Option("--run-root")] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show the implementation generation that the next activity will lease."""
+
+    registry = _component_registry(run_ref, run_root)
+    if not registry.path.exists():
+        raise typer.BadParameter("This run predates live components; bind one to enable them")
+    active = registry.active()
+    payload = {
+        "protocol": "flourite-step/v1",
+        "generation": active.generation,
+        "digest": active.digest,
+        "activated_at": active.activated_at,
+        "generations": len(registry.history()),
+    }
+    if as_json:
+        console.print_json(json.dumps(payload))
+        return
+    print_brand(console, compact=True)
+    table = key_value_table(title="live component")
+    table.add_row("generation", str(active.generation))
+    table.add_row("digest", active.digest[:16])
+    table.add_row("protocol", str(payload["protocol"]))
+    table.add_row("history", str(payload["generations"]))
+    console.print(table)
+
+
+@component_app.command("bind")
+def component_bind(
+    run_ref: Annotated[str, typer.Argument(help="Run ID, path, or 'latest'.")],
+    source: Annotated[
+        Path,
+        typer.Argument(help="Package, source root, or repository containing frontier_harness."),
+    ] = Path("."),
+    run_root: Annotated[Path | None, typer.Option("--run-root")] = None,
+) -> None:
+    """Atomically select new code for the next activity; the run stays alive."""
+
+    registry = _component_registry(run_ref, run_root)
+    try:
+        binding = registry.bind(source)
+    except FrontierError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    print_brand(console, compact=True)
+    console.print(
+        phase_line(
+            "component",
+            f"generation {binding.generation} · {binding.digest[:16]} · next boundary",
+            state="done",
+        )
+    )
+
+
+@component_app.command("rollback")
+def component_rollback(
+    run_ref: Annotated[str, typer.Argument(help="Run ID, path, or 'latest'.")],
+    run_root: Annotated[Path | None, typer.Option("--run-root")] = None,
+) -> None:
+    """Point the next activity back to the preceding distinct implementation."""
+
+    registry = _component_registry(run_ref, run_root)
+    try:
+        binding = registry.rollback_if_current(registry.active())
+    except FrontierError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if binding is None:
+        raise typer.BadParameter("No earlier distinct component is available")
+    print_brand(console, compact=True)
+    console.print(
+        phase_line(
+            "component",
+            f"rolled back as generation {binding.generation} · {binding.digest[:16]}",
+            state="warn",
+        )
+    )
 
 
 @app.command("init")
