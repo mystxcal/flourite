@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Kept one real isolated software workspace per Lead trajectory, preserved partial and ignored generated outputs across interruptions, seeded branches from their exact fork artifacts, and made declared release outputs deterministic completion evidence.
+- Separated infrastructure recovery from semantic work: execution failures now pause and requeue the unchanged move with explicit retry lineage instead of inventing model-facing repair tasks.
 - Made a run's implementation live-replaceable: each activity leases an immutable, content-addressed component generation while the journal and step protocol remain stable.
 - Added atomic component binding, explicit rollback, per-activity receipts, disposable worker processes, and automatic fallback when a replacement worker fails.
 - Split typed move-result compilation from all-or-nothing state transition validation, so provider output cannot partially mutate canonical state.

@@ -172,6 +172,7 @@ class Trajectory(CoreModel):
 
 class Move(CoreModel):
     move_id: str
+    retry_of_move_id: str | None = None
     based_on_workspace_id: str | None = None
     trajectory_id: str
     mode: MoveMode

@@ -227,6 +227,39 @@ def test_declared_generated_deliverable_survives_between_isolated_calls(
         adapter.close_call(reopened)
 
 
+def test_missing_declared_release_artifact_cannot_pass_release_evidence(
+    tmp_path: Path, git_repo: Path
+) -> None:
+    run_dir = tmp_path / "run-missing-deliverable"
+    adapter = SoftwareAdapter(
+        run_dir=run_dir,
+        blobs=BlobStore(run_dir / "blobs"),
+        workspace=git_repo,
+        policy=SoftwarePolicy(release_artifacts=["dist/master.mp4"]),
+    )
+    adapter.prepare()
+    workspace = adapter.open_call(
+        call_id="trajectory_root",
+        call_kind="lead",
+        current_artifact=None,
+    )
+    (workspace.cwd / "app.txt").write_text("source without master\n", encoding="utf-8")
+    artifact = adapter.capture_candidate_artifact(
+        workspace,
+        summary="incomplete release",
+        parent=None,
+        source_action_ids=[],
+    )
+    assert artifact is not None
+
+    evidence = adapter.deterministic_checks(artifact)
+
+    assert len(evidence) == 1
+    assert evidence[0].negative_result is True
+    assert "dist/master.mp4" in evidence[0].summary
+    assert workspace.cwd.is_dir()
+
+
 def test_source_only_release_check_is_promoted_to_preflight(tmp_path: Path, git_repo: Path) -> None:
     command = f"{shlex.quote(sys.executable)} -c \"print('checked')\" --source-only"
     run_dir = tmp_path / "run-preflight"

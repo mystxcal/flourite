@@ -164,6 +164,11 @@ performing one mutation. `move.applied` then commits the complete fact in a
 single ledger transaction. If compilation, validation, or persistence fails,
 nothing becomes authoritative. Retrying the same move is idempotent.
 
+An execution or transport failure is not converted into a semantic repair task.
+The run pauses, retains the exact live workspace, and queues the same move with
+explicit retry lineage. After infrastructure recovery it continues in place;
+the model is not asked to reinterpret a broken pipe as part of the objective.
+
 This boundary is the core reliability primitive. Provider activity, tool calls,
 and transcripts are useful evidence, but none is progress until the resulting
 meaning is admitted atomically.
@@ -177,6 +182,13 @@ direct evidence paths, current artifact paths, live trajectory heads, recent
 moves, tools, and hard envelope. It may reason, research, inspect, code, render,
 test, or use bounded nested tasks. Its session persists within a trajectory so
 hard-won local understanding is not repeatedly discarded.
+
+For software work, continuity includes the actual isolated worktree—not merely
+the conversation thread. Generated media, ignored caches, and partial work stay
+in that worktree across Lead epochs. Each real branch gets its own persistent
+worktree seeded from the exact parent artifact at the fork boundary. Fresh
+Challengers and deterministic checks receive disposable projections of the
+durably captured candidate.
 
 If that session disappears, Flourite reconstructs it from durable state. Hidden
 conversation memory improves efficiency; it is never required for correctness.
@@ -255,6 +267,10 @@ explicit boundary says otherwise.
 Pause, stop, and steering are admitted between moves. They never pretend an
 in-flight call was cleanly integrated. A stopped or paused run remains
 reconstructible from the journal.
+
+Infrastructure pauses retain the original semantic move unchanged. External
+durable execution may retry that move after recovery; it may not grade a
+non-terminal projection or reuse a stale pre-terminal seal.
 
 ## Ownership map
 

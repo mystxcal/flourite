@@ -192,7 +192,9 @@ exact objective + current workspace + direct evidence
               satisfied       ordinary construction
 ```
 
-The Lead keeps continuity within a trajectory. A fresh Navigator appears only
+The Lead keeps both session and live-workspace continuity within a trajectory;
+generated outputs and partial work survive ordinary moves and transport
+interruptions. A fresh Navigator appears only
 when local continuation stops producing information; it reconstructs the
 global frontier without inheriting the Lead's framing. A fresh Challenger can
 support, challenge, or remain uncertain about a concrete finish claim. A
@@ -204,6 +206,10 @@ observations, artifact, workspace, branches, continuation, finish claim, usage,
 and failure residue. A crash cannot leave half of that meaning authoritative.
 The hash-chained ledger is the source of truth; `state.json` is a rebuildable
 projection and large content lives in the blob store.
+
+Infrastructure failure pauses and retries the same semantic move in the same
+workspace. It does not ask the model to “repair” transport, and a non-terminal
+or stale artifact cannot cross into evaluation.
 
 Adapters own domain observations. A software adapter can run deterministic
 checks against the candidate; a media adapter can retain rendered deliverables;

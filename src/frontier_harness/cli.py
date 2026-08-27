@@ -150,6 +150,10 @@ def _run_engine(engine: KernelEngine, output: Path | None, *, quiet: bool) -> No
             )
         if state.status.value == "failed":
             raise typer.Exit(1)
+        if state.status.value == "paused" and (state.terminal_reason or "").startswith(
+            "execution paused"
+        ):
+            raise typer.Exit(75)
     except FrontierError as exc:
         error_console.print(phase_line("error", str(exc), state="error"))
         error_console.print(phase_line("retained", str(engine.run_dir), state="muted"))

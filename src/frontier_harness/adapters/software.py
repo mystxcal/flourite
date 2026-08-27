@@ -338,6 +338,7 @@ class SoftwareAdapter(ArtifactAdapter):
     ) -> CallWorkspace:
         _, snapshot_commit = self._require_prepared()
         path = self.worktrees_dir / call_id
+        persistent = call_kind in {"lead", "environment"}
         if path.exists():
             baseline_commit = self._git(path, ["rev-parse", "HEAD"]).stdout.decode().strip()
             context = path / ".sfh_context"
@@ -353,7 +354,11 @@ class SoftwareAdapter(ArtifactAdapter):
                 output_dir=output,
                 expected_artifact_path=output / "artifact-summary.md",
                 baseline_commit=baseline_commit,
-                metadata={"snapshot_commit": snapshot_commit, "resumed": True},
+                metadata={
+                    "snapshot_commit": snapshot_commit,
+                    "resumed": True,
+                    "persistent": persistent,
+                },
             )
         self._git(
             self.seed_repo,
@@ -402,7 +407,7 @@ class SoftwareAdapter(ArtifactAdapter):
             output_dir=output,
             expected_artifact_path=output / "artifact-summary.md",
             baseline_commit=baseline_commit,
-            metadata={"snapshot_commit": snapshot_commit},
+            metadata={"snapshot_commit": snapshot_commit, "persistent": persistent},
         )
 
     def _mark_untracked_intent(self, workspace: CallWorkspace) -> None:
@@ -554,6 +559,8 @@ class SoftwareAdapter(ArtifactAdapter):
         )
 
     def close_call(self, workspace: CallWorkspace) -> None:
+        if workspace.metadata.get("persistent"):
+            return
         self._git(
             self.seed_repo,
             ["worktree", "remove", "--force", str(workspace.root)],
@@ -561,6 +568,46 @@ class SoftwareAdapter(ArtifactAdapter):
         )
         shutil.rmtree(workspace.root, ignore_errors=True)
         self._git(self.seed_repo, ["worktree", "prune"], check=False)
+
+    def _release_artifact_evidence(self, artifact: ArtifactRef) -> list[EvidenceRecord]:
+        if not self.policy.release_artifacts:
+            return []
+        names = [item.original_name for item in artifact.deliverables if item.original_name]
+        missing = [
+            pattern
+            for pattern in self.policy.release_artifacts
+            if not any(fnmatch.fnmatch(name, pattern) for name in names)
+        ]
+        passed = not missing
+        summary = (
+            "Every configured release artifact is durably captured"
+            if passed
+            else "Configured release artifacts were not durably captured: " + ", ".join(missing)
+        )
+        blob = self.blobs.put_text(
+            "\n".join(names) + ("\n" if names else ""),
+            media_type="text/plain; charset=utf-8",
+            original_name="release-artifacts.txt",
+        )
+        return [
+            EvidenceRecord(
+                evidence_id=new_id("evd"),
+                kind="deterministic_release_artifacts",
+                summary=summary,
+                scope="Configured release artifact paths in the exact artifact",
+                artifact_scope="release",
+                independence_class=IndependenceClass.DETERMINISTIC_TOOL,
+                references=[blob.digest],
+                blob=blob,
+                negative_result=not passed,
+                modalities=[EvidenceModality.DETERMINISTIC_TEST],
+                establishes=["configured release artifacts are durable"] if passed else [],
+                cannot_establish=(
+                    [] if passed else ["completion while a configured release artifact is missing"]
+                ),
+                artifact_digest=artifact.blob.digest,
+            )
+        ]
 
     def materialize_final(self, artifact: ArtifactRef, destination: Path) -> Path:
         return self.blobs.materialize(artifact.blob, destination)
@@ -652,7 +699,10 @@ class SoftwareAdapter(ArtifactAdapter):
             *self.policy.candidate_checks,
             *self.policy.checks,
         ]
-        return self._run_checks(artifact, commands=commands, stage="release")
+        return [
+            *self._release_artifact_evidence(artifact),
+            *self._run_checks(artifact, commands=commands, stage="release"),
+        ]
 
     def apply_final_explicit(self, artifact: ArtifactRef) -> dict[str, Any] | None:
         source_root, _ = self._require_prepared()

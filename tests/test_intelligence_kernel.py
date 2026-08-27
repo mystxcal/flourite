@@ -15,6 +15,7 @@ from frontier_harness.core.types import (
     MoveMode,
     MoveStatus,
     ObservationKind,
+    RunResumed,
     RunState,
     RunStatus,
 )
@@ -526,7 +527,7 @@ async def test_repeated_low_information_lead_moves_trigger_fresh_navigation(
     assert signals[-1].metadata["repeated"] is True
 
 
-async def test_failed_move_is_sent_back_for_direct_repair(
+async def test_failed_move_pauses_and_preserves_the_original_move(
     tmp_path: Path,
 ) -> None:
     kernel, _runner = kernel_for(
@@ -541,12 +542,16 @@ async def test_failed_move_is_sent_back_for_direct_repair(
 
     await kernel.run(max_steps=1)
 
-    assert kernel.state.status == RunStatus.ACTIVE
-    assert len(kernel.state.moves) == 2
-    assert any(item.status == MoveStatus.PROPOSED for item in kernel.state.moves.values())
+    assert kernel.state.status == RunStatus.PAUSED
+    proposed = [item for item in kernel.state.moves.values() if item.status == MoveStatus.PROPOSED]
+    assert len(proposed) == 1
+    assert proposed[0].intent == "Establish the strongest live solution and decision map"
+    assert "Repair the failed operation" not in proposed[0].intent
 
 
-async def test_identical_consecutive_failure_stops_repair_loop(tmp_path: Path) -> None:
+async def test_resumed_infrastructure_failure_retries_without_semantic_reframing(
+    tmp_path: Path,
+) -> None:
     kernel, _runner = kernel_for(
         tmp_path,
         [
@@ -555,9 +560,12 @@ async def test_identical_consecutive_failure_stops_repair_loop(tmp_path: Path) -
         ],
     )
 
-    await kernel.run(max_steps=10)
+    await kernel.run()
+    assert kernel.state.status == RunStatus.PAUSED
+    kernel.journal.append("run.resumed", RunResumed(reason="transport restored"))
+    await kernel.run()
 
-    assert kernel.state.status == RunStatus.FAILED
-    assert kernel.state.terminal_reason == "ProviderError: transport unavailable"
-    assert len(kernel.state.moves) == 2
-    assert all(item.status == MoveStatus.FAILED for item in kernel.state.moves.values())
+    assert kernel.state.status == RunStatus.PAUSED
+    proposed = [item for item in kernel.state.moves.values() if item.status == MoveStatus.PROPOSED]
+    assert len(proposed) == 1
+    assert proposed[0].intent == "Establish the strongest live solution and decision map"

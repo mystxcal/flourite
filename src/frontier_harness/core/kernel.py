@@ -27,6 +27,7 @@ from .types import (
     Objective,
     Observation,
     ObservationKind,
+    RunPaused,
     RunStarted,
     RunState,
     RunStatus,
@@ -274,6 +275,7 @@ class IntelligenceKernel:
             "mode": directive.mode,
             "intent": directive.intent,
             "instructions": directive.instructions,
+            "retry_of_move_id": directive.retry_of_move_id,
         }
         idempotency_key = sha256_text(canonical_json(basis))
         for existing in state.moves.values():
@@ -281,6 +283,7 @@ class IntelligenceKernel:
                 return None
         move = Move(
             move_id=new_id("move"),
+            retry_of_move_id=directive.retry_of_move_id,
             based_on_workspace_id=based_on_workspace_id,
             trajectory_id=trajectory_id,
             mode=directive.mode,
@@ -334,36 +337,16 @@ class IntelligenceKernel:
         visible_observations: list[Observation],
         result: MoveExecutionResult,
     ) -> None:
-        previous_moves = sorted(
-            (
-                prior
-                for prior in self.state.moves.values()
-                if prior.move_id != move.move_id
-                and prior.trajectory_id == move.trajectory_id
-                and prior.status.terminal
-            ),
-            key=lambda prior: prior.proposed_at,
-        )
-        previous = previous_moves[-1] if previous_moves else None
-        repeated_failure = bool(
-            not result.success
-            and previous is not None
-            and previous.status == MoveStatus.FAILED
-            and previous.error == result.error
-        )
-        if not result.success and not repeated_failure:
+        if not result.success:
             result = result.model_copy(
                 update={
                     "next_move": MoveDirective(
-                        mode=MoveMode.LEAD,
-                        intent="Repair the failed operation and continue the objective",
-                        instructions=(
-                            "A runtime operation failed. Diagnose it from the exact error and "
-                            "available evidence, use tools to repair it directly, preserve useful "
-                            "work, and continue the original objective. Error: "
-                            f"{result.error or 'unknown failure'}"
-                        ),
+                        mode=move.mode,
+                        intent=move.intent,
+                        instructions=move.instructions,
                         trajectory_id=move.trajectory_id,
+                        retry_of_move_id=move.move_id,
+                        declared_ceiling=move.declared_ceiling,
                     )
                 }
             )
@@ -378,12 +361,14 @@ class IntelligenceKernel:
             actor="runtime",
             action_id=move.move_id,
         )
-        if repeated_failure and not self.state.status.terminal:
+        if not result.success and not self.state.status.terminal:
             self.journal.append(
-                "run.failed",
-                RunTerminated(
-                    status="failed",
-                    reason=result.error or "move execution failed without a reason",
+                "run.paused",
+                RunPaused(
+                    reason=(
+                        "execution paused with the original move preserved: "
+                        + (result.error or "move execution failed without a reason")
+                    )
                 ),
                 actor="runtime",
                 action_id=move.move_id,

@@ -161,7 +161,7 @@ class OmpMoveRunner:
 
         parent = self._current_artifact(state, move)
         workspace = self.adapter.open_call(
-            call_id=move.move_id,
+            call_id=self._workspace_key(move),
             call_kind=move.mode.value,
             current_artifact=parent,
         )
@@ -317,6 +317,21 @@ class OmpMoveRunner:
                 self.adapter.close_call(workspace)
 
     @staticmethod
+    def _workspace_key(move: Move) -> str:
+        """Keep the Lead's actual adapter workspace stable across epochs.
+
+        A software Lead owns one isolated worktree per trajectory.  Evaluators
+        still receive disposable projections, but construction, ignored build
+        data, and the provider's recorded cwd all survive ordinary move
+        boundaries.  The semantic move id remains separate in the execution
+        ledger and provider request.
+        """
+
+        if move.mode in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
+            return f"trajectory_{move.trajectory_id}"
+        return move.move_id
+
+    @staticmethod
     def _provider_usage(result: ProviderCallResult[Any]) -> ComputeUsage:
         return ComputeUsage(
             wall_seconds=result.duration_seconds,
@@ -417,17 +432,27 @@ class OmpMoveRunner:
         atomic_write_text(self.sessions_path, json.dumps(sessions, indent=2, sort_keys=True))
 
     def _current_artifact(self, state: RunState, move: Move) -> ArtifactRef | None:
-        workspace = state.workspaces.get(move.based_on_workspace_id or "")
-        if workspace is None:
+        trajectory = state.trajectories[move.trajectory_id]
+        if trajectory.artifact_head_id is not None:
+            return self._adapter_artifact(state, state.artifacts[trajectory.artifact_head_id])
+
+        # A new branch starts from the exact parent head visible when it forked,
+        # not from an empty seed and not from whatever the parent becomes later.
+        # base_workspace_id is the durable fork point.
+        if trajectory.parent_trajectory_id is None:
             return None
-        candidates = [
-            state.artifacts[item]
-            for item in workspace.artifact_head_ids
-            if item in state.artifacts and state.artifacts[item].trajectory_id == move.trajectory_id
+        base = state.workspaces.get(trajectory.base_workspace_id or "")
+        if base is None:
+            return None
+        parent_heads = [
+            state.artifacts[artifact_id]
+            for artifact_id in base.artifact_head_ids
+            if artifact_id in state.artifacts
+            and state.artifacts[artifact_id].trajectory_id == trajectory.parent_trajectory_id
         ]
-        if not candidates:
+        if not parent_heads:
             return None
-        return self._adapter_artifact(state, candidates[-1])
+        return self._adapter_artifact(state, parent_heads[-1])
 
     def _adapter_artifact(self, state: RunState, artifact: Any) -> ArtifactRef:
         workspace = state.current_workspace
@@ -768,11 +793,14 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
             evidence_path = self.adapter.resolve_declared_path(
                 workspace, model_observation.evidence_path
             )
-            if evidence_path.is_file():
-                raw_ref = self.adapter.blobs.put_file(
-                    evidence_path,
-                    original_name=evidence_path.name,
+            if not evidence_path.is_file():
+                raise ValueError(
+                    "evidence_path must name an existing file inside the live workspace"
                 )
+            raw_ref = self.adapter.blobs.put_file(
+                evidence_path,
+                original_name=evidence_path.name,
+            )
         challenge = (
             model_observation if isinstance(model_observation, ModelChallengeObservation) else None
         )

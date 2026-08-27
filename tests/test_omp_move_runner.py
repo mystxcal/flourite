@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from frontier_harness.adapters.generic import MarkdownAdapter
 from frontier_harness.adapters.profiles import get_profile
+from frontier_harness.adapters.software import SoftwareAdapter
 from frontier_harness.blobs import BlobStore
-from frontier_harness.config import ProviderConfig
+from frontier_harness.config import ProviderConfig, SoftwarePolicy
 from frontier_harness.core.journal import KernelJournal
 from frontier_harness.core.kernel import IntelligenceKernel
-from frontier_harness.core.types import ComputeEnvelope, RunStatus
+from frontier_harness.core.types import ComputeEnvelope, RunResumed, RunStatus
 from frontier_harness.errors import ProviderCallError
 from frontier_harness.intelligence.omp_runner import OmpMoveRunner
 from frontier_harness.ledger import EventLedger
@@ -44,12 +46,11 @@ class FakeOmpProvider:
                     {
                         "kind": "artifact",
                         "summary": "The live workspace contains the completed artifact",
-                        "evidence_path": str(request.cwd),
+                        "evidence_path": str(request.expected_artifact_path),
                     },
                     {
                         "kind": "tool",
                         "summary": "The live application was inspected in a browser",
-                        "evidence_path": "http://127.0.0.1:8080/",
                     },
                 ],
                 "finish": {
@@ -172,6 +173,154 @@ class VanishingSessionProvider(FakeOmpProvider):
         )
 
 
+class PersistentSoftwareProvider(FakeOmpProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lead_cwd: Path | None = None
+        self.challenge_cwd: Path | None = None
+        self.lead_calls = 0
+
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        self.requests.append(request)
+        if request.call_kind == "lead":
+            self.lead_calls += 1
+            if self.lead_cwd is None:
+                self.lead_cwd = request.cwd
+            assert request.cwd == self.lead_cwd
+            output = request.cwd / ".sfh_output"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "workspace.md").write_text(
+                f"# Lead epoch {self.lead_calls}\n", encoding="utf-8"
+            )
+            cache = request.cwd / "build" / "expensive.cache"
+            deliverable = request.cwd / "dist" / "film.mp4"
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            deliverable.parent.mkdir(parents=True, exist_ok=True)
+            if self.lead_calls == 1:
+                (request.cwd / "app.txt").write_text("epoch one\n", encoding="utf-8")
+                cache.write_bytes(b"expensive intermediate")
+                deliverable.write_bytes(b"film one")
+                value = {
+                    "artifact_changed": True,
+                    "workspace_summary": "first durable epoch",
+                    "observations": [],
+                    "next_move": {"mode": "lead", "intent": "refine the same artifact"},
+                }
+                thread_id = "persistent-thread"
+            else:
+                assert request.resume_thread_id == "persistent-thread"
+                assert cache.read_bytes() == b"expensive intermediate"
+                assert deliverable.read_bytes() == b"film one"
+                (request.cwd / "app.txt").write_text("epoch two\n", encoding="utf-8")
+                deliverable.write_bytes(b"film two")
+                value = {
+                    "artifact_changed": True,
+                    "workspace_summary": "second durable epoch",
+                    "observations": [],
+                    "finish": {
+                        "satisfaction_claims": ["The durable film is complete"],
+                        "residual_uncertainty": [],
+                    },
+                }
+                thread_id = "persistent-thread"
+        else:
+            assert self.lead_cwd is not None
+            self.challenge_cwd = request.cwd
+            assert request.cwd != self.lead_cwd
+            assert (request.cwd / "app.txt").read_text(encoding="utf-8") == "epoch two\n"
+            assert (request.cwd / "dist" / "film.mp4").read_bytes() == b"film two"
+            value = {
+                "artifact_changed": False,
+                "observations": [
+                    {
+                        "kind": "challenge",
+                        "summary": "The exact durable film survives independent projection",
+                        "verdict": "supports",
+                    }
+                ],
+            }
+            thread_id = None
+        return ProviderCallResult(
+            call_id=request.call_id,
+            response=request.response_model.model_validate(value),
+            usage=Usage(calls=1, model_requests=1, input_tokens=10, output_tokens=5),
+            duration_seconds=0.01,
+            thread_id=thread_id,
+            trace_summary=ProviderTraceSummary(model_turns=1),
+        )
+
+
+class InterruptedSoftwareProvider(PersistentSoftwareProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupted = False
+
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        if request.call_kind == "lead" and not self.interrupted:
+            self.requests.append(request)
+            self.interrupted = True
+            self.lead_cwd = request.cwd
+            partial = request.cwd / "build" / "partial.data"
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"irreplaceable partial work")
+            raise ProviderCallError(
+                "synthetic transport interruption",
+                usage=Usage(calls=1, model_requests=1, input_tokens=3, output_tokens=0),
+            )
+        return await super().run(request)
+
+
+class BranchingSoftwareProvider(FakeOmpProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.root_cwd: Path | None = None
+        self.branch_cwd: Path | None = None
+
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        self.requests.append(request)
+        assert request.call_kind == "lead"
+        assert request.expected_artifact_path is not None
+        request.expected_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        (request.cwd / ".sfh_output" / "workspace.md").write_text(
+            "# Current branch state\n", encoding="utf-8"
+        )
+        if self.root_cwd is None:
+            self.root_cwd = request.cwd
+            (request.cwd / "base.txt").write_text("fork point\n", encoding="utf-8")
+            request.expected_artifact_path.write_text("# Root\n", encoding="utf-8")
+            value = {
+                "artifact_changed": True,
+                "workspace_summary": "root fork point",
+                "observations": [],
+                "branches": [
+                    {
+                        "mode": "lead",
+                        "intent": "develop the independent branch",
+                        "fork_purpose": "test a materially different construction",
+                    }
+                ],
+            }
+        else:
+            self.branch_cwd = request.cwd
+            assert request.cwd != self.root_cwd
+            assert (request.cwd / "base.txt").read_text(encoding="utf-8") == "fork point\n"
+            (request.cwd / "branch.txt").write_text("branch result\n", encoding="utf-8")
+            request.expected_artifact_path.write_text("# Branch\n", encoding="utf-8")
+            value = {
+                "artifact_changed": True,
+                "workspace_summary": "independent branch result",
+                "observations": [],
+            }
+        return ProviderCallResult(
+            call_id=request.call_id,
+            response=request.response_model.model_validate(value),
+            usage=Usage(calls=1, model_requests=1, input_tokens=10, output_tokens=5),
+            duration_seconds=0.01,
+            thread_id=f"thread-{len(self.requests)}",
+            trace_summary=ProviderTraceSummary(model_turns=1),
+        )
+
+
 def test_generic_call_capsule_survives_controller_restart(tmp_path: Path) -> None:
     adapter = MarkdownAdapter(
         profile=get_profile("generic"),
@@ -223,6 +372,143 @@ async def test_omp_runner_connects_transport_adapter_and_kernel(tmp_path: Path) 
     assert provider.requests[0].preserve_session is True
     assert provider.requests[1].preserve_session is False
     assert (tmp_path / "provider-sessions.json").is_file()
+
+
+async def test_software_lead_keeps_one_live_workspace_and_durable_outputs(
+    tmp_path: Path, git_repo: Path
+) -> None:
+    (git_repo / ".gitignore").write_text("build/\ndist/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(git_repo), "add", ".gitignore"], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repo), "commit", "-m", "ignore generated data"],
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    run_dir = tmp_path / "run"
+    blobs = BlobStore(run_dir / "blobs")
+    adapter = SoftwareAdapter(
+        run_dir=run_dir,
+        blobs=blobs,
+        workspace=git_repo,
+        policy=SoftwarePolicy(release_artifacts=["dist/*.mp4"]),
+    )
+    provider = PersistentSoftwareProvider()
+    runner = OmpMoveRunner(
+        provider=provider,  # type: ignore[arg-type]
+        adapter=adapter,
+        run_dir=run_dir,
+    )
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(run_dir / "ledger.sqlite3", "run_software_lifecycle"),
+            snapshot_path=run_dir / "state.json",
+        ),
+        blobs=blobs,
+        runner=runner,
+    )
+    kernel.start("Build, refine, and verify a rendered film.")
+
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.SATISFIED
+    assert provider.lead_cwd is not None and provider.lead_cwd.is_dir()
+    assert provider.challenge_cwd is not None and not provider.challenge_cwd.exists()
+    assert (provider.lead_cwd / "build" / "expensive.cache").is_file()
+    assert [request.cwd for request in provider.requests[:2]] == [
+        provider.lead_cwd,
+        provider.lead_cwd,
+    ]
+    root = kernel.state.trajectories[kernel.state.root_trajectory_id]
+    artifact = kernel.state.artifacts[root.artifact_head_id or ""]
+    assert [item.original_name for item in artifact.deliverables] == ["dist/film.mp4"]
+    assert blobs.read_bytes(artifact.deliverables[0]) == b"film two"
+
+
+async def test_interrupted_software_move_resumes_same_workspace_without_fake_repair(
+    tmp_path: Path, git_repo: Path
+) -> None:
+    run_dir = tmp_path / "interrupted-run"
+    blobs = BlobStore(run_dir / "blobs")
+    adapter = SoftwareAdapter(
+        run_dir=run_dir,
+        blobs=blobs,
+        workspace=git_repo,
+        policy=SoftwarePolicy(),
+    )
+    provider = InterruptedSoftwareProvider()
+    runner = OmpMoveRunner(
+        provider=provider,  # type: ignore[arg-type]
+        adapter=adapter,
+        run_dir=run_dir,
+    )
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(run_dir / "ledger.sqlite3", "run_interrupted_software"),
+            snapshot_path=run_dir / "state.json",
+        ),
+        blobs=blobs,
+        runner=runner,
+    )
+    kernel.start("Finish the software artifact after any transport interruption.")
+
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.PAUSED
+    assert provider.lead_cwd is not None
+    assert (provider.lead_cwd / "build" / "partial.data").read_bytes() == (
+        b"irreplaceable partial work"
+    )
+    retry = next(item for item in kernel.state.moves.values() if item.status.value == "proposed")
+    assert retry.retry_of_move_id is not None
+    assert "repair" not in retry.intent.casefold()
+
+    kernel.journal.append("run.resumed", RunResumed(reason="transport restored"))
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.SATISFIED
+    assert provider.requests[0].cwd == provider.requests[1].cwd == provider.lead_cwd
+
+
+async def test_new_software_branch_inherits_the_exact_fork_artifact(
+    tmp_path: Path, git_repo: Path
+) -> None:
+    run_dir = tmp_path / "branch-run"
+    blobs = BlobStore(run_dir / "blobs")
+    adapter = SoftwareAdapter(
+        run_dir=run_dir,
+        blobs=blobs,
+        workspace=git_repo,
+        policy=SoftwarePolicy(),
+    )
+    provider = BranchingSoftwareProvider()
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(run_dir / "ledger.sqlite3", "run_branch_software"),
+            snapshot_path=run_dir / "state.json",
+        ),
+        blobs=blobs,
+        runner=OmpMoveRunner(
+            provider=provider,  # type: ignore[arg-type]
+            adapter=adapter,
+            run_dir=run_dir,
+        ),
+    )
+    kernel.start("Fork a software candidate from the exact current artifact.")
+
+    await kernel.run(max_steps=2)
+
+    assert provider.root_cwd is not None and provider.root_cwd.is_dir()
+    assert provider.branch_cwd is not None and provider.branch_cwd.is_dir()
+    branch = next(
+        trajectory
+        for trajectory in kernel.state.trajectories.values()
+        if trajectory.parent_trajectory_id is not None
+    )
+    assert branch.artifact_head_id is not None
+    branch_artifact = kernel.state.artifacts[branch.artifact_head_id]
+    assert len(branch_artifact.parent_artifact_ids) == 1
+    parent = kernel.state.artifacts[branch_artifact.parent_artifact_ids[0]]
+    assert parent.trajectory_id == kernel.state.root_trajectory_id
 
 
 async def test_commit_error_is_repaired_in_the_same_live_codex_workspace(

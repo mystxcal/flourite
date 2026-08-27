@@ -187,6 +187,17 @@ class AtomicMoveTransition:
     def _validate_continuation_scope(self, move: Move) -> None:
         if move.status != MoveStatus.PROPOSED:
             raise LedgerIntegrityError("move application continuation must be proposed")
+        if move.retry_of_move_id is not None:
+            retried = self.state.moves.get(move.retry_of_move_id)
+            if retried is None:
+                raise LedgerIntegrityError("move retry references a missing attempt")
+            if (
+                retried.trajectory_id != move.trajectory_id
+                or retried.mode != move.mode
+                or retried.intent != move.intent
+                or retried.instructions != move.instructions
+            ):
+                raise LedgerIntegrityError("move retry changes the semantic operation")
         trajectory = self.state.trajectories.get(move.trajectory_id)
         if move.trajectory_id not in self.index.trajectory_ids and (
             trajectory is None or trajectory.status != TrajectoryStatus.ACTIVE

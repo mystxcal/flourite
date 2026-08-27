@@ -183,10 +183,11 @@ class KernelReducer:
     @classmethod
     def _pause(cls, state: RunState, event: LedgerEvent) -> None:
         cls._require_active(state, event.event_type)
-        RunPaused.model_validate(event.payload)
+        payload = RunPaused.model_validate(event.payload)
         if state.active_move_ids:
             raise LedgerIntegrityError("run may pause only at a safe move boundary")
         state.status = RunStatus.PAUSED
+        state.terminal_reason = payload.reason
 
     @staticmethod
     def _resume(state: RunState, event: LedgerEvent) -> None:
@@ -194,6 +195,7 @@ class KernelReducer:
         if state.status != RunStatus.PAUSED:
             raise LedgerIntegrityError("only a paused run can resume")
         state.status = RunStatus.ACTIVE
+        state.terminal_reason = None
 
     @staticmethod
     def _terminate(state: RunState, event: LedgerEvent) -> None:

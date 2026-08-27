@@ -25,6 +25,7 @@ class MoveDirective(CoreModel):
     intent: str
     instructions: str = ""
     trajectory_id: str | None = None
+    retry_of_move_id: str | None = None
     fork_purpose: str | None = None
     declared_ceiling: ComputeEnvelope = Field(default_factory=ComputeEnvelope)
 
