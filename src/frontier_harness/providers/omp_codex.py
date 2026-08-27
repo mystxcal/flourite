@@ -469,7 +469,7 @@ class OmpCodexProvider(ModelProvider):
             "checkpoint.enabled": "checkpoint" in tools or "rewind" in tools,
             "inspect_image.mode": "on" if "inspect_image" in tools else "off",
             "computer.enabled": "computer" in tools,
-            "async.enabled": False,
+            "async.enabled": True,
             "task.batch": True,
             "task.enableEffort": True,
             "task.enableLsp": "lsp" in tools,

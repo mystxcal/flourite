@@ -235,7 +235,7 @@ def test_omp_provider_has_explicit_context_and_sanitized_trace(tmp_path: Path, m
     assert invocation["overlay"]["tools"]["approvalMode"] == "yolo"
     assert invocation["overlay"]["compaction"]["midTurnEnabled"] is True
     assert invocation["overlay"]["task"]["maxConcurrency"] == 4
-    assert invocation["overlay"]["async"]["enabled"] is False
+    assert invocation["overlay"]["async"]["enabled"] is True
     assert result.command[-1] == "<explicit-prompt>"
 
     manifest = json.loads((request.output_path.parent / "context-manifest.json").read_text())
