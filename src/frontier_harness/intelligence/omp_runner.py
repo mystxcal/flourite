@@ -262,34 +262,74 @@ class OmpMoveRunner:
                         return failed
                     previous_commit_error = commit_error
                     repair += 1
+                    repair_note = (
+                        "The runtime could not commit your last result. Do not explain "
+                        "or restart. Inspect the live workspace, fix the problem directly, "
+                        "and return the corrected typed result.\n\n"
+                        f"Exact error: {commit_error}"
+                    )
+                    # OMP may report an ephemeral thread id even for --no-session
+                    # calls.  Such ids cannot be resumed.  A fresh Challenger or
+                    # Navigator repair gets the full durable prompt again; only a
+                    # deliberately persistent Lead session receives a delta prompt.
+                    repair_thread = (
+                        provider_result.thread_id or sessions.get(move.trajectory_id)
+                        if request.preserve_session
+                        else None
+                    )
                     repair_request = request.model_copy(
                         update={
                             "call_id": f"{move.move_id}-repair-{repair}",
                             "prompt": (
-                                "The runtime could not commit your last result. Do not explain "
-                                "or restart. Inspect the live workspace, fix the problem directly, "
-                                "and return the corrected typed result.\n\n"
-                                f"Exact error: {commit_error}"
+                                repair_note
+                                if repair_thread
+                                else f"{request.prompt}\n\n{repair_note}"
                             ),
-                            "resume_thread_id": provider_result.thread_id
-                            or sessions.get(move.trajectory_id),
-                            "preserve_session": True,
+                            "resume_thread_id": repair_thread,
+                            "preserve_session": request.preserve_session,
                             "output_path": runtime_dir / f"response-repair-{repair}.json",
                         }
                     )
                     try:
                         provider_result = await self.provider.run(repair_request)
                     except ProviderCallError as repair_error:
-                        failed = self._provider_failure(
-                            repair_error,
-                            usage=usage.plus(self._failed_usage(repair_error)),
-                        )
-                        retain_workspace = True
-                        failed.observations.append(
-                            self._retained_workspace(workspace, repair_error)
-                        )
-                        atomic_write_text(cache_path, failed.model_dump_json(indent=2))
-                        return failed
+                        failed_repair_usage = self._failed_usage(repair_error)
+                        if repair_thread and self.provider.config.resume_fallback_to_reconstruction:
+                            usage = usage.plus(failed_repair_usage)
+                            repair_request = repair_request.model_copy(
+                                update={
+                                    "prompt": f"{request.prompt}\n\n{repair_note}",
+                                    "resume_thread_id": None,
+                                    "preserve_session": request.preserve_session,
+                                }
+                            )
+                            try:
+                                provider_result = await self.provider.run(repair_request)
+                            except ProviderCallError as reconstructed_error:
+                                failed = self._provider_failure(
+                                    reconstructed_error,
+                                    usage=usage.plus(self._failed_usage(reconstructed_error)),
+                                )
+                                retain_workspace = True
+                                failed.observations.append(
+                                    self._retained_workspace(workspace, reconstructed_error)
+                                )
+                                atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                                return failed
+                        else:
+                            failed = self._provider_failure(
+                                repair_error,
+                                usage=usage.plus(failed_repair_usage),
+                            )
+                            retain_workspace = True
+                            failed.observations.append(
+                                self._retained_workspace(workspace, repair_error)
+                            )
+                            atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                            return failed
+                    if move.mode == MoveMode.LEAD and provider_result.thread_id:
+                        sessions[move.trajectory_id] = provider_result.thread_id
+                        self._write_sessions(sessions)
             if reconstructed_session:
                 result.observations.append(
                     ObservationDraft(

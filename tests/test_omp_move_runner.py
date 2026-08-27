@@ -100,6 +100,22 @@ class CommitRepairProvider(FakeOmpProvider):
         return result
 
 
+class EphemeralChallengeRepairProvider(FakeOmpProvider):
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        result = await super().run(request)
+        if request.call_kind == "challenge" and "-repair-" not in request.call_id:
+            value = result.response.model_dump(mode="python")
+            value["observations"][0]["evidence_path"] = "/outside-the-live-workspace"
+            return result.model_copy(
+                update={
+                    "response": request.response_model.model_validate(value),
+                    # OMP can expose this even though preserve_session is false.
+                    "thread_id": "ephemeral-challenge-thread",
+                }
+            )
+        return result
+
+
 class VanishingSessionProvider(FakeOmpProvider):
     async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
         self.requests.append(request)
@@ -542,6 +558,44 @@ async def test_commit_error_is_repaired_in_the_same_live_codex_workspace(
     assert kernel.state.status == RunStatus.SATISFIED
     repair = next(item for item in provider.requests if "-repair-" in item.call_id)
     assert repair.resume_thread_id == "thread-lead"
+    assert "Exact error:" in repair.prompt
+
+
+async def test_ephemeral_challenge_repair_reconstructs_without_resuming(
+    tmp_path: Path,
+) -> None:
+    blobs = BlobStore(tmp_path / "blobs")
+    adapter = MarkdownAdapter(
+        profile=get_profile("generic"),
+        run_dir=tmp_path,
+        blobs=blobs,
+        workspace=None,
+    )
+    provider = EphemeralChallengeRepairProvider()
+    runner = OmpMoveRunner(
+        provider=provider,  # type: ignore[arg-type]
+        adapter=adapter,
+        run_dir=tmp_path,
+    )
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_challenge_repair"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=runner,
+        capabilities=["read", "write", "tools"],
+    )
+    kernel.start("Build and verify the artifact.", envelope=ComputeEnvelope(max_model_turns=20))
+
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.SATISFIED
+    repair = next(item for item in provider.requests if "-repair-" in item.call_id)
+    assert repair.call_kind == "challenge"
+    assert repair.resume_thread_id is None
+    assert repair.preserve_session is False
+    assert "The original objective is authoritative" in repair.prompt
     assert "Exact error:" in repair.prompt
 
 

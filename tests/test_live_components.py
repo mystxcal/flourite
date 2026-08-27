@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 
 from frontier_harness.config import HarnessConfig, ProviderConfig, RunPolicy
+from frontier_harness.control import CommandKind
+from frontier_harness.core.types import RunPaused
 from frontier_harness.runtime.components import ComponentRegistry
 from frontier_harness.runtime.engine import KernelEngine
 from frontier_harness.runtime.supervisor import StepSupervisor
@@ -91,6 +93,31 @@ def test_supervisor_executes_fake_run_through_disposable_workers(tmp_path: Path)
     assert len(receipts) >= 2
     assert {item["generation"] for item in receipts} == {1}
     assert all(item["outcome"] == "advanced" for item in receipts)
+
+
+def test_supervisor_executes_a_queued_resume_for_a_paused_run(tmp_path: Path) -> None:
+    config = HarnessConfig(
+        run=RunPolicy(run_root=tmp_path / "runs"),
+        provider=ProviderConfig(kind="fake"),
+    )
+    engine = KernelEngine.create(
+        "Resume through the replaceable worker boundary.",
+        config=config,
+        adapter_name="generic",
+    )
+    run_dir = engine.run_dir
+    engine.journal.append("run.paused", RunPaused(reason="synthetic interruption"))
+    engine.control.enqueue(CommandKind.RESUME)
+    ComponentRegistry(run_dir).initialize()
+    engine.close()
+
+    supervisor = StepSupervisor(run_dir)
+    try:
+        state = asyncio.run(supervisor.execute())
+    finally:
+        supervisor.close()
+
+    assert state["status"] == "satisfied"
 
 
 def test_supervisor_rolls_a_failed_replacement_back_without_touching_state(

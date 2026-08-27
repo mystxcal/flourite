@@ -68,14 +68,22 @@ class StepSupervisor:
                 while True:
                     state = self._state(self.run_dir)
                     status = str(state.get("status", "active"))
-                    if status in {
-                        "satisfied",
-                        "exhausted",
-                        "blocked",
-                        "stopped",
-                        "failed",
-                        "paused",
-                    }:
+                    pending_resume = status == "paused" and any(
+                        command.kind.value == "resume"
+                        for command in self.control.commands(pending_only=True)
+                    )
+                    if (
+                        status
+                        in {
+                            "satisfied",
+                            "exhausted",
+                            "blocked",
+                            "stopped",
+                            "failed",
+                            "paused",
+                        }
+                        and not pending_resume
+                    ):
                         return state
 
                     binding = self.registry.active()
