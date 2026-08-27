@@ -33,9 +33,7 @@ class FakeOmpProvider:
             output.mkdir(parents=True, exist_ok=True)
             assert request.expected_artifact_path is not None
             request.expected_artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            request.expected_artifact_path.write_text(
-                "# Excellent artifact\n", encoding="utf-8"
-            )
+            request.expected_artifact_path.write_text("# Excellent artifact\n", encoding="utf-8")
             (output / "workspace.md").write_text(
                 "# Current best\n\nThe artifact is complete.\n", encoding="utf-8"
             )
@@ -43,7 +41,18 @@ class FakeOmpProvider:
                 "artifact_changed": True,
                 "workspace_path": ".sfh_output/workspace.md",
                 "workspace_summary": "Complete first candidate",
-                "observations": [],
+                "observations": [
+                    {
+                        "kind": "artifact",
+                        "summary": "The live workspace contains the completed artifact",
+                        "evidence_path": str(request.cwd),
+                    },
+                    {
+                        "kind": "tool",
+                        "summary": "The live application was inspected in a browser",
+                        "evidence_path": "http://127.0.0.1:8080/",
+                    },
+                ],
                 "finish": {
                     "satisfaction_claims": ["The artifact directly satisfies the objective"],
                     "residual_uncertainty": [],

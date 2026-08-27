@@ -23,13 +23,13 @@ def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _adapter(tmp_path: Path, repo: Path, *, apply: bool = True) -> SoftwareAdapter:
+def _adapter(tmp_path: Path, repo: Path) -> SoftwareAdapter:
     run_dir = tmp_path / "run"
     return SoftwareAdapter(
         run_dir=run_dir,
         blobs=BlobStore(run_dir / "blobs"),
         workspace=repo,
-        policy=SoftwarePolicy(apply_final_patch=apply, checks=[]),
+        policy=SoftwarePolicy(checks=[]),
     )
 
 
@@ -81,12 +81,12 @@ def test_software_snapshot_isolation_capture_and_idempotent_apply(
     finally:
         adapter.close_call(verification)
 
-    first = adapter.apply_final(artifact)
+    first = adapter.apply_final_explicit(artifact)
     assert first and first["applied"] is True
     assert "model-change" in (git_repo / "app.txt").read_text()
     assert (git_repo / "new.py").exists()
 
-    second = adapter.apply_final(artifact)
+    second = adapter.apply_final_explicit(artifact)
     assert second and second["applied"] is False
     assert second["reason"] == "final patch was already applied exactly"
 
@@ -115,7 +115,7 @@ def test_apply_refuses_source_change_after_snapshot(tmp_path: Path, git_repo: Pa
 
     (git_repo / "app.txt").write_text("external change\n", encoding="utf-8")
     with pytest.raises(WorkspaceError, match="changed since the immutable snapshot"):
-        adapter.apply_final(artifact)
+        adapter.apply_final_explicit(artifact)
 
 
 def test_deterministic_checks_run_in_isolation(tmp_path: Path, git_repo: Path) -> None:
@@ -129,7 +129,6 @@ def test_deterministic_checks_run_in_isolation(tmp_path: Path, git_repo: Path) -
                 f'{shlex.quote(sys.executable)} -c "from pathlib import Path; '
                 "Path('check-side-effect').write_text('x')\""
             ],
-            apply_final_patch=False,
         ),
     )
     adapter.prepare()
@@ -167,7 +166,6 @@ def test_declared_generated_deliverable_survives_between_isolated_calls(
         workspace=git_repo,
         policy=SoftwarePolicy(
             release_artifacts=["dist/*.mp4"],
-            apply_final_patch=False,
         ),
     )
     adapter.prepare()
@@ -204,38 +202,14 @@ def test_declared_generated_deliverable_survives_between_isolated_calls(
         adapter.close_call(reopened)
 
 
-def test_worker_declared_evidence_survives_disposable_workspace_cleanup(
-    tmp_path: Path, git_repo: Path
-) -> None:
-    adapter = _adapter(tmp_path, git_repo, apply=False)
-    adapter.prepare()
-    workspace = adapter.open_call(
-        call_id="motion-study",
-        call_kind="worker-instrument",
-        current_artifact=None,
-    )
-    rendered = workspace.cwd / "build" / "failed-master.mp4"
-    rendered.parent.mkdir(parents=True)
-    rendered.write_bytes(b"valuable-negative-evidence")
-    refs = adapter.capture_evidence_artifacts(workspace, ["build/failed-master.mp4"])
-    adapter.close_call(workspace)
-
-    assert not workspace.root.exists()
-    assert len(refs) == 1
-    assert refs[0].original_name == "build/failed-master.mp4"
-    assert adapter.blobs.read_bytes(refs[0]) == b"valuable-negative-evidence"
-
-
-def test_source_only_release_check_is_promoted_to_preflight(
-    tmp_path: Path, git_repo: Path
-) -> None:
+def test_source_only_release_check_is_promoted_to_preflight(tmp_path: Path, git_repo: Path) -> None:
     command = f"{shlex.quote(sys.executable)} -c \"print('checked')\" --source-only"
     run_dir = tmp_path / "run-preflight"
     adapter = SoftwareAdapter(
         run_dir=run_dir,
         blobs=BlobStore(run_dir / "blobs"),
         workspace=git_repo,
-        policy=SoftwarePolicy(checks=[command], apply_final_patch=False),
+        policy=SoftwarePolicy(checks=[command]),
     )
     adapter.prepare()
     workspace = adapter.open_call(
@@ -256,8 +230,6 @@ def test_source_only_release_check_is_promoted_to_preflight(
     finally:
         adapter.close_call(workspace)
 
-    contract = adapter.verification_contract()
-    assert any(item["stage"] == "preflight" for item in contract["checks"])
     evidence = adapter.staged_checks(artifact, stage="preflight")
     assert len(evidence) == 1
     assert evidence[0].negative_result is False
@@ -274,7 +246,6 @@ def test_deterministic_checks_resolve_python_from_harness_environment(
         workspace=git_repo,
         policy=SoftwarePolicy(
             checks=['python -c "import sys; assert sys.executable"'],
-            apply_final_patch=False,
         ),
     )
     adapter.prepare()
@@ -301,46 +272,10 @@ def test_deterministic_checks_resolve_python_from_harness_environment(
     assert not evidence[0].negative_result
 
 
-def test_runtime_owned_objective_measurement_is_parsed_and_preserved(
-    tmp_path: Path, git_repo: Path
-) -> None:
-    run_dir = tmp_path / "run"
-    command = f"{shlex.quote(sys.executable)} -c " + shlex.quote(
-        'print(\'{"metrics":{"score":12.5,"latency":3},"valid":true}\')'
-    )
-    adapter = SoftwareAdapter(
-        run_dir=run_dir,
-        blobs=BlobStore(run_dir / "blobs"),
-        workspace=git_repo,
-        policy=SoftwarePolicy(
-            objective={
-                "command": command,
-                "primary_metric": "score",
-                "direction": "maximize",
-            }
-        ),
-    )
-    adapter.prepare()
-    workspace = adapter.open_call(
-        call_id="objective",
-        call_kind="worker-explore",
-        current_artifact=None,
-    )
-    try:
-        measured = adapter.measure_candidate(workspace)
-    finally:
-        adapter.close_call(workspace)
-    assert measured is not None
-    assert measured.valid
-    assert measured.metrics == {"score": 12.5, "latency": 3.0}
-    assert measured.evidence_blob is not None
-    assert adapter.blobs.read_text(measured.evidence_blob).strip().endswith("}")
-
-
 def test_candidate_artifact_carries_a_complete_lineage_state(
     tmp_path: Path, git_repo: Path
 ) -> None:
-    adapter = _adapter(tmp_path, git_repo, apply=False)
+    adapter = _adapter(tmp_path, git_repo)
     adapter.prepare()
     first = adapter.open_call(
         call_id="lineage-one",
@@ -376,7 +311,7 @@ def test_runtime_inside_source_repo_is_not_snapshotted(tmp_path: Path, git_repo:
         run_dir=run_dir,
         blobs=BlobStore(run_dir / "blobs"),
         workspace=git_repo,
-        policy=SoftwarePolicy(apply_final_patch=False),
+        policy=SoftwarePolicy(),
     )
     metadata = adapter.prepare()
     assert metadata["source_was_dirty"] is False
@@ -405,7 +340,6 @@ def test_include_untracked_false_is_consistent_through_apply(
         workspace=git_repo,
         policy=SoftwarePolicy(
             include_untracked=False,
-            apply_final_patch=True,
             checks=[],
         ),
     )
@@ -434,7 +368,7 @@ def test_include_untracked_false_is_consistent_through_apply(
 
     # Untracked content is outside the declared artifact contract when disabled.
     ignored.write_text("changed locally\n", encoding="utf-8")
-    result = adapter.apply_final(artifact)
+    result = adapter.apply_final_explicit(artifact)
     assert result and result["applied"] is True
     assert (git_repo / "app.txt").read_text(encoding="utf-8") == "changed\n"
     assert ignored.read_text(encoding="utf-8") == "changed locally\n"

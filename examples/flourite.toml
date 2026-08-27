@@ -1,7 +1,6 @@
 # Flourite configuration
 
 [run]
-adapter = "generic"
 run_root = ".flourite/runs"
 
 [kernel]
@@ -22,8 +21,6 @@ provider_state_root = "~/.cache/flourite/provider"
 default_model = "gpt-5.6-sol"
 schema_attempts = 2
 timeout_seconds = 1800
-persist_lead_sessions = true
-resume_lead_sessions = true
 resume_fallback_to_reconstruction = true
 default_network_access = true
 
@@ -50,12 +47,5 @@ candidate_checks = []
 checks = []
 check_timeout_seconds = 900
 include_untracked = true
-apply_final_patch = false
 release_artifacts = []
 max_release_artifact_bytes = 250000000
-
-[software.objective]
-# command = "python evaluate.py --json"
-primary_metric = "score"
-direction = "maximize"
-timeout_seconds = 900

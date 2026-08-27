@@ -10,7 +10,6 @@ import select
 import subprocess
 import sys
 import time
-from abc import ABC, abstractmethod
 from bisect import bisect_right
 from datetime import UTC, datetime
 from pathlib import Path
@@ -144,7 +143,7 @@ def _short(value: str, limit: int) -> str:
     return clean if len(clean) <= limit else clean[: max(1, limit - 1)] + "…"
 
 
-class LiveDashboard(ABC):
+class KernelLiveDashboard:
     """Full-screen, detachable view backed by durable run sidecars."""
 
     def __init__(
@@ -165,37 +164,134 @@ class LiveDashboard(ABC):
         self.activity_cursor: int | None = None
         self.activity_page_size = 1
 
-    @abstractmethod
     def _state(self) -> KernelRunState:
-        """Load the disposable projection rendered by this dashboard."""
+        return KernelRunState.model_validate_json(
+            (self.run_dir / KernelEngine.STATE_FILE).read_text(encoding="utf-8")
+        )
 
     @staticmethod
-    @abstractmethod
     def _terminal_label(state: KernelRunState) -> str | None:
-        """Return a terminal label, if the run is terminal."""
+        return state.status.value if state.status.terminal else None
 
     @staticmethod
-    @abstractmethod
     def _effective_status(state: KernelRunState, runtime: RuntimeSnapshot) -> str:
-        """Resolve semantic and process state into one operator label."""
+        if state.status.terminal:
+            return state.status.value
+        if runtime.process_alive:
+            return runtime.status.value
+        if runtime.status == RuntimeStatus.FAILED:
+            return "failed"
+        if runtime.status == RuntimeStatus.STOPPED:
+            return "stopped"
+        if state.status.value == "paused":
+            return "paused"
+        return "resting"
 
     @staticmethod
-    @abstractmethod
     def _summary_row_count(state: KernelRunState) -> int:
-        """Return the vertical size of the summary projection."""
+        return 7 + int(state.finish_claim is not None) + int(bool(state.terminal_reason))
 
-    @abstractmethod
     def _summary(self, state: KernelRunState, runtime: RuntimeSnapshot) -> Table:
-        """Build the compact run summary."""
+        table = Table.grid(expand=True, padding=(0, 1))
+        table.add_column(style="flourite.muted", no_wrap=True)
+        table.add_column(style="flourite.ice")
+        table.add_column(style="flourite.muted", no_wrap=True)
+        table.add_column(style="flourite.ice", justify="right")
+        proposed = sum(item.status.value == "proposed" for item in state.moves.values())
+        envelope = state.objective.envelope
+        model_turns = str(state.usage.model_turns)
+        if envelope.max_model_turns is not None:
+            model_turns += f"/{envelope.max_model_turns}"
+        table.add_row(
+            "state",
+            state.status.value,
+            "runtime",
+            self._effective_status(state, runtime).replace("_", " "),
+        )
+        table.add_row("elapsed", _elapsed(runtime.started_at), "model turns", model_turns)
+        table.add_row(
+            "tokens",
+            f"{state.usage.input_tokens:,} in · {state.usage.output_tokens:,} out",
+            "tools",
+            str(state.usage.tool_calls),
+        )
+        table.add_row(
+            "moves",
+            f"{len(state.active_move_ids)} running · {proposed} queued · {len(state.moves)} total",
+            "observations",
+            str(len(state.observations)),
+        )
+        table.add_row(
+            "trajectories",
+            f"{len(state.trajectories)} live/history",
+            "artifacts",
+            str(len(state.artifacts)),
+        )
+        table.add_row(
+            "current",
+            _short(
+                state.current_workspace.summary
+                if state.current_workspace is not None
+                else "establishing the first live result",
+                58,
+            ),
+            "workspace",
+            state.current_workspace_id or "—",
+        )
+        table.add_row(
+            "controller",
+            _short(runtime.detail or "—", 46),
+            "pid",
+            str(runtime.pid or "—"),
+        )
+        if state.finish_claim is not None:
+            table.add_row(
+                "finish claim",
+                _short(" · ".join(state.finish_claim.satisfaction_claims), 58),
+                "challenge",
+                "verified" if state.status.value == "satisfied" else "pending",
+            )
+        if state.terminal_reason:
+            table.add_row("reason", _short(state.terminal_reason, 58), "", "")
+        return table
 
     @staticmethod
-    @abstractmethod
     def _frontier(state: KernelRunState) -> Table:
-        """Build the live decision frontier."""
+        table = Table(
+            box=box.SIMPLE,
+            show_edge=False,
+            expand=True,
+            padding=(0, 1),
+            header_style="flourite.blue",
+            border_style="flourite.line",
+        )
+        table.add_column("state", width=10, no_wrap=True)
+        table.add_column("live trajectory / next move")
+        table.add_column("head", width=18, no_wrap=True)
+        rows = 0
+        for trajectory in state.trajectories.values():
+            table.add_row(
+                trajectory.status.value,
+                _short(trajectory.purpose, 62),
+                trajectory.artifact_head_id or "—",
+            )
+            rows += 1
+        for move in state.moves.values():
+            if move.status.value != "proposed":
+                continue
+            table.add_row("queued", _short(move.intent, 62), move.mode.value)
+            rows += 1
+        if not rows:
+            table.add_row("—", "reconstructing the next decision", "—")
+        return table
 
-    @abstractmethod
     def _activity_limit(self, state: KernelRunState) -> int:
-        """Return the activity rows available at the current terminal size."""
+        if self.console.width >= 110:
+            return max(1, self.console.height - 6)
+        frontier_rows = max(1, min(8, len(state.trajectories) + 2))
+        command_rows = max(1, min(5, len(self.control.commands())))
+        fixed_rows = self._summary_row_count(state) + frontier_rows + command_rows + 14
+        return max(1, self.console.height - fixed_rows)
 
     def _activity_rows(self, limit: int) -> list[Any]:
         rows = self.control.recent_activity(limit=self.control.MAX_ACTIVITY_ROWS)
@@ -508,146 +604,12 @@ class LiveDashboard(ABC):
             self.flash = str(exc)
 
 
-class KernelLiveDashboard(LiveDashboard):
-    """The same operator surface projected from the phase-free kernel."""
-
-    def _state(self) -> KernelRunState:
-        return KernelRunState.model_validate_json(
-            (self.run_dir / KernelEngine.STATE_FILE).read_text(encoding="utf-8")
-        )
-
-    @staticmethod
-    def _terminal_label(state: KernelRunState) -> str | None:
-        return state.status.value if state.status.terminal else None
-
-    @staticmethod
-    def _effective_status(state: KernelRunState, runtime: RuntimeSnapshot) -> str:
-        if state.status.terminal:
-            return state.status.value
-        if runtime.process_alive:
-            return runtime.status.value
-        if runtime.status == RuntimeStatus.FAILED:
-            return "failed"
-        if runtime.status == RuntimeStatus.STOPPED:
-            return "stopped"
-        if state.status.value == "paused":
-            return "paused"
-        return "resting"
-
-    @staticmethod
-    def _summary_row_count(state: KernelRunState) -> int:
-        return 7 + int(state.finish_claim is not None) + int(bool(state.terminal_reason))
-
-    def _summary(self, state: KernelRunState, runtime: RuntimeSnapshot) -> Table:
-        table = Table.grid(expand=True, padding=(0, 1))
-        table.add_column(style="flourite.muted", no_wrap=True)
-        table.add_column(style="flourite.ice")
-        table.add_column(style="flourite.muted", no_wrap=True)
-        table.add_column(style="flourite.ice", justify="right")
-        proposed = sum(item.status.value == "proposed" for item in state.moves.values())
-        running = len(state.active_move_ids)
-        envelope = state.objective.envelope
-        model_turns = str(state.usage.model_turns)
-        if envelope.max_model_turns is not None:
-            model_turns += f"/{envelope.max_model_turns}"
-        table.add_row(
-            "state",
-            state.status.value,
-            "runtime",
-            self._effective_status(state, runtime).replace("_", " "),
-        )
-        table.add_row("elapsed", _elapsed(runtime.started_at), "model turns", model_turns)
-        table.add_row(
-            "tokens",
-            f"{state.usage.input_tokens:,} in · {state.usage.output_tokens:,} out",
-            "tools",
-            str(state.usage.tool_calls),
-        )
-        table.add_row(
-            "moves",
-            f"{running} running · {proposed} queued · {len(state.moves)} total",
-            "observations",
-            str(len(state.observations)),
-        )
-        table.add_row(
-            "trajectories",
-            f"{len(state.trajectories)} live/history",
-            "artifacts",
-            str(len(state.artifacts)),
-        )
-        table.add_row(
-            "current",
-            _short(
-                state.current_workspace.summary
-                if state.current_workspace is not None
-                else "establishing the first live result",
-                58,
-            ),
-            "workspace",
-            state.current_workspace_id or "—",
-        )
-        table.add_row(
-            "controller",
-            _short(runtime.detail or "—", 46),
-            "pid",
-            str(runtime.pid or "—"),
-        )
-        if state.finish_claim is not None:
-            table.add_row(
-                "finish claim",
-                _short(" · ".join(state.finish_claim.satisfaction_claims), 58),
-                "challenge",
-                "verified" if state.status.value == "satisfied" else "pending",
-            )
-        if state.terminal_reason:
-            table.add_row("reason", _short(state.terminal_reason, 58), "", "")
-        return table
-
-    @staticmethod
-    def _frontier(state: KernelRunState) -> Table:
-        table = Table(
-            box=box.SIMPLE,
-            show_edge=False,
-            expand=True,
-            padding=(0, 1),
-            header_style="flourite.blue",
-            border_style="flourite.line",
-        )
-        table.add_column("state", width=10, no_wrap=True)
-        table.add_column("live trajectory / next move")
-        table.add_column("head", width=18, no_wrap=True)
-        rows = 0
-        for trajectory in state.trajectories.values():
-            table.add_row(
-                trajectory.status.value,
-                _short(trajectory.purpose, 62),
-                trajectory.artifact_head_id or "—",
-            )
-            rows += 1
-        for move in state.moves.values():
-            if move.status.value != "proposed":
-                continue
-            table.add_row("queued", _short(move.intent, 62), move.mode.value)
-            rows += 1
-        if not rows:
-            table.add_row("—", "reconstructing the next decision", "—")
-        return table
-
-    def _activity_limit(self, state: KernelRunState) -> int:
-        if self.console.width >= 110:
-            return max(1, self.console.height - 6)
-        frontier_rows = max(1, min(8, len(state.trajectories) + 2))
-        command_rows = max(1, min(5, len(self.control.commands())))
-        fixed_rows = self._summary_row_count(state) + frontier_rows + command_rows + 14
-        return max(1, self.console.height - fixed_rows)
-
-
 def open_live_dashboard(
     run_ref: str,
     *,
     run_root: Path | None,
     console: Console,
-) -> LiveDashboard:
+) -> KernelLiveDashboard:
     run_dir = KernelEngine.resolve_run_dir(run_ref, run_root=run_root)
     manifest = json.loads((run_dir / KernelEngine.MANIFEST_FILE).read_text(encoding="utf-8"))
     if manifest.get("architecture") != KernelEngine.ARCHITECTURE:

@@ -17,9 +17,7 @@ run.resumed
 run.satisfied | run.exhausted | run.blocked | run.stopped | run.failed
 ```
 
-The reducer still understands fine-grained `observation.recorded`,
-`artifact.committed`, `workspace.committed`, and `move.finished` events for
-explicit internal construction and compatibility. External model/tool work uses
+External model/tool work uses
 `move.applied` so all of its semantic meaning commits atomically.
 
 A `move.applied` payload may contain observations, an artifact, a workspace,

@@ -1,6 +1,6 @@
-"""Portable run exports.
+"""Portable kernel run exports.
 
-Two deliberately different modes avoid a misleading middle ground:
+Two modes avoid a misleading middle ground:
 
 * diagnostic: redacted, human-readable state and events plus artifacts;
 * audit: exact ledger, blob store, sources, and retained capsules.
@@ -21,8 +21,6 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from .engine import FrontierEngine
-from .models import ArtifactRef
 from .util import atomic_write_text, canonical_json, redact_secrets
 
 if TYPE_CHECKING:
@@ -36,22 +34,6 @@ def _write_json(path: Path, value: object, *, redact: bool) -> None:
     if redact:
         text = redact_secrets(text)
     atomic_write_text(path, text)
-
-
-def _materialize_artifact(
-    engine: FrontierEngine,
-    artifact: ArtifactRef,
-    destination: Path,
-    *,
-    redact: bool,
-) -> None:
-    if not redact:
-        engine.blobs.materialize(artifact.blob, destination)
-        return
-    # All built-in artifact adapters currently emit UTF-8 Markdown or Git
-    # patches. Redact the content itself rather than merely redacting metadata.
-    text = engine.blobs.read_bytes(artifact.blob).decode("utf-8", errors="replace")
-    atomic_write_text(destination, redact_secrets(text))
 
 
 def _write_symlink(bundle: zipfile.ZipFile, path: Path, archive_name: str) -> None:
@@ -82,106 +64,13 @@ def _archive_tree(bundle: zipfile.ZipFile, root: Path) -> None:
                 bundle.write(path, archive_name)
 
 
-def export_run(
-    engine: FrontierEngine,
-    destination: Path,
-    *,
-    mode: ExportMode = "diagnostic",
-) -> Path:
-    destination = destination.expanduser().resolve()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="sfh-export-") as temp:
-        root = Path(temp) / f"{engine.state.run_id}-{mode}"
-        root.mkdir(parents=True)
-        redact = mode == "diagnostic" and engine.config.run.export_redacts_secrets
-
-        _write_json(
-            root / "export-manifest.json",
-            {
-                "run_id": engine.state.run_id,
-                "mode": mode,
-                "redacted": redact,
-                "integrity_note": (
-                    "This diagnostic export is transformed and should not be used to verify the local hash chain."
-                    if mode == "diagnostic"
-                    else "This audit export contains the exact ledger and content-addressed blobs."
-                ),
-                "privacy_note": (
-                    "Credential-pattern redaction is best-effort. The bundle may still contain private or identifying content."
-                    if mode == "diagnostic"
-                    else "The audit bundle is intentionally lossless and must be handled as sensitive data."
-                ),
-            },
-            redact=False,
-        )
-        _write_json(
-            root / "state.json",
-            engine.state.model_dump(mode="json"),
-            redact=redact,
-        )
-        _write_json(
-            root / "config.json",
-            engine.config.model_dump(mode="json"),
-            redact=redact,
-        )
-        if (engine.run_dir / engine.SEAL_FILE).exists():
-            shutil.copy2(engine.run_dir / engine.SEAL_FILE, root / "seal.json")
-
-        events_path = root / "events.jsonl"
-        lines: list[str] = []
-        for event in engine.events():
-            line = canonical_json(event.model_dump(mode="json"))
-            lines.append(redact_secrets(line) if redact else line)
-        atomic_write_text(events_path, "\n".join(lines) + "\n")
-
-        artifacts_dir = root / "artifacts"
-        artifacts_dir.mkdir()
-        for artifact in engine.state.artifact_history:
-            suffix = ".patch" if artifact.kind == "git-patch" else ".md"
-            _materialize_artifact(
-                engine,
-                artifact,
-                artifacts_dir / f"v{artifact.version:03d}-{artifact.artifact_id}{suffix}",
-                redact=redact,
-            )
-        if engine.state.final_artifact is not None:
-            suffix = ".patch" if engine.state.final_artifact.kind == "git-patch" else ".md"
-            _materialize_artifact(
-                engine,
-                engine.state.final_artifact,
-                root / f"final{suffix}",
-                redact=redact,
-            )
-
-        if mode == "audit":
-            engine.ledger.backup(root / engine.LEDGER_FILE)
-            for name in ("blobs", "sources", "capsules", "software"):
-                source = engine.run_dir / name
-                if source.exists():
-                    shutil.copytree(source, root / name, symlinks=True)
-            warning = (
-                "AUDIT EXPORT: This bundle is lossless and may contain credentials, private source files, "
-                "prompts, and raw model/tool traces. Handle it as sensitive data.\n"
-            )
-            atomic_write_text(root / "SENSITIVE.txt", warning)
-
-        archive = destination
-        if archive.suffix.casefold() != ".zip":
-            archive = archive.with_suffix(".zip")
-        tmp_archive = archive.with_name(f".{archive.name}.tmp")
-        with zipfile.ZipFile(tmp_archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-            _archive_tree(bundle, root)
-        tmp_archive.replace(archive)
-        return archive
-
-
 def export_kernel_run(
     engine: KernelEngine,
     destination: Path,
     *,
     mode: ExportMode = "diagnostic",
 ) -> Path:
-    """Export the canonical kernel without translating it into legacy state."""
+    """Export the canonical kernel directly from its journal projection."""
 
     destination = destination.expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -211,10 +100,7 @@ def export_kernel_run(
         )
         _write_json(root / "state.json", engine.state.model_dump(mode="json"), redact=redact)
         _write_json(root / "config.json", engine.config.model_dump(mode="json"), redact=redact)
-        lines = [
-            canonical_json(event.model_dump(mode="json"))
-            for event in engine.journal.events()
-        ]
+        lines = [canonical_json(event.model_dump(mode="json")) for event in engine.journal.events()]
         if redact:
             lines = [redact_secrets(line) for line in lines]
         atomic_write_text(root / "events.jsonl", "\n".join(lines) + "\n")
@@ -234,7 +120,6 @@ def export_kernel_run(
                 "sources",
                 "kernel-executions",
                 "provider-sessions",
-                "lead-session",
             ):
                 source = engine.run_dir / name
                 if source.is_dir():
@@ -246,7 +131,11 @@ def export_kernel_run(
                 "AUDIT EXPORT: lossless private run material; do not publish without review.\n",
             )
 
-        archive = destination if destination.suffix.casefold() == ".zip" else destination.with_suffix(".zip")
+        archive = (
+            destination
+            if destination.suffix.casefold() == ".zip"
+            else destination.with_suffix(".zip")
+        )
         tmp_archive = archive.with_name(f".{archive.name}.tmp")
         with zipfile.ZipFile(tmp_archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
             _archive_tree(bundle, root)

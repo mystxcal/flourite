@@ -68,8 +68,9 @@ flourite doctor
 flourite init flourite.toml
 ```
 
-`doctor` checks the provider, ChatGPT authentication, model, and configured
-tools without spending a model token. The generated configuration works as-is;
+`doctor` checks OMP, ChatGPT authentication, and the configured model without
+spending a model token. Actual tool availability is proven by the first real
+move instead of inferred from CLI error text. The generated configuration works as-is;
 the annotated version is in [examples/flourite.toml](examples/flourite.toml).
 
 ## Run a task
@@ -234,8 +235,8 @@ The important current sections are:
 - `[provider.strong]` — model and reasoning effort;
 - `[software]` — domain checks, deliverables, and explicit apply behavior.
 
-Existing configuration fields for pre-kernel runs still parse for replay
-compatibility, but they do not govern new runs.
+Unknown configuration fields fail immediately; Flourite does not carry a
+second set of inert compatibility knobs.
 
 ## Compared with
 

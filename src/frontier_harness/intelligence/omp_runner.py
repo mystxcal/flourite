@@ -2,13 +2,12 @@
 
 The provider remains a transport. The model sees the exact objective, a compact
 workspace, direct artifact access, and raw evidence handles; it does not inherit
-the legacy controller ontology.
+any second controller ontology.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -137,10 +136,7 @@ class OmpMoveRunner:
         self.activity_callback = activity_callback
         self.executions_dir = run_dir / "kernel-executions"
         self.sessions_path = run_dir / "provider-sessions.json"
-        self.lead_cwd = run_dir / "lead-session"
         self.executions_dir.mkdir(parents=True, exist_ok=True)
-        self.lead_cwd.mkdir(parents=True, exist_ok=True)
-        self.adapter.prepare()
 
     async def preflight(self) -> str | None:
         """Return a concrete provider-readiness failure before any move is spent."""
@@ -199,7 +195,6 @@ class OmpMoveRunner:
                 max_provider_calls=self.provider.config.schema_attempts,
                 metadata={
                     "provider_session_dir": self.run_dir / "provider-sessions",
-                    "provider_lead_cwd": self.lead_cwd / move.trajectory_id,
                     "recovering": recovering,
                 },
                 activity_callback=self.activity_callback,
@@ -210,11 +205,7 @@ class OmpMoveRunner:
                 provider_result = await self.provider.run(request)
             except ProviderCallError as exc:
                 failed_resume_usage = self._failed_usage(exc)
-                if (
-                    thread_id
-                    and self.provider.config.resume_fallback_to_reconstruction
-                    and self._session_is_unavailable(str(exc))
-                ):
+                if thread_id and self.provider.config.resume_fallback_to_reconstruction:
                     sessions.pop(move.trajectory_id, None)
                     self._write_sessions(sessions)
                     reconstructed_session = True
@@ -274,17 +265,6 @@ class OmpMoveRunner:
             return result
         finally:
             self.adapter.close_call(workspace)
-
-    @staticmethod
-    def _session_is_unavailable(message: str) -> bool:
-        return bool(
-            re.search(
-                r"(?:(?:session|thread).{0,100}(?:not found|does not exist|unknown|missing|invalid)"
-                r"|no (?:such )?(?:session|thread)|resume.{0,100}(?:not found|unknown session))",
-                message,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
-        )
 
     @staticmethod
     def _failed_usage(error: ProviderCallError) -> ComputeUsage:
@@ -364,7 +344,7 @@ class OmpMoveRunner:
         workspace = state.current_workspace
         return ArtifactRef(
             artifact_id=artifact.artifact_id,
-            version=int(artifact.metadata.get("legacy_version", len(state.artifacts))),
+            version=int(artifact.metadata.get("adapter_version", len(state.artifacts))),
             blob=artifact.content_ref,
             kind=str(artifact.metadata.get("kind", self.adapter.artifact_kind)),
             summary=workspace.summary if workspace is not None else "current artifact",
@@ -535,6 +515,7 @@ Open the actual artifact, source, and raw evidence whenever the decision depends
 
 Move intent: {move.intent}
 Move instructions: {move.instructions or "Use your judgment."}
+Domain lens: {self.adapter.guidance or "Use the exact objective and direct evidence."}
 
 Use your tools and do real work. Do not spend the move narrating a process, manufacturing
 ceremony, or merely proposing work you can perform now. Preserve inconvenient evidence.
@@ -643,7 +624,7 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
                 content_ref=candidate.blob,
                 parent_artifact_ids=[parent.artifact_id] if parent else [],
                 deliverables=candidate.deliverables,
-                metadata={"kind": candidate.kind, "legacy_version": candidate.version},
+                metadata={"kind": candidate.kind, "adapter_version": candidate.version},
             ),
             candidate,
         )
@@ -698,10 +679,11 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
             evidence_path = self.adapter.resolve_declared_path(
                 workspace, model_observation.evidence_path
             )
-            raw_ref = self.adapter.blobs.put_file(
-                evidence_path,
-                original_name=evidence_path.name,
-            )
+            if evidence_path.is_file():
+                raw_ref = self.adapter.blobs.put_file(
+                    evidence_path,
+                    original_name=evidence_path.name,
+                )
         challenge = (
             model_observation if isinstance(model_observation, ModelChallengeObservation) else None
         )

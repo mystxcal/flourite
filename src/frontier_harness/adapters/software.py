@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import fnmatch
 import json
-import math
 import mimetypes
 import os
 import re
@@ -19,7 +18,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -33,7 +31,6 @@ from ..models import (
     EvidenceModality,
     EvidenceRecord,
     IndependenceClass,
-    ObjectiveMeasurement,
 )
 from ..util import atomic_write_text, canonical_json, sha256_bytes, utc_now
 from .base import ArtifactAdapter, CallWorkspace
@@ -42,14 +39,7 @@ from .base import ArtifactAdapter, CallWorkspace
 class SoftwareAdapter(ArtifactAdapter):
     name = "software"
     artifact_kind = "git-patch"
-    is_software = True
-    supports_explicit_apply = True
     final_suffix = ".patch"
-    engine_cleans_call_workspace = False
-
-    @property
-    def objective_enabled(self) -> bool:
-        return bool(self.policy.objective.command)
 
     def __init__(
         self,
@@ -450,7 +440,9 @@ class SoftwareAdapter(ArtifactAdapter):
         for pattern in patterns:
             pattern_path = Path(pattern)
             if pattern_path.is_absolute() or ".." in pattern_path.parts:
-                raise WorkspaceError(f"Declared {label} path must stay workspace-relative: {pattern}")
+                raise WorkspaceError(
+                    f"Declared {label} path must stay workspace-relative: {pattern}"
+                )
             for path in sorted(workspace.cwd.glob(pattern)):
                 if not path.is_file():
                     continue
@@ -486,57 +478,6 @@ class SoftwareAdapter(ArtifactAdapter):
             label="release artifacts",
         )
 
-    def capture_evidence_artifacts(
-        self, workspace: CallWorkspace, declared_paths: list[str]
-    ) -> list[BlobRef]:
-        return self._capture_paths(
-            workspace,
-            declared_paths,
-            label="evidence artifacts",
-        )
-
-    def verification_contract(self) -> dict[str, Any]:
-        inferred_preflight = [
-            command
-            for command in self.policy.checks
-            if re.search(r"(?:^|\s)--source-only(?:\s|$)", command)
-            and command not in self.policy.preflight_checks
-        ]
-        return {
-            "authority": (
-                "The runtime executes these exact checks and artifact patterns. "
-                "Model summaries cannot override them."
-            ),
-            "checks": [
-                {
-                    "command": command,
-                    "stage": stage,
-                    "timeout_seconds": self.policy.check_timeout_seconds,
-                }
-                for stage, commands in (
-                    ("preflight", [*self.policy.preflight_checks, *inferred_preflight]),
-                    ("candidate", self.policy.candidate_checks),
-                    (
-                        "release",
-                        [
-                            command
-                            for command in self.policy.checks
-                            if command not in inferred_preflight
-                        ],
-                    ),
-                )
-                for command in commands
-            ],
-            "release_artifact_patterns": list(self.policy.release_artifacts),
-            "objective": self.policy.objective.model_dump(mode="json"),
-            "excluded_source_globs": list(self.policy.excluded_untracked_globs),
-            "operating_rule": (
-                "Inspect and reconcile this contract before expensive production. Run the "
-                "cheapest applicable check against the earliest candidate; a path, schema, "
-                "or command mismatch is a design defect, not end-stage cleanup."
-            ),
-        }
-
     def capture_artifact(
         self,
         workspace: CallWorkspace,
@@ -571,24 +512,6 @@ class SoftwareAdapter(ArtifactAdapter):
             created_at=utc_now(),
         )
 
-    def capture_worker_result(self, workspace: CallWorkspace, declared_path: str) -> BlobRef:
-        path = self.resolve_declared_path(workspace, declared_path)
-        if not path.is_file():
-            raise FileNotFoundError(f"Worker result reference does not exist: {declared_path}")
-        return self.blobs.put_file(path, original_name=path.name)
-
-    def capture_worker_patch(self, workspace: CallWorkspace) -> BlobRef | None:
-        if workspace.baseline_commit is None:
-            return None
-        patch = self._diff(workspace, workspace.baseline_commit)
-        if not patch.strip():
-            return None
-        return self.blobs.put_bytes(
-            patch,
-            media_type="text/x-diff; charset=utf-8",
-            original_name=f"{workspace.call_id}.patch",
-        )
-
     def capture_candidate_artifact(
         self,
         workspace: CallWorkspace,
@@ -616,78 +539,6 @@ class SoftwareAdapter(ArtifactAdapter):
             created_at=utc_now(),
         )
 
-    def measure_candidate(self, workspace: CallWorkspace) -> ObjectiveMeasurement | None:
-        policy = self.policy.objective
-        if not policy.command:
-            return None
-        started = time.monotonic()
-        exit_code: int | None = None
-        output = ""
-        detail = ""
-        metrics: dict[str, float] = {}
-        violations: list[str] = []
-        valid = False
-        try:
-            result = subprocess.run(
-                policy.command,
-                cwd=workspace.cwd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=policy.timeout_seconds,
-                env=self._check_env(),
-                check=False,
-            )
-            exit_code = result.returncode
-            output = result.stdout.decode("utf-8", errors="replace")
-            lines = [line.strip() for line in output.splitlines() if line.strip()]
-            raw = json.loads(lines[-1]) if lines else {}
-            if not isinstance(raw, dict):
-                raise ValueError("objective result must be a JSON object")
-            raw_metrics = raw.get("metrics", raw)
-            if not isinstance(raw_metrics, dict):
-                raise ValueError("objective metrics must be a JSON object")
-            ignored = {"valid", "constraint_violations", "detail"}
-            for key, value in raw_metrics.items():
-                if key in ignored or isinstance(value, bool) or not isinstance(value, int | float):
-                    continue
-                numeric = float(value)
-                if not math.isfinite(numeric):
-                    raise ValueError(f"objective metric is not finite: {key}")
-                metrics[str(key)] = numeric
-            raw_violations = raw.get("constraint_violations", [])
-            if isinstance(raw_violations, list):
-                violations = [str(item) for item in raw_violations]
-            valid = bool(raw.get("valid", True)) and exit_code == 0 and not violations
-            if policy.primary_metric not in metrics:
-                valid = False
-                detail = f"missing primary metric: {policy.primary_metric}"
-            else:
-                detail = str(raw.get("detail", "objective measured"))
-        except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or b"").decode("utf-8", errors="replace")
-            detail = f"objective timed out after {policy.timeout_seconds}s"
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            detail = f"invalid objective output: {exc}"
-        elapsed = time.monotonic() - started
-        log = self.blobs.put_text(
-            output,
-            media_type="text/plain; charset=utf-8",
-            original_name=f"{workspace.call_id}-objective.log",
-        )
-        return ObjectiveMeasurement(
-            primary_metric=policy.primary_metric,
-            direction=policy.direction,
-            metrics=metrics,
-            valid=valid,
-            constraint_violations=violations,
-            command=policy.command,
-            exit_code=exit_code,
-            wall_seconds=elapsed,
-            evidence_blob=log,
-            detail=detail,
-        )
-
     def close_call(self, workspace: CallWorkspace) -> None:
         self._git(
             self.seed_repo,
@@ -696,14 +547,6 @@ class SoftwareAdapter(ArtifactAdapter):
         )
         shutil.rmtree(workspace.root, ignore_errors=True)
         self._git(self.seed_repo, ["worktree", "prune"], check=False)
-
-    def artifact_text(self, artifact: ArtifactRef) -> str:
-        patch = self.blobs.read_text(artifact.blob)
-        return (
-            f"Software artifact {artifact.artifact_id}, patch version {artifact.version}.\n"
-            "The patch is relative to the immutable starting workspace snapshot.\n\n"
-            + (patch if patch.strip() else "(empty patch: baseline repository is the artifact)\n")
-        )
 
     def materialize_final(self, artifact: ArtifactRef, destination: Path) -> Path:
         return self.blobs.materialize(artifact.blob, destination)
@@ -797,9 +640,7 @@ class SoftwareAdapter(ArtifactAdapter):
         ]
         return self._run_checks(artifact, commands=commands, stage="release")
 
-    def apply_final(self, artifact: ArtifactRef) -> dict[str, Any] | None:
-        if not self.policy.apply_final_patch:
-            return None
+    def apply_final_explicit(self, artifact: ArtifactRef) -> dict[str, Any] | None:
         source_root, _ = self._require_prepared()
         current_fingerprint = self._fingerprint(source_root)
         expected_post_fingerprint = self._expected_source_fingerprint(artifact)
@@ -870,11 +711,3 @@ class SoftwareAdapter(ArtifactAdapter):
             "starting_fingerprint": self.source_fingerprint,
             "post_fingerprint": post_fingerprint,
         }
-
-    def apply_final_explicit(self, artifact: ArtifactRef) -> dict[str, Any] | None:
-        previous = self.policy.apply_final_patch
-        self.policy.apply_final_patch = True
-        try:
-            return self.apply_final(artifact)
-        finally:
-            self.policy.apply_final_patch = previous

@@ -63,15 +63,14 @@ def _read_task(task: str | None, task_file: Path | None) -> str:
 
 def _kernel_overrides(
     *,
-    adapter: str,
     run_root: Path | None,
     max_wall_seconds: float | None,
     max_model_turns: int | None,
     max_parallel: int | None = None,
 ) -> dict[str, Any]:
-    data: dict[str, Any] = {"run": {"adapter": adapter}}
+    data: dict[str, Any] = {}
     if run_root is not None:
-        data["run"]["run_root"] = str(run_root)
+        data["run"] = {"run_root": str(run_root)}
     kernel: dict[str, Any] = {}
     if max_wall_seconds is not None:
         kernel["max_wall_seconds"] = max_wall_seconds
@@ -157,7 +156,6 @@ def _create_engine(
     fake: bool,
 ) -> KernelEngine:
     overrides = _kernel_overrides(
-        adapter=adapter,
         run_root=run_root,
         max_wall_seconds=max_wall_seconds,
         max_model_turns=max_model_turns,
@@ -329,92 +327,6 @@ def run(
         table.add_row("state", str(engine.run_dir))
         console.print(table)
     _run_engine(engine, output, quiet=quiet)
-
-
-@app.command("legacy-run", hidden=True)
-def legacy_run(
-    task: Annotated[str | None, typer.Argument(help="Task text; omit to read stdin.")] = None,
-    task_file: Annotated[Path | None, typer.Option("--task-file")] = None,
-    adapter: Annotated[str, typer.Option("--adapter", "-a")] = "generic",
-    workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
-    source: Annotated[list[Path] | None, typer.Option("--source", "-s")] = None,
-    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
-    config_path: Annotated[Path | None, typer.Option("--config", "-c")] = None,
-    run_root: Annotated[Path | None, typer.Option("--run-root")] = None,
-    fake: Annotated[bool, typer.Option("--fake")] = False,
-) -> None:
-    """Run the retired controller for controlled compatibility comparisons."""
-
-    from .engine import FrontierEngine
-
-    overrides: dict[str, Any] = {"run": {"adapter": adapter}}
-    if run_root is not None:
-        overrides["run"]["run_root"] = str(run_root)
-    if fake:
-        overrides["provider"] = {"kind": "fake"}
-    config = load_config(config_path, overrides=overrides)
-    if adapter == "software" and workspace is None:
-        raise typer.BadParameter("--workspace is required for the software adapter")
-    engine = FrontierEngine.create(
-        _read_task(task, task_file),
-        config=config,
-        adapter_name=adapter,
-        workspace=workspace,
-        sources=source or [],
-    )
-    try:
-        path = asyncio.run(engine.execute(output_path=output))
-        console.print(path)
-    finally:
-        engine.close()
-
-
-@app.command("evolution-check", hidden=True)
-def evolution_check(
-    candidate_path: Annotated[Path, typer.Argument(help="Pre-registered harness candidate JSON.")],
-    trials_path: Annotated[
-        Path, typer.Argument(help="Matched-budget shadow and held-out trial JSON.")
-    ],
-    as_json: Annotated[bool, typer.Option("--json", help="Print the decision as JSON.")] = False,
-) -> None:
-    """Apply the fail-closed held-out promotion gate without running new trials."""
-
-    from .evolution import HarnessCandidate, HarnessPromotionGate, HarnessTrial
-
-    candidate = HarnessCandidate.model_validate_json(candidate_path.read_text(encoding="utf-8"))
-    raw_trials = json.loads(trials_path.read_text(encoding="utf-8"))
-    if isinstance(raw_trials, dict):
-        raw_trials = raw_trials.get("trials", [])
-    if not isinstance(raw_trials, list):
-        raise typer.BadParameter("trials JSON must be a list or an object containing 'trials'")
-    trials = [HarnessTrial.model_validate(item) for item in raw_trials]
-    decision = HarnessPromotionGate().evaluate(candidate, trials)
-    if as_json:
-        console.print_json(json.dumps(decision.model_dump(mode="json")))
-    else:
-        print_brand(console, compact=True)
-        console.print(
-            phase_line(
-                "promotion",
-                "eligible" if decision.promotable else "withheld",
-                state="done" if decision.promotable else "warn",
-            )
-        )
-        for lane, record in (
-            ("shadow", decision.shadow_record),
-            ("held out", decision.held_out_record),
-        ):
-            console.print(
-                phase_line(
-                    lane,
-                    " · ".join(f"{key} {value}" for key, value in record.items()),
-                    state="muted",
-                )
-            )
-        for reason in decision.reasons:
-            console.print(phase_line("blocked", reason, state="warn"))
-    if not decision.promotable:
-        raise typer.Exit(2)
 
 
 @app.command()

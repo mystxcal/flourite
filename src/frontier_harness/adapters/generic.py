@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..blobs import BlobStore
 from ..ids import new_id
-from ..models import ArtifactRef, BlobRef
+from ..models import ArtifactRef
 from ..util import utc_now
 from .base import ArtifactAdapter, CallWorkspace
 from .profiles import AdapterProfile
@@ -28,6 +28,7 @@ class MarkdownAdapter(ArtifactAdapter):
         super().__init__(run_dir=run_dir, blobs=blobs, workspace=workspace)
         self.profile = profile
         self.name = profile.name
+        self.guidance = profile.guidance
 
     def prepare(self) -> dict[str, object]:
         (self.run_dir / "capsules").mkdir(parents=True, exist_ok=True)
@@ -55,8 +56,7 @@ class MarkdownAdapter(ArtifactAdapter):
         if current_artifact is not None:
             if current_artifact.kind != self.artifact_kind:
                 raise ValueError(
-                    f"Expected {self.artifact_kind} recovery artifact, got "
-                    f"{current_artifact.kind}"
+                    f"Expected {self.artifact_kind} recovery artifact, got {current_artifact.kind}"
                 )
             self.blobs.materialize(current_artifact.blob, expected_artifact)
         return CallWorkspace(
@@ -101,16 +101,6 @@ class MarkdownAdapter(ArtifactAdapter):
             created_at=utc_now(),
         )
 
-    def capture_worker_result(
-        self, workspace: CallWorkspace, declared_path: str
-    ) -> BlobRef:
-        path = self.resolve_declared_path(workspace, declared_path)
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"Worker result reference does not exist: {declared_path!r}"
-            )
-        return self.blobs.put_file(path, original_name=path.name)
-
     def capture_candidate_artifact(
         self,
         workspace: CallWorkspace,
@@ -141,9 +131,6 @@ class MarkdownAdapter(ArtifactAdapter):
         # Capsules are intentionally retained by default. The engine may remove
         # them after capture when configured; the adapter owns no extra handles.
         return None
-
-    def artifact_text(self, artifact: ArtifactRef) -> str:
-        return self.blobs.read_text(artifact.blob)
 
     def materialize_final(self, artifact: ArtifactRef, destination: Path) -> Path:
         return self.blobs.materialize(artifact.blob, destination)

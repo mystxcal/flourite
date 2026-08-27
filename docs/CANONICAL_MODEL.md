@@ -251,9 +251,8 @@ src/frontier_harness/
 - a second completion path outside the canonical reducer;
 - hidden resource grants that can strand unused operator compute.
 
-The old controller remains available only through the hidden `legacy-run`
-compatibility command for controlled comparisons. Ordinary commands neither
-import it nor branch through its state model.
+There is no compatibility controller or alternate state model. Every command
+enters the same kernel, reducer, and journal.
 
 ## Open frontier
 

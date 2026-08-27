@@ -477,15 +477,15 @@ class KernelEngine:
             path = destination or (self.run_dir / "current.md")
             self.blobs.materialize(workspace.document_ref, path)
             return path
-        legacy = self._legacy_artifact(self.state.artifacts[artifact_id])
+        adapter_artifact = self._adapter_artifact(self.state.artifacts[artifact_id])
         path = destination or (self.run_dir / f"current{self.adapter.final_suffix}")
-        return self.adapter.materialize_final(legacy, path)
+        return self.adapter.materialize_final(adapter_artifact, path)
 
-    def _legacy_artifact(self, artifact: ArtifactVersion) -> ArtifactRef:
+    def _adapter_artifact(self, artifact: ArtifactVersion) -> ArtifactRef:
         workspace = self.state.current_workspace
         return ArtifactRef(
             artifact_id=artifact.artifact_id,
-            version=int(artifact.metadata.get("legacy_version", len(self.state.artifacts))),
+            version=int(artifact.metadata.get("adapter_version", len(self.state.artifacts))),
             blob=artifact.content_ref,
             kind=str(artifact.metadata.get("kind", self.adapter.artifact_kind)),
             summary=workspace.summary if workspace is not None else "current artifact",
@@ -504,7 +504,7 @@ class KernelEngine:
         if root.artifact_head_id is None:
             raise ValueError("run has no root artifact to apply")
         return self.adapter.apply_final_explicit(
-            self._legacy_artifact(self.state.artifacts[root.artifact_head_id])
+            self._adapter_artifact(self.state.artifacts[root.artifact_head_id])
         )
 
     def verify(self) -> tuple[int, str]:

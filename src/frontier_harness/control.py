@@ -254,9 +254,7 @@ class RunControlPlane:
         )
 
     def commands(self, *, pending_only: bool = False) -> list[ControlCommand]:
-        predicate = (
-            "AND COALESCE(r.status, 'queued') = 'queued'" if pending_only else ""
-        )
+        predicate = "AND COALESCE(r.status, 'queued') = 'queued'" if pending_only else ""
         rows = self._connection.execute(
             f"""
             SELECT c.*, COALESCE(r.status, 'queued') AS receipt_status,
@@ -434,8 +432,6 @@ class RunControlPlane:
             started_at=str(row["started_at"]) if row["started_at"] else None,
             updated_at=str(row["updated_at"]),
             current_call_id=str(row["current_call_id"]) if row["current_call_id"] else None,
-            current_action_id=(
-                str(row["current_action_id"]) if row["current_action_id"] else None
-            ),
+            current_action_id=(str(row["current_action_id"]) if row["current_action_id"] else None),
             detail=str(row["detail"]),
         )

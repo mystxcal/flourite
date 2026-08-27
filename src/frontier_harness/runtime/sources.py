@@ -49,8 +49,7 @@ def stage_sources(
     def excluded(relative: str) -> bool:
         normalized = relative.replace("\\", "/")
         return any(
-            fnmatch.fnmatch(normalized, pattern)
-            or fnmatch.fnmatch(f"{normalized}/", pattern)
+            fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(f"{normalized}/", pattern)
             for pattern in excluded_globs
         )
 

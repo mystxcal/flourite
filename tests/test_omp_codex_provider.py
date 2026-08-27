@@ -14,7 +14,6 @@ from frontier_harness.models import Role, SandboxPolicy
 from frontier_harness.providers.base import ProviderCallRequest
 from frontier_harness.providers.omp_codex import (
     OmpCodexProvider,
-    _extract_json_object,
     _safe_event,
     _trace_summary,
 )
@@ -289,6 +288,9 @@ def test_resumed_lead_receives_hashed_context_delta(tmp_path: Path, monkeypatch)
     (context / "TASK_SOURCE.json").write_text('{"task": "stable"}\n', encoding="utf-8")
 
     first = asyncio.run(provider.run(request))
+    first_manifest = json.loads((request.output_path.parent / "context-manifest.json").read_text())
+    assert first_manifest["omp_cwd"] == str(request.cwd.resolve())
+    assert first_manifest["call_workspace"] == str(request.cwd.resolve())
     (context / "STATE.json").write_text('{"round": 1}\n', encoding="utf-8")
     (context / "EVIDENCE.md").write_text("new evidence\n", encoding="utf-8")
     second_output = request.output_path.parent / "boundary-second.json"
@@ -491,30 +493,6 @@ def test_omp_provider_doctor_rejects_an_unavailable_configured_model(
     doctor = asyncio.run(provider.doctor())
     assert doctor.ok is False
     assert "model-that-does-not-exist" in doctor.details[-1]
-
-
-def test_legacy_codex_config_migrates_to_clean_transport() -> None:
-    config = ProviderConfig.model_validate(
-        {
-            "kind": "codex-cli",
-            "command": "codex",
-            "ignore_rules": False,
-            "approval_policy": "on-request",
-        }
-    )
-    assert config.kind == "omp-codex"
-    assert config.command == "omp"
-    assert config.capabilities.mode == "trusted"
-
-
-def test_legacy_sandbox_flag_migrates_to_contained_mode() -> None:
-    config = ProviderConfig.model_validate({"use_os_sandbox": True})
-    assert config.capabilities.mode == "contained"
-
-
-def test_extract_json_object_accepts_fenced_or_embedded_json() -> None:
-    assert _extract_json_object('```json\n{"a": 1}\n```') == {"a": 1}
-    assert _extract_json_object('prefix {"a": 2} suffix') == {"a": 2}
 
 
 def test_safe_event_drops_provider_replay_material() -> None:

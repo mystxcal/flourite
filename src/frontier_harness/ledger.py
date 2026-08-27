@@ -103,8 +103,7 @@ class EventLedger:
             # Existing ledgers predate explicit envelope versioning. Version 1
             # retains their original hash material exactly; new writes use v2.
             self._connection.execute(
-                "ALTER TABLE events ADD COLUMN event_schema_version "
-                "INTEGER NOT NULL DEFAULT 1"
+                "ALTER TABLE events ADD COLUMN event_schema_version INTEGER NOT NULL DEFAULT 1"
             )
 
     def close(self) -> None:

@@ -1,6 +1,6 @@
 # Flourite intelligence kernel
 
-Status: redesign contract. This document defines the target before implementation.
+Status: implemented architecture and design rationale.
 
 ## 1. The outcome
 
@@ -606,43 +606,9 @@ Controls are pause, resume, stop and steer. Steering becomes an immutable
 observation and is visible to the Lead at the next safe boundary. A crash or
 reconnect must not discard it.
 
-## 14. What survives the current codebase
+## 14. Implemented shape
 
-### Keep and harden
-
-- content-addressed blob storage;
-- append-only SQLite event storage and hash verification;
-- provider transport, tool execution and usage traces;
-- run locking and basic control inbox;
-- source staging and explicit, fingerprint-checked apply;
-- artifact adapters' domain-specific staging, capture and checks;
-- operator-facing observability primitives.
-
-### Replace
-
-- the current `FrontierEngine` control flow;
-- the 100-plus-class semantic model;
-- separate obligation, crux, spine, overlay and completion authorities;
-- action ranking as the arbiter of whether useful work exists;
-- active-call horizons and synthesis/repair reserves as hard gates;
-- Summit and permanent archive policy in the universal path;
-- separate semantic-CI, release and repair state machines;
-- duplicated state authority across engine fields, runtime projections and
-  persisted models.
-
-### Re-express as capabilities
-
-- frontier planning becomes Lead or Navigator workspace work;
-- critique becomes a Challenger move;
-- completion cases become finish claims with evidence;
-- semantic regression becomes artifact-native observation;
-- repair becomes an ordinary construction move;
-- branching, debate, search and population methods become optional trajectories;
-- memory and retrieval become decision-triggered tools.
-
-## 15. Implementation shape
-
-The first executable slice should contain only:
+The executable system contains only:
 
 ```text
 Objective
@@ -660,46 +626,26 @@ Observer/challenger runner
 Kernel loop
 ```
 
-The intended source shape is similarly small:
+The source shape is:
 
 ```text
 core/types.py        canonical data contracts
 core/reducer.py      event -> RunState, and nothing else
 core/kernel.py       the one transition loop
-cognition/context.py objective/workspace/evidence navigation
-cognition/lead.py    persistent Lead calls
-cognition/reflect.py fresh Navigator and Challenger calls
-runtime/moves.py     idempotent move execution and recovery
-runtime/journal.py   ledger, leases, snapshots and replay
-environment/         adapters, tools and task-native observations
-interface/           CLI, controls and live projections
+intelligence/        context · model runner · result compiler
+runtime/engine.py    lifecycle · commands · recovery · materialization
+providers/           OMP transport · safe events · usage accounting
+adapters/            task-native artifacts · checks · explicit apply
+cli.py + live.py     commands and disposable operator projection
 ```
 
 Dependencies point inward. The core does not import a domain adapter, provider,
 CLI or named evaluation strategy. Cognitive modes depend on the core contracts;
 the runtime supplies concrete providers and environments.
 
-The slice must run one end-to-end task, survive interruption and reopen after a
-failed completion challenge before any optional search algorithm or memory
-backend is migrated.
-
-The old controller remains available only as a comparison until this vertical
-slice passes its gates. New semantic features are not added to the old path.
-
-### Migration order
-
-1. Add the new contracts, reducer and property tests without changing the old
-   CLI path.
-2. Run a generic text task through the new journal, Lead loop and completion
-   challenge using a fake provider and crash injection.
-3. Attach the existing Codex provider and generic/software environments.
-4. Reproduce the sparse-video failure: the challenger rejects, the Workspace
-   learns, and construction resumes with the real remaining envelope.
-5. Move pause/resume/stop/steer and live observability to the new projection.
-6. Make the new kernel the default, retain an explicit legacy command for
-   comparison, then delete the old cognitive controller after parity evidence.
-7. Add optional trajectories through the same atomic transition; add cross-run
-   memory and policy evolution only after held-out evidence supports them.
+Dependencies point inward. The core never imports a provider, adapter, CLI, or
+named evaluation strategy. There is one executable controller and one durable
+state model.
 
 ## 16. Discriminative acceptance tests
 

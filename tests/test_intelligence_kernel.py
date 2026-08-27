@@ -514,9 +514,7 @@ async def test_repeated_low_information_lead_moves_trigger_fresh_navigation(
 
     await kernel.run(max_steps=3)
 
-    proposed = [
-        item for item in kernel.state.moves.values() if item.status.value == "proposed"
-    ]
+    proposed = [item for item in kernel.state.moves.values() if item.status.value == "proposed"]
     assert len(proposed) == 1
     assert proposed[0].mode == MoveMode.NAVIGATE
     signals = [

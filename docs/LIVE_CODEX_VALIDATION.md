@@ -16,7 +16,7 @@ capability contract digest
 
 ## Required checks
 
-1. `flourite doctor` accepts the installed OMP model and tool catalogs without spending model tokens.
+1. `flourite doctor` accepts the installed OMP model catalog and ChatGPT authentication without spending model tokens.
 2. A live worker reads, edits, executes, and verifies a file inside its exact workspace.
 3. A synchronous `task` delegation returns a child result before the parent boundary and nested usage is counted.
 4. A persistent Lead records a thread ID; a later epoch resumes it from another capsule and receives an accurate context delta.

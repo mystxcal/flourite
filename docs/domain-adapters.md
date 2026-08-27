@@ -14,7 +14,7 @@ Included profiles:
 All domains retain the same core shape:
 
 ```text
-exact task → artifact → obligations/cruxes → actions/evidence → integration → synthesis → release
+exact task → workspace → move/evidence → integrated artifact → direct challenge
 ```
 
 Domain-specific executable evidence should outrank generic model judgment when available.

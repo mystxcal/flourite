@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..blobs import BlobStore
-from ..models import ArtifactRef, BlobRef, EvidenceRecord, ObjectiveMeasurement
+from ..models import ArtifactRef, EvidenceRecord
 
 if TYPE_CHECKING:
     from .profiles import AdapterProfile
@@ -31,10 +31,8 @@ class ArtifactAdapter(ABC):
     name = "base"
     artifact_kind = "unknown"
     profile: AdapterProfile | None = None
-    is_software = False
-    supports_explicit_apply = False
+    guidance = ""
     final_suffix = ".md"
-    engine_cleans_call_workspace = True
 
     def __init__(
         self,
@@ -46,10 +44,6 @@ class ArtifactAdapter(ABC):
         self.run_dir = run_dir
         self.blobs = blobs
         self.workspace = workspace
-
-    @property
-    def objective_enabled(self) -> bool:
-        return False
 
     @abstractmethod
     def prepare(self) -> dict[str, Any]:
@@ -78,13 +72,6 @@ class ArtifactAdapter(ABC):
     ) -> ArtifactRef:
         """Capture the call's integrated artifact into the blob store."""
 
-    @abstractmethod
-    def capture_worker_result(self, workspace: CallWorkspace, declared_path: str) -> BlobRef:
-        """Capture a worker result referenced by its minimal envelope."""
-
-    def capture_worker_patch(self, workspace: CallWorkspace) -> BlobRef | None:
-        return None
-
     def capture_candidate_artifact(
         self,
         workspace: CallWorkspace,
@@ -97,18 +84,9 @@ class ArtifactAdapter(ABC):
 
         return None
 
-    def measure_candidate(self, workspace: CallWorkspace) -> ObjectiveMeasurement | None:
-        """Measure a candidate with a domain-owned objective, when configured."""
-
-        return None
-
     @abstractmethod
     def close_call(self, workspace: CallWorkspace) -> None:
         """Release temporary resources. Durable capsules may remain by policy."""
-
-    @abstractmethod
-    def artifact_text(self, artifact: ArtifactRef) -> str:
-        """Return a controller-readable representation of the current artifact."""
 
     @abstractmethod
     def materialize_final(self, artifact: ArtifactRef, destination: Path) -> Path:
@@ -121,21 +99,6 @@ class ArtifactAdapter(ABC):
         """Run explicitly cheap checks at an intermediate artifact boundary."""
 
         return []
-
-    def verification_contract(self) -> dict[str, Any]:
-        """Expose exact adapter-owned acceptance machinery to every model call."""
-
-        return {}
-
-    def capture_evidence_artifacts(
-        self, workspace: CallWorkspace, declared_paths: list[str]
-    ) -> list[BlobRef]:
-        """Durably preserve model-declared diagnostic outputs before cleanup."""
-
-        return []
-
-    def apply_final(self, artifact: ArtifactRef) -> dict[str, Any] | None:
-        return None
 
     def apply_final_explicit(self, artifact: ArtifactRef) -> dict[str, Any] | None:
         """Apply a final artifact under explicit operator authority, if supported."""

@@ -14,7 +14,6 @@ import asyncio
 import base64
 import json
 import os
-import re
 import shutil
 import signal
 import time
@@ -48,38 +47,6 @@ _CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 _PROVIDER_READ_CHUNK_BYTES = 64 * 1024
 _PROVIDER_MAX_EVENT_BYTES = 32 * 1024 * 1024
-
-
-def _extract_json_object(text: str) -> Any:
-    """Recover one JSON value from a strict, fenced, or lightly wrapped response."""
-
-    stripped = text.strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        pass
-
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if len(lines) >= 3 and lines[-1].strip() == "```":
-            candidate = "\n".join(lines[1:-1])
-            if candidate.lstrip().startswith("json"):
-                candidate = candidate.lstrip()[4:].lstrip("\r\n")
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                pass
-
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(stripped):
-        if char not in "[{":
-            continue
-        try:
-            value, _ = decoder.raw_decode(stripped[index:])
-            return value
-        except json.JSONDecodeError:
-            continue
-    raise ProviderError("Provider final response was not valid JSON")
 
 
 def _jwt_expiry(token: str) -> int | None:
@@ -294,8 +261,6 @@ class DoctorProbe:
     models_code: int
     available_models: frozenset[str]
     missing_models: tuple[str, ...]
-    missing_tools: tuple[str, ...]
-    configured_tool_count: int
     contained: bool
     sandbox_ready: bool
 
@@ -307,7 +272,6 @@ class DoctorProbe:
                 self.models_code == 0,
                 bool(self.available_models),
                 not self.missing_models,
-                not self.missing_tools,
                 self.sandbox_ready,
             )
         )
@@ -316,7 +280,6 @@ class DoctorProbe:
         details = [
             "ChatGPT OAuth is readable through the explicit OMP Codex transport.",
             f"Codex catalog exposed {len(self.available_models)} compatible model(s).",
-            f"OMP accepted all {self.configured_tool_count} configured tool capability name(s).",
             (
                 "Contained capability mode is active with a reduced tool and filesystem surface."
                 if self.contained
@@ -328,10 +291,6 @@ class DoctorProbe:
             details.append("OMP could not resolve a usable openai-codex model catalog.")
         if self.missing_models:
             details.append(f"Configured model(s) are unavailable: {', '.join(self.missing_models)}")
-        if self.missing_tools:
-            details.append(
-                "Configured OMP tool(s) are unavailable: " + ", ".join(self.missing_tools)
-            )
         if not self.sandbox_ready:
             details.append(
                 "Bubblewrap is required while provider.capabilities.mode is 'contained'."
@@ -457,7 +416,6 @@ class OmpCodexProvider(ModelProvider):
             (route.model or self.config.default_model).removeprefix("openai-codex/")
             for route in (self.config.strong, self.config.worker, self.config.cheap)
         }
-        supported_tools = await self._supported_tools(token=token)
         contained = self.config.capabilities.mode == "contained"
         return DoctorProbe(
             version=version if isinstance(version, str) else None,
@@ -465,59 +423,9 @@ class OmpCodexProvider(ModelProvider):
             models_code=models_code,
             available_models=available,
             missing_models=tuple(sorted(configured - available)),
-            missing_tools=tuple(sorted(set(self.config.capabilities.tools) - supported_tools)),
-            configured_tool_count=len(self.config.capabilities.tools),
             contained=contained,
             sandbox_ready=not contained or shutil.which("bwrap") is not None,
         )
-
-    async def _supported_tools(self, *, token: str) -> set[str]:
-        """Ask the installed OMP binary to validate the configured tool surface.
-
-        OMP's documented/source tool catalog can drift from the installed
-        executable. Appending one impossible sentinel makes its CLI return the
-        exact effective catalog without spending a model call.
-        """
-
-        capabilities = self.config.capabilities
-        agent_dir = self.config.provider_state_root.expanduser() / "doctor"
-        overlay_path = agent_dir / "omp-tool-probe.json"
-        overlay = self._runtime_overlay_for_tools(
-            set(capabilities.tools),
-            network_effective=(
-                capabilities.mode == "trusted" or self.config.default_network_access
-            ),
-        )
-        atomic_write_text(overlay_path, json.dumps(overlay, indent=2, sort_keys=True))
-        model = self.config.strong.model or self.config.default_model
-        if "/" not in model:
-            model = f"openai-codex/{model}"
-        requested = [*capabilities.tools, "__frontier_tool_probe__"]
-        args = [
-            "--print",
-            "--mode",
-            "json",
-            "--model",
-            model,
-            "--cwd",
-            str(agent_dir),
-            "--tools",
-            ",".join(requested),
-            "--config",
-            str(overlay_path),
-            "--no-session",
-            "--no-rules",
-            "--no-skills",
-            "--no-extensions",
-            "--max-time",
-            "1s",
-            "capability probe",
-        ]
-        code, output = await self._run_short(args, token=token)
-        match = re.search(r"^CliUsageError:.*Valid tools: (.+?)\.\s*$", output, re.MULTILINE)
-        if code == 0 or match is None:
-            raise ProviderError("OMP did not return a parseable effective tool catalog")
-        return {item.strip() for item in match.group(1).split(",") if item.strip()}
 
     def _tool_names(self, request: ProviderCallRequest[Any]) -> list[str]:
         if self.config.capabilities.mode == "trusted":
@@ -899,7 +807,11 @@ class OmpCodexProvider(ModelProvider):
             schema=schema,
             context_delta=context_delta,
         )
-        omp_cwd = self._provider_cwd(request, session_dir)
+        # A persistent conversation does not imply a persistent filesystem.
+        # Every move's adapter workspace is the sole writable artifact state.
+        # Keeping a second "lead cwd" made successful work invisible to the
+        # adapter and could discard an entire long-running call at capture.
+        omp_cwd = request.cwd.resolve()
         omp_cwd.mkdir(parents=True, exist_ok=True)
         agent_dir = session_dir / "agent"
         agent_dir.mkdir(parents=True, exist_ok=True)
@@ -998,16 +910,6 @@ class OmpCodexProvider(ModelProvider):
             "is load-bearing.\n"
             "</frontier_context_delta>\n\n"
         )
-
-    @staticmethod
-    def _provider_cwd(request: ProviderCallRequest[Any], session_dir: Path) -> Path:
-        if request.preserve_session or request.resume_thread_id:
-            return (
-                Path(request.metadata.get("provider_lead_cwd", session_dir / "lead-workspace"))
-                .expanduser()
-                .resolve()
-            )
-        return request.cwd.resolve()
 
     def _call_manifest(
         self,
@@ -1283,8 +1185,8 @@ class OmpCodexProvider(ModelProvider):
                 },
             )
         try:
-            response = call.request.response_model.model_validate(_extract_json_object(raw_final))
-        except (ValidationError, ProviderError) as exc:
+            response = call.request.response_model.model_validate_json(raw_final)
+        except ValidationError as exc:
             error = str(exc)
             return AttemptDecision(
                 status="schema_invalid",

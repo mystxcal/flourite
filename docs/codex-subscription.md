@@ -21,7 +21,7 @@ The host is the security boundary. Use a machine the model is allowed to control
 
 ## Contained mode
 
-`provider.capabilities.mode = "contained"` keeps the older reduced tool and filesystem surface and requires Bubblewrap. It is useful when the operator values isolation over the full execution ceiling. Legacy `use_os_sandbox` settings migrate to the corresponding capability mode.
+`provider.capabilities.mode = "contained"` uses a reduced tool and filesystem surface and requires Bubblewrap. It is useful when the operator values isolation over the full execution ceiling.
 
 ## Accounting
 

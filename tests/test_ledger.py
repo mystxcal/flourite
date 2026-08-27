@@ -66,7 +66,7 @@ def test_existing_v1_ledger_migrates_without_changing_hashes(tmp_path: Path) -> 
         connection.execute("DROP TRIGGER events_no_update")
         connection.execute("DROP TRIGGER events_no_delete")
         connection.execute("UPDATE events SET event_schema_version = 1")
-        legacy_material = json.dumps(
+        v1_material = json.dumps(
             {
                 "action_id": first.action_id,
                 "actor": first.actor,
@@ -83,15 +83,15 @@ def test_existing_v1_ledger_migrates_without_changing_hashes(tmp_path: Path) -> 
         )
         import hashlib
 
-        legacy_hash = hashlib.sha256(legacy_material.encode("utf-8")).hexdigest()
-        connection.execute("UPDATE events SET event_hash = ?", (legacy_hash,))
+        v1_hash = hashlib.sha256(v1_material.encode("utf-8")).hexdigest()
+        connection.execute("UPDATE events SET event_hash = ?", (v1_hash,))
         connection.commit()
     finally:
         connection.close()
 
     reopened = EventLedger(path, "run_test")
     try:
-        assert reopened.verify() == (1, legacy_hash)
+        assert reopened.verify() == (1, v1_hash)
         event = reopened.last_event()
         assert event is not None
         assert event.event_schema_version == 1

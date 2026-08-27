@@ -6,7 +6,6 @@ from collections.abc import Iterable
 
 from ..errors import LedgerIntegrityError
 from ..ledger import LedgerEvent
-from .legacy_events import LEGACY_MOVE_EVENTS, LegacyMoveTransition
 from .transition import AtomicMoveTransition, CompletionValidator
 from .types import (
     FinishClaimed,
@@ -65,8 +64,6 @@ class KernelReducer:
         handler = handlers.get(event.event_type)
         if handler is not None:
             handler(next_state, event)
-        elif event.event_type in LEGACY_MOVE_EVENTS:
-            LegacyMoveTransition(next_state, event).apply()
         else:
             raise LedgerIntegrityError(f"unknown canonical event type: {event.event_type}")
         next_state.last_event_seq = event.seq

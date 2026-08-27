@@ -259,7 +259,10 @@ class RunState(CoreModel):
     def validate_references(self) -> RunState:
         if self.root_trajectory_id not in self.trajectories:
             raise ValueError("root trajectory is missing")
-        if self.current_workspace_id is not None and self.current_workspace_id not in self.workspaces:
+        if (
+            self.current_workspace_id is not None
+            and self.current_workspace_id not in self.workspaces
+        ):
             raise ValueError("current workspace is missing")
         if any(move_id not in self.moves for move_id in self.active_move_ids):
             raise ValueError("active move is missing")
@@ -284,30 +287,6 @@ class MoveProposed(CoreModel):
 class MoveStarted(CoreModel):
     move_id: str
     started_at: str
-
-
-class ObservationRecorded(CoreModel):
-    observation: Observation
-
-
-class ArtifactCommitted(CoreModel):
-    artifact: ArtifactVersion
-
-
-class WorkspaceCommitted(CoreModel):
-    workspace: WorkspaceVersion
-    activate: bool = True
-
-
-class MoveFinished(CoreModel):
-    move_id: str
-    success: bool
-    finished_at: str
-    usage_delta: ComputeUsage = Field(default_factory=ComputeUsage)
-    observation_ids: list[str] = Field(default_factory=list)
-    artifact_ids: list[str] = Field(default_factory=list)
-    workspace_id: str | None = None
-    error: str | None = None
 
 
 class MoveApplied(CoreModel):
@@ -340,8 +319,10 @@ class MoveApplied(CoreModel):
             raise ValueError("successful move application cannot carry an error")
         if not self.success and not self.error:
             raise ValueError("failed move application requires an error")
-        continuations = int(self.finish_claim is not None) + int(bool(self.next_moves)) + int(
-            self.blocked_reason is not None
+        continuations = (
+            int(self.finish_claim is not None)
+            + int(bool(self.next_moves))
+            + int(self.blocked_reason is not None)
         )
         if continuations > 1:
             raise ValueError("move application may choose only one continuation")

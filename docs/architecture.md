@@ -1,18 +1,33 @@
 # Architecture overview
 
-V3.5 solves one exact task through a sparse event-sourced controller. See `V3_5_ARCHITECTURE.md` for the full design.
+Flourite has one controller: `KernelEngine` hosts an `IntelligenceKernel` over
+an append-only journal. The kernel owns semantic decisions; the host owns files,
+processes, commands, and materialization.
 
 ```text
-immutable Task Source
-  → strong baseline + revisable Charter + Artifact Spine
-  → lazy obligations and 1–3 active cruxes
-  → minimum-sufficient action topology
-  → scoped evidence / tools / overlays / bounded Summit
-  → Lead integration
-  → Lead-owned clean synthesis
-  → semantic CI + Completion Case
-  → one fresh bounded release challenge
-  → completion seal
+operator task + sources + hard envelope
+                 │
+                 ▼
+      objective + current workspace
+                 │
+                 ▼
+        one model/tool move
+                 │
+                 ▼
+  atomic observations + artifact + workspace
+                 │
+          ┌──────┴──────┐
+          │             │
+      next move    finish claim
+                        │
+                        ▼
+               fresh challenge
+                 │           │
+             support    material finding
+                 │           │
+             satisfied  normal construction
 ```
 
-The event ledger is authoritative. State snapshots, capsules, indexes, and staged source views are reconstructible.
+The journal is authoritative. `state.json`, the live dashboard, exports, and
+materialized artifacts are projections. See [the canonical model](CANONICAL_MODEL.md)
+for the full object and [the event model](event-model.md) for legal transitions.
