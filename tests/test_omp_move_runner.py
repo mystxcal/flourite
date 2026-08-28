@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -114,6 +115,50 @@ class EphemeralChallengeRepairProvider(FakeOmpProvider):
                 }
             )
         return result
+
+
+class ExploratoryChallengeProvider(FakeOmpProvider):
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        self.requests.append(request)
+        if request.call_kind == "lead":
+            assert request.expected_artifact_path is not None
+            request.expected_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            request.expected_artifact_path.write_text("# Candidate\n", encoding="utf-8")
+            output = request.cwd / ".sfh_output"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "workspace.md").write_text("# Candidate state\n", encoding="utf-8")
+            value = {
+                "artifact_changed": True,
+                "workspace_summary": "Candidate awaiting an exploratory challenge",
+                "observations": [],
+                "next_move": {
+                    "mode": "challenge",
+                    "intent": "Challenge the live candidate before claiming completion",
+                },
+            }
+            thread_id = "lead-thread"
+        else:
+            value = {
+                "artifact_changed": False,
+                "observations": [
+                    {
+                        "kind": "challenge",
+                        "summary": "A file-level inspection found a material defect",
+                        "verdict": "challenges",
+                        "artifact_digest": "a" * 64,
+                        "evidence_path": "/tmp/non-durable-challenge-evidence",
+                    }
+                ],
+            }
+            thread_id = None
+        return ProviderCallResult(
+            call_id=request.call_id,
+            response=request.response_model.model_validate(value),
+            usage=Usage(calls=1, model_requests=1, input_tokens=10, output_tokens=5),
+            duration_seconds=0.01,
+            thread_id=thread_id,
+            trace_summary=ProviderTraceSummary(model_turns=1),
+        )
 
 
 class VanishingSessionProvider(FakeOmpProvider):
@@ -252,6 +297,7 @@ class PersistentSoftwareProvider(FakeOmpProvider):
                         "kind": "challenge",
                         "summary": "The exact durable film survives independent projection",
                         "verdict": "supports",
+                        "artifact_digest": hashlib.sha256(b"film two").hexdigest(),
                     }
                 ],
             }
@@ -438,6 +484,11 @@ async def test_software_lead_keeps_one_live_workspace_and_durable_outputs(
     artifact = kernel.state.artifacts[root.artifact_head_id or ""]
     assert [item.original_name for item in artifact.deliverables] == ["dist/film.mp4"]
     assert blobs.read_bytes(artifact.deliverables[0]) == b"film two"
+    support = next(
+        item for item in kernel.state.observations.values() if item.challenge_verdict is not None
+    )
+    assert support.artifact_digest == artifact.digest
+    assert support.metadata["inspected_content_digest"] == hashlib.sha256(b"film two").hexdigest()
 
 
 async def test_interrupted_software_move_resumes_same_workspace_without_fake_repair(
@@ -561,7 +612,7 @@ async def test_commit_error_is_repaired_in_the_same_live_codex_workspace(
     assert "Exact error:" in repair.prompt
 
 
-async def test_ephemeral_challenge_repair_reconstructs_without_resuming(
+async def test_ephemeral_challenge_keeps_optional_bad_evidence_locator_without_replay(
     tmp_path: Path,
 ) -> None:
     blobs = BlobStore(tmp_path / "blobs")
@@ -591,12 +642,53 @@ async def test_ephemeral_challenge_repair_reconstructs_without_resuming(
     await kernel.run()
 
     assert kernel.state.status == RunStatus.SATISFIED
-    repair = next(item for item in provider.requests if "-repair-" in item.call_id)
-    assert repair.call_kind == "challenge"
-    assert repair.resume_thread_id is None
-    assert repair.preserve_session is False
-    assert "The original objective is authoritative" in repair.prompt
-    assert "Exact error:" in repair.prompt
+    challenge_requests = [item for item in provider.requests if item.call_kind == "challenge"]
+    assert len(challenge_requests) == 1
+    challenge = next(
+        item for item in kernel.state.observations.values() if item.kind.value == "challenge"
+    )
+    assert challenge.metadata["evidence_capture"] == "unresolved_optional_locator"
+
+
+async def test_exploratory_challenge_binds_to_frozen_workspace_without_finish_claim(
+    tmp_path: Path,
+) -> None:
+    blobs = BlobStore(tmp_path / "blobs")
+    adapter = MarkdownAdapter(
+        profile=get_profile("generic"),
+        run_dir=tmp_path,
+        blobs=blobs,
+        workspace=None,
+    )
+    provider = ExploratoryChallengeProvider()
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_exploratory_challenge"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=OmpMoveRunner(
+            provider=provider,  # type: ignore[arg-type]
+            adapter=adapter,
+            run_dir=tmp_path,
+        ),
+    )
+    kernel.start("Build and challenge a candidate before claiming completion.")
+
+    await kernel.run(max_steps=2)
+
+    assert kernel.state.finish_claim is None
+    root = kernel.state.trajectories[kernel.state.root_trajectory_id]
+    assert root.artifact_head_id is not None
+    artifact = kernel.state.artifacts[root.artifact_head_id]
+    challenge = next(
+        item for item in kernel.state.observations.values() if item.kind.value == "challenge"
+    )
+    assert challenge.artifact_digest == artifact.digest
+    assert challenge.metadata["artifact_binding"] == "single_frozen_target"
+    assert challenge.metadata["inspected_content_digest"] == "a" * 64
+    assert challenge.metadata["evidence_capture"] == "unresolved_optional_locator"
+    assert not any("-repair-" in item.call_id for item in provider.requests)
 
 
 async def test_vanished_lead_session_reconstructs_from_durable_context(

@@ -710,10 +710,14 @@ one concrete observation and normally a next move for the Lead.
             + """
 
 Act as an independent Challenger. Do not judge a description of the work: inspect the
-actual current artifact and decision-relevant evidence. Try to falsify the finish claim
-against the exact objective. Every observation must say whether it supports, challenges,
-or remains uncertain, with concrete scope. Bind support to the exact `artifact_digest`
-you inspected; every claimed artifact head needs direct support. Mark
+actual current artifact and decision-relevant evidence. Test the requested live artifact
+or finish claim against the exact objective. Every observation must say whether it
+supports, challenges, or remains uncertain, with concrete scope. `artifact_digest` means
+the canonical artifact-head digest from `.sfh_context/index.json`, not the hash of a file
+inside that artifact; when there is one target it may be omitted because the runtime binds
+it exactly. If you attach raw evidence, give one existing workspace-local file in
+`evidence_path`; put additional locators in the summary. Every claimed artifact head needs
+direct support. Mark
 `material_to_claim=false` when a finding is real but cannot change whether the exact
 objective is satisfied. If such a finding is the only criticism, also state direct
 support for the claim. Do not edit the artifact or prescribe a ritual.
@@ -731,19 +735,19 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
         usage: ComputeUsage,
     ) -> MoveExecutionResult:
         artifact, candidate = self._capture_artifact(move, workspace, parent, output)
-        claim_artifacts = self._claim_artifacts(state)
+        challenge_artifacts = self._challenge_artifacts(state, move)
         observations = self._model_observations(
             move,
             workspace,
             output,
-            claim_artifacts=claim_artifacts,
+            challenge_artifacts=challenge_artifacts,
         )
         observations.extend(
             self._artifact_observations(
                 move,
                 state,
                 candidate,
-                claim_artifacts=claim_artifacts,
+                claim_artifacts=challenge_artifacts,
             )
         )
         return MoveExecutionResult(
@@ -792,14 +796,22 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
         )
 
     @staticmethod
-    def _claim_artifacts(state: RunState) -> list[Any]:
-        if state.finish_claim is None:
-            return []
-        return [
-            state.artifacts[item]
-            for item in state.finish_claim.artifact_head_ids
-            if item in state.artifacts
-        ]
+    def _challenge_artifacts(state: RunState, move: Move) -> list[Any]:
+        """Return the exact artifact heads visible to a Challenger.
+
+        A Challenger can be requested either by the kernel for a formal finish
+        claim or explicitly by the Lead while the work is still evolving.  In
+        the latter case there is deliberately no finish claim yet; the move's
+        frozen workspace is the authority.  Treating "no claim" as "no
+        artifact" made valid exploratory challenges impossible to commit.
+        """
+
+        if state.finish_claim is not None:
+            artifact_ids = state.finish_claim.artifact_head_ids
+        else:
+            workspace = state.workspaces.get(move.based_on_workspace_id or "")
+            artifact_ids = workspace.artifact_head_ids if workspace is not None else []
+        return [state.artifacts[item] for item in artifact_ids if item in state.artifacts]
 
     def _model_observations(
         self,
@@ -807,15 +819,17 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
         workspace: CallWorkspace,
         output: ModelOutput,
         *,
-        claim_artifacts: Sequence[Any],
+        challenge_artifacts: Sequence[Any],
     ) -> list[ObservationDraft]:
-        claim_digests = {item.digest for item in claim_artifacts}
+        digest_owners = self._artifact_digest_owners(challenge_artifacts)
+        target_digests = {item.digest for item in challenge_artifacts}
         return [
             self._model_observation(
                 move,
                 workspace,
                 item,
-                claim_digests=claim_digests,
+                digest_owners=digest_owners,
+                target_digests=target_digests,
             )
             for item in output.observations
         ]
@@ -826,28 +840,25 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
         workspace: CallWorkspace,
         model_observation: ModelObservation,
         *,
-        claim_digests: set[str],
+        digest_owners: dict[str, str],
+        target_digests: set[str],
     ) -> ObservationDraft:
-        raw_ref = None
-        if model_observation.evidence_path:
-            evidence_path = self.adapter.resolve_declared_path(
-                workspace, model_observation.evidence_path
-            )
-            if not evidence_path.is_file():
-                raise ValueError(
-                    "evidence_path must name an existing file inside the live workspace"
-                )
-            raw_ref = self.adapter.blobs.put_file(
-                evidence_path,
-                original_name=evidence_path.name,
-            )
+        raw_ref, evidence_metadata = self._capture_model_evidence(
+            move,
+            workspace,
+            model_observation.evidence_path,
+        )
         challenge = (
             model_observation if isinstance(model_observation, ModelChallengeObservation) else None
         )
-        bound_digest = self._challenge_digest(
+        bound_digest, binding_metadata = self._challenge_digest(
             challenge,
-            claim_digests=claim_digests,
+            digest_owners=digest_owners,
+            target_digests=target_digests,
         )
+        metadata: dict[str, object] = {**evidence_metadata, **binding_metadata}
+        if challenge is not None:
+            metadata["material_to_claim"] = challenge.material_to_claim
         return ObservationDraft(
             kind=model_observation.kind,
             summary=model_observation.summary,
@@ -861,26 +872,69 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
             artifact_digest=bound_digest,
             confidence=model_observation.confidence,
             challenge_verdict=challenge.verdict if challenge is not None else None,
-            metadata=(
-                {"material_to_claim": challenge.material_to_claim} if challenge is not None else {}
-            ),
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _artifact_digest_owners(artifacts: Sequence[Any]) -> dict[str, str]:
+        owners: dict[str, str] = {}
+        for artifact in artifacts:
+            owners[artifact.digest] = artifact.digest
+            for deliverable in artifact.deliverables:
+                owners[deliverable.digest] = artifact.digest
+        return owners
+
+    def _capture_model_evidence(
+        self,
+        move: Move,
+        workspace: CallWorkspace,
+        declared_path: str | None,
+    ) -> tuple[Any | None, dict[str, object]]:
+        if not declared_path:
+            return None, {}
+        try:
+            evidence_path = self.adapter.resolve_declared_path(workspace, declared_path)
+        except (OSError, ValueError):
+            if move.mode != MoveMode.CHALLENGE:
+                raise
+            return None, {"evidence_capture": "unresolved_optional_locator"}
+        if not evidence_path.is_file():
+            if move.mode != MoveMode.CHALLENGE:
+                raise ValueError(
+                    "evidence_path must name an existing file inside the live workspace"
+                )
+            return None, {"evidence_capture": "unresolved_optional_locator"}
+        return (
+            self.adapter.blobs.put_file(evidence_path, original_name=evidence_path.name),
+            {"evidence_capture": "durable"},
         )
 
     @staticmethod
     def _challenge_digest(
         challenge: ModelChallengeObservation | None,
         *,
-        claim_digests: set[str],
-    ) -> str | None:
+        digest_owners: dict[str, str],
+        target_digests: set[str],
+    ) -> tuple[str | None, dict[str, object]]:
         if challenge is None:
-            return None
-        if challenge.artifact_digest is not None and challenge.artifact_digest not in claim_digests:
-            raise ValueError("challenge observation references a digest outside the finish claim")
-        if challenge.artifact_digest is not None:
-            return challenge.artifact_digest
-        if len(claim_digests) == 1:
-            return next(iter(claim_digests))
-        return None
+            return None, {}
+        reported = challenge.artifact_digest
+        if reported is not None and reported in digest_owners:
+            owner = digest_owners[reported]
+            resolved_metadata: dict[str, object] = (
+                {"inspected_content_digest": reported} if reported != owner else {}
+            )
+            return owner, resolved_metadata
+        if len(target_digests) == 1:
+            owner = next(iter(target_digests))
+            fallback_metadata: dict[str, object] = {"artifact_binding": "single_frozen_target"}
+            if reported is not None:
+                fallback_metadata["inspected_content_digest"] = reported
+            return owner, fallback_metadata
+        unresolved_metadata: dict[str, object] = (
+            {"artifact_binding": "unresolved"} if reported is not None else {}
+        )
+        return None, unresolved_metadata
 
     def _artifact_observations(
         self,
