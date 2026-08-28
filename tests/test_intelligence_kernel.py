@@ -311,6 +311,68 @@ async def test_post_move_evidence_cannot_be_consumed_by_the_earlier_workspace(
     )
 
 
+async def test_first_root_artifact_is_falsified_on_its_exact_fork_before_scale(
+    tmp_path: Path,
+) -> None:
+    text = "# Representative artifact"
+    encoded = text.encode()
+    candidate = ArtifactDraft(
+        content_ref=ContentRef(
+            digest=sha256_text(text),
+            size=len(encoded),
+            media_type="text/markdown",
+            relative_path=f"sha256/{sha256_text(text)}",
+            original_name="artifact.md",
+        )
+    )
+    outcomes = [
+        MoveExecutionResult(
+            artifact=candidate,
+            workspace=workspace("Representative"),
+            next_move=MoveDirective(
+                mode=MoveMode.LEAD,
+                intent="Scale the untested premise",
+            ),
+        ),
+        MoveExecutionResult(
+            observations=[
+                ObservationDraft(
+                    kind=ObservationKind.CHALLENGE,
+                    summary="A matched counterexample falsifies the first premise",
+                    source="fresh-challenger",
+                    artifact_digest=candidate.content_ref.digest,
+                    challenge_verdict=ChallengeVerdict.CHALLENGES,
+                )
+            ]
+        ),
+        MoveExecutionResult(workspace=workspace("Revised from the counterexample")),
+    ]
+    kernel, runner = kernel_for(tmp_path, outcomes)
+
+    await kernel.run(max_steps=4)
+
+    assert [mode for mode, _, _ in runner.calls] == [
+        MoveMode.LEAD,
+        MoveMode.CHALLENGE,
+        MoveMode.LEAD,
+    ]
+    root_id = kernel.state.root_trajectory_id
+    fork = next(
+        item
+        for item in kernel.state.trajectories.values()
+        if item.parent_trajectory_id == root_id
+    )
+    first_move = next(item for item in kernel.state.moves.values() if item.mode == MoveMode.LEAD)
+    first_workspace = kernel.state.workspaces[first_move.workspace_id or ""]
+    assert fork.base_workspace_id == first_workspace.workspace_id
+    assert runner.calls[1][1].artifact_heads[0].digest == candidate.content_ref.digest
+    assert any(
+        "matched counterexample" in item.summary
+        for item in runner.calls[2][1].observations
+    )
+    assert all(item.intent != "Scale the untested premise" for item in kernel.state.moves.values())
+
+
 async def test_problem_selected_branches_remain_isolated_then_rejoin_context(
     tmp_path: Path,
 ) -> None:
@@ -392,6 +454,7 @@ async def test_completion_requires_direct_support_for_every_claimed_head(
         def __init__(self) -> None:
             self.calls: list[MoveMode] = []
             self.challenge_count = 0
+            self.root_reentered = False
 
         async def run(
             self,
@@ -419,16 +482,36 @@ async def test_completion_requires_direct_support_for_every_claimed_head(
                         ),
                     ],
                 )
-            if len(self.calls) == 2:
+            if move.mode == MoveMode.CHALLENGE and state.finish_claim is None:
+                root = state.trajectories[state.root_trajectory_id]
+                assert root.artifact_head_id is not None
                 return MoveExecutionResult(
-                    artifact=artifact("# Alternative candidate"),
-                    workspace=WorkspaceDraft(
-                        document="# Alternative",
-                        summary="Alternative",
-                        activate=False,
-                    ),
+                    observations=[
+                        ObservationDraft(
+                            kind=ObservationKind.CHALLENGE,
+                            summary="The representative root survives early falsification",
+                            source="fresh-challenger",
+                            artifact_digest=state.artifacts[root.artifact_head_id].digest,
+                            challenge_verdict=ChallengeVerdict.SUPPORTS,
+                        )
+                    ]
                 )
-            if move.mode == MoveMode.LEAD:
+            if move.mode == MoveMode.LEAD and move.trajectory_id == state.root_trajectory_id:
+                if not self.root_reentered:
+                    self.root_reentered = True
+                    return MoveExecutionResult(
+                        next_moves=[
+                            MoveDirective(
+                                mode=MoveMode.LEAD,
+                                intent="Develop the independent alternative",
+                                fork_purpose="A materially different solution family",
+                            ),
+                            MoveDirective(
+                                mode=MoveMode.LEAD,
+                                intent="Integrate all viable heads",
+                            ),
+                        ]
+                    )
                 heads = list(state.artifacts)
                 return MoveExecutionResult(
                     workspace=WorkspaceDraft(
@@ -439,6 +522,15 @@ async def test_completion_requires_direct_support_for_every_claimed_head(
                     finish=FinishDraft(
                         satisfaction_claims=["Both claimed heads satisfy their scope"],
                         artifact_head_ids=heads,
+                    ),
+                )
+            if move.mode == MoveMode.LEAD:
+                return MoveExecutionResult(
+                    artifact=artifact("# Alternative candidate"),
+                    workspace=WorkspaceDraft(
+                        document="# Alternative",
+                        summary="Alternative",
+                        activate=False,
                     ),
                 )
             claim = state.finish_claim
@@ -486,6 +578,8 @@ async def test_completion_requires_direct_support_for_every_claimed_head(
     assert kernel.state.status == RunStatus.SATISFIED
     assert runner.challenge_count == 2
     assert runner.calls == [
+        MoveMode.LEAD,
+        MoveMode.CHALLENGE,
         MoveMode.LEAD,
         MoveMode.LEAD,
         MoveMode.LEAD,

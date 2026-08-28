@@ -162,10 +162,16 @@ class ExploratoryChallengeProvider(FakeOmpProvider):
 
 
 class VanishingSessionProvider(FakeOmpProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lead_calls = 0
+
     async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
         self.requests.append(request)
-        call = len(self.requests)
-        if call == 2:
+        if request.call_kind == "lead":
+            self.lead_calls += 1
+        lead_call = self.lead_calls
+        if request.call_kind == "lead" and lead_call == 2:
             assert request.resume_thread_id == "thread-lead"
             raise ProviderCallError(
                 "persistent session thread not found",
@@ -183,17 +189,17 @@ class VanishingSessionProvider(FakeOmpProvider):
             assert request.expected_artifact_path is not None
             request.expected_artifact_path.parent.mkdir(parents=True, exist_ok=True)
             request.expected_artifact_path.write_text(
-                f"# Artifact from call {call}\n", encoding="utf-8"
+                f"# Artifact from Lead call {lead_call}\n", encoding="utf-8"
             )
             (output / "workspace.md").write_text(
-                f"# Workspace from call {call}\n", encoding="utf-8"
+                f"# Workspace from Lead call {lead_call}\n", encoding="utf-8"
             )
             value: dict[str, Any] = {
                 "artifact_changed": True,
-                "workspace_summary": f"Lead call {call}",
+                "workspace_summary": f"Lead call {lead_call}",
                 "observations": [],
             }
-            if call == 1:
+            if lead_call == 1:
                 value["next_move"] = {
                     "mode": "lead",
                     "intent": "Finish the construction",
@@ -288,16 +294,22 @@ class PersistentSoftwareProvider(FakeOmpProvider):
             assert self.lead_cwd is not None
             self.challenge_cwd = request.cwd
             assert request.cwd != self.lead_cwd
-            assert (request.cwd / "app.txt").read_text(encoding="utf-8") == "epoch two\n"
-            assert (request.cwd / "dist" / "film.mp4").read_bytes() == b"film two"
+            expected_epoch = "epoch one\n" if self.lead_calls == 1 else "epoch two\n"
+            expected_film = b"film one" if self.lead_calls == 1 else b"film two"
+            assert (request.cwd / "app.txt").read_text(encoding="utf-8") == expected_epoch
+            assert (request.cwd / "dist" / "film.mp4").read_bytes() == expected_film
             value = {
                 "artifact_changed": False,
                 "observations": [
                     {
                         "kind": "challenge",
-                        "summary": "The exact durable film survives independent projection",
+                        "summary": (
+                            "The representative film survives independent projection"
+                            if self.lead_calls == 1
+                            else "The exact durable film survives independent projection"
+                        ),
                         "verdict": "supports",
-                        "artifact_digest": hashlib.sha256(b"film two").hexdigest(),
+                        "artifact_digest": hashlib.sha256(expected_film).hexdigest(),
                     }
                 ],
             }
@@ -340,7 +352,29 @@ class BranchingSoftwareProvider(FakeOmpProvider):
 
     async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
         self.requests.append(request)
-        assert request.call_kind == "lead"
+        if request.call_kind == "challenge":
+            assert self.root_cwd is not None
+            assert request.cwd != self.root_cwd
+            assert (request.cwd / "base.txt").read_text(encoding="utf-8") == "fork point\n"
+            value = {
+                "artifact_changed": False,
+                "observations": [
+                    {
+                        "kind": "challenge",
+                        "summary": "The exact fork point survives independent inspection",
+                        "verdict": "supports",
+                    }
+                ],
+            }
+            thread_id = None
+            return ProviderCallResult(
+                call_id=request.call_id,
+                response=request.response_model.model_validate(value),
+                usage=Usage(calls=1, model_requests=1, input_tokens=10, output_tokens=5),
+                duration_seconds=0.01,
+                thread_id=thread_id,
+                trace_summary=ProviderTraceSummary(model_turns=1),
+            )
         assert request.expected_artifact_path is not None
         request.expected_artifact_path.parent.mkdir(parents=True, exist_ok=True)
         (request.cwd / ".sfh_output" / "workspace.md").write_text(
@@ -353,6 +387,19 @@ class BranchingSoftwareProvider(FakeOmpProvider):
             value = {
                 "artifact_changed": True,
                 "workspace_summary": "root fork point",
+                "observations": [],
+                "branches": [
+                    {
+                        "mode": "lead",
+                        "intent": "develop the independent branch",
+                        "fork_purpose": "test a materially different construction",
+                    }
+                ],
+            }
+        elif request.cwd == self.root_cwd:
+            value = {
+                "artifact_changed": False,
+                "workspace_summary": "root fork point after independent challenge",
                 "observations": [],
                 "branches": [
                     {
@@ -430,7 +477,12 @@ async def test_omp_runner_connects_transport_adapter_and_kernel(tmp_path: Path) 
     assert kernel.state.current_workspace is not None
     assert kernel.state.current_workspace.summary == "Complete first candidate"
     assert len(kernel.state.artifacts) == 1
-    assert [request.call_kind for request in provider.requests] == ["lead", "challenge"]
+    assert [request.call_kind for request in provider.requests] == [
+        "lead",
+        "challenge",
+        "lead",
+        "challenge",
+    ]
     assert provider.requests[0].preserve_session is True
     assert provider.requests[1].preserve_session is False
     assert (tmp_path / "provider-sessions.json").is_file()
@@ -476,7 +528,7 @@ async def test_software_lead_keeps_one_live_workspace_and_durable_outputs(
     assert provider.lead_cwd is not None and provider.lead_cwd.is_dir()
     assert provider.challenge_cwd is not None and not provider.challenge_cwd.exists()
     assert (provider.lead_cwd / "build" / "expensive.cache").is_file()
-    assert [request.cwd for request in provider.requests[:2]] == [
+    assert [request.cwd for request in provider.requests if request.call_kind == "lead"] == [
         provider.lead_cwd,
         provider.lead_cwd,
     ]
@@ -485,7 +537,11 @@ async def test_software_lead_keeps_one_live_workspace_and_durable_outputs(
     assert [item.original_name for item in artifact.deliverables] == ["dist/film.mp4"]
     assert blobs.read_bytes(artifact.deliverables[0]) == b"film two"
     support = next(
-        item for item in kernel.state.observations.values() if item.challenge_verdict is not None
+        item
+        for item in kernel.state.observations.values()
+        if item.challenge_verdict is not None
+        and item.metadata.get("inspected_content_digest")
+        == hashlib.sha256(b"film two").hexdigest()
     )
     assert support.artifact_digest == artifact.digest
     assert support.metadata["inspected_content_digest"] == hashlib.sha256(b"film two").hexdigest()
@@ -562,7 +618,7 @@ async def test_new_software_branch_inherits_the_exact_fork_artifact(
     )
     kernel.start("Fork a software candidate from the exact current artifact.")
 
-    await kernel.run(max_steps=2)
+    await kernel.run(max_steps=5)
 
     assert provider.root_cwd is not None and provider.root_cwd.is_dir()
     assert provider.branch_cwd is not None and provider.branch_cwd.is_dir()
@@ -570,6 +626,7 @@ async def test_new_software_branch_inherits_the_exact_fork_artifact(
         trajectory
         for trajectory in kernel.state.trajectories.values()
         if trajectory.parent_trajectory_id is not None
+        and trajectory.artifact_head_id is not None
     )
     assert branch.artifact_head_id is not None
     branch_artifact = kernel.state.artifacts[branch.artifact_head_id]
@@ -643,7 +700,7 @@ async def test_ephemeral_challenge_keeps_optional_bad_evidence_locator_without_r
 
     assert kernel.state.status == RunStatus.SATISFIED
     challenge_requests = [item for item in provider.requests if item.call_kind == "challenge"]
-    assert len(challenge_requests) == 1
+    assert len(challenge_requests) == 2
     challenge = next(
         item for item in kernel.state.observations.values() if item.kind.value == "challenge"
     )
@@ -722,13 +779,14 @@ async def test_vanished_lead_session_reconstructs_from_durable_context(
     assert kernel.state.status == RunStatus.SATISFIED
     assert [item.call_kind for item in provider.requests] == [
         "lead",
+        "challenge",
         "lead",
         "lead",
         "challenge",
     ]
-    assert provider.requests[1].resume_thread_id == "thread-lead"
-    assert provider.requests[2].resume_thread_id is None
-    assert kernel.state.usage.model_turns == 9
+    assert provider.requests[2].resume_thread_id == "thread-lead"
+    assert provider.requests[3].resume_thread_id is None
+    assert kernel.state.usage.model_turns == 11
     assert any(
         item.metadata.get("session_reconstructed") is True
         for item in kernel.state.observations.values()

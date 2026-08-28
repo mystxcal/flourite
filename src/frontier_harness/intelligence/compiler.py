@@ -67,13 +67,24 @@ class MoveResultCompiler:
         repeated_low_information = self._record_information_signal(move, artifact, observations)
         workspace = self._workspace(move, result, artifact, observations=visible_observations)
         resulting_workspace = self._resulting_workspace(result, workspace)
-        finish_claim = self._finish_claim(result, resulting_workspace, observations)
+        falsify_early = self._requires_early_falsification(
+            move,
+            result,
+            artifact,
+            resulting_workspace,
+        )
+        finish_claim = (
+            None
+            if falsify_early
+            else self._finish_claim(result, resulting_workspace, observations)
+        )
         continuations = self._continuations(
             move,
             result,
             workspace=resulting_workspace,
             repeated_low_information=repeated_low_information,
             has_finish_claim=finish_claim is not None,
+            falsify_artifact=artifact if falsify_early else None,
         )
         workspace = self._include_new_trajectories(workspace, continuations.trajectories)
         blocker = result.blocker
@@ -302,8 +313,13 @@ class MoveResultCompiler:
         workspace: WorkspaceVersion | None,
         repeated_low_information: bool,
         has_finish_claim: bool,
+        falsify_artifact: ArtifactVersion | None,
     ) -> CompiledContinuations:
-        directives = self._directives(result)
+        directives = (
+            [self._early_falsification(move, falsify_artifact)]
+            if falsify_artifact is not None
+            else self._directives(result)
+        )
         if repeated_low_information and directives and not has_finish_claim:
             directives = [self._navigation_escape(move)]
         if not directives or has_finish_claim:
@@ -329,6 +345,50 @@ class MoveResultCompiler:
                 moves.append(candidate)
                 reserved_keys.add(candidate.idempotency_key)
         return CompiledContinuations(tuple(moves), tuple(trajectories))
+
+    def _requires_early_falsification(
+        self,
+        move: Move,
+        result: MoveExecutionResult,
+        artifact: ArtifactVersion | None,
+        workspace: WorkspaceVersion | None,
+    ) -> bool:
+        if (
+            not result.success
+            or result.blocker is not None
+            or move.mode != MoveMode.LEAD
+            or move.trajectory_id != self.state.root_trajectory_id
+            or artifact is None
+            or workspace is None
+        ):
+            return False
+        return not any(
+            existing.mode == MoveMode.CHALLENGE
+            and self.state.trajectories[existing.trajectory_id].parent_trajectory_id
+            == self.state.root_trajectory_id
+            for existing in self.state.moves.values()
+        )
+
+    @staticmethod
+    def _early_falsification(
+        move: Move,
+        artifact: ArtifactVersion,
+    ) -> MoveDirective:
+        return MoveDirective(
+            mode=MoveMode.CHALLENGE,
+            trajectory_id=move.trajectory_id,
+            intent="Falsify the first representative artifact before scale-out",
+            instructions=(
+                "Independently inspect and stress the exact frozen artifact with canonical "
+                f"digest {artifact.digest}. Find the strongest concrete reason its governing "
+                "premise would fail the objective, using artifact-native tests or matched "
+                "counterexamples where possible. Return a scoped supports, challenges, or "
+                "uncertain disposition backed by direct evidence. Do not edit or elaborate it."
+            ),
+            fork_purpose=(
+                "Independently falsify the first representative artifact before scale-out"
+            ),
+        )
 
     @staticmethod
     def _directives(result: MoveExecutionResult) -> list[MoveDirective]:

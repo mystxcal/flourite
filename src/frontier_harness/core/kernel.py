@@ -88,9 +88,11 @@ class IntelligenceKernel:
                 mode=MoveMode.LEAD,
                 intent="Establish the strongest live solution and decision map",
                 instructions=(
-                    "Work directly on the objective. Build a current-best result, inspect what "
-                    "matters, and return an honest workspace checkpoint plus the highest-value "
-                    "next move or a finish claim."
+                    "Work directly on the objective. First make the smallest complete, "
+                    "end-to-end representative artifact that exposes the governing quality "
+                    "or performance bet; do not scale an untested premise. Inspect what matters, "
+                    "and return an honest workspace checkpoint plus the highest-value next move "
+                    "or a finish claim."
                 ),
                 trajectory_id=root.trajectory_id,
             )
@@ -131,6 +133,8 @@ class IntelligenceKernel:
             return self._advance_finish_claim()
 
         last_move = max(state.moves.values(), key=lambda item: item.proposed_at, default=None)
+        if last_move is not None and self._is_fork_challenge(last_move):
+            return self._continue_after_fork_challenge(last_move)
         if last_move is not None and last_move.mode == MoveMode.NAVIGATE:
             directive = MoveDirective(
                 mode=MoveMode.LEAD,
@@ -155,6 +159,38 @@ class IntelligenceKernel:
         if self._propose(directive) is None:
             directive.instructions += f"\nThis is a fresh reframe at event {state.last_event_seq}."
             self._propose(directive)
+        return True
+
+    def _is_fork_challenge(self, move: Move) -> bool:
+        trajectory = self.state.trajectories[move.trajectory_id]
+        return move.mode == MoveMode.CHALLENGE and trajectory.parent_trajectory_id is not None
+
+    def _continue_after_fork_challenge(self, move: Move) -> bool:
+        trajectory = self.state.trajectories[move.trajectory_id]
+        assert trajectory.parent_trajectory_id is not None
+        findings = [
+            self.state.observations[item]
+            for item in move.observation_ids
+            if item in self.state.observations
+            and self.state.observations[item].kind == ObservationKind.CHALLENGE
+        ]
+        disposition = "\n".join(
+            f"- {item.challenge_verdict or ChallengeVerdict.UNCERTAIN}: {item.summary}"
+            for item in findings
+        ) or "- uncertain: the fork returned no challenge disposition"
+        self._propose(
+            MoveDirective(
+                mode=MoveMode.LEAD,
+                trajectory_id=trajectory.parent_trajectory_id,
+                intent="Act on the representative artifact's independent falsification",
+                instructions=(
+                    "A fresh Challenger inspected the exact representative artifact at its "
+                    "frozen fork boundary. Read its direct evidence. Revise, replace, or retain "
+                    "the governing premise according to that evidence before scaling; do not "
+                    "continue the pre-fork plan by inertia.\n" + disposition
+                ),
+            )
+        )
         return True
 
     def _advance_finish_claim(self) -> bool:
