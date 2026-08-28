@@ -188,6 +188,7 @@ class KernelReducer:
             raise LedgerIntegrityError("run may pause only at a safe move boundary")
         state.status = RunStatus.PAUSED
         state.terminal_reason = payload.reason
+        state.pause_kind = payload.kind
 
     @staticmethod
     def _resume(state: RunState, event: LedgerEvent) -> None:
@@ -196,6 +197,7 @@ class KernelReducer:
             raise LedgerIntegrityError("only a paused run can resume")
         state.status = RunStatus.ACTIVE
         state.terminal_reason = None
+        state.pause_kind = None
 
     @staticmethod
     def _terminate(state: RunState, event: LedgerEvent) -> None:
@@ -211,3 +213,4 @@ class KernelReducer:
             raise LedgerIntegrityError("run cannot be exhausted before a hard envelope")
         state.status = RunStatus(payload.status)
         state.terminal_reason = payload.reason
+        state.pause_kind = None

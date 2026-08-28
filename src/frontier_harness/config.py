@@ -140,6 +140,12 @@ class SoftwarePolicy(StrictModel):
 
 class RuntimePolicy(StrictModel):
     sqlite_busy_timeout_ms: int = Field(default=10_000, ge=100)
+    auto_repair: bool = True
+    repair_command: str = "codex"
+    repair_model: str = "gpt-5.6-sol"
+    repair_reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "xhigh"
+    repair_timeout_seconds: int = Field(default=1800, ge=30)
+    repair_no_progress_limit: int = Field(default=2, ge=1, le=4)
 
 
 class KernelPolicy(StrictModel):

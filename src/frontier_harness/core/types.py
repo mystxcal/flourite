@@ -36,6 +36,11 @@ class RunStatus(StrEnum):
         }
 
 
+class PauseKind(StrEnum):
+    OPERATOR = "operator"
+    EXECUTION = "execution"
+
+
 class MoveMode(StrEnum):
     LEAD = "lead"
     NAVIGATE = "navigate"
@@ -247,6 +252,7 @@ class RunState(CoreModel):
     finish_claim: FinishClaim | None = None
     usage: ComputeUsage = Field(default_factory=ComputeUsage)
     terminal_reason: str | None = None
+    pause_kind: PauseKind | None = None
     last_event_seq: int = Field(ge=0)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -336,6 +342,7 @@ class FinishClaimed(CoreModel):
 
 class RunPaused(CoreModel):
     reason: str = "operator pause"
+    kind: PauseKind = PauseKind.OPERATOR
 
 
 class RunResumed(CoreModel):

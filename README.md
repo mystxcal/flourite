@@ -207,9 +207,11 @@ and failure residue. A crash cannot leave half of that meaning authoritative.
 The hash-chained ledger is the source of truth; `state.json` is a rebuildable
 projection and large content lives in the blob store.
 
-Infrastructure failure pauses and retries the same semantic move in the same
-workspace. It does not ask the model to “repair” transport, and a non-terminal
-or stale artifact cannot cross into evaluation.
+Infrastructure failure pauses the same semantic move in the same workspace. A
+separate Codex repairer works on an isolated component copy; the supervisor
+admits it only as a new immutable generation and replays the exact failed
+activity. Task reasoning never gets polluted with transport repair, and a
+non-terminal or stale artifact cannot cross into evaluation.
 
 Adapters own domain observations. A software adapter can run deterministic
 checks against the candidate; a media adapter can retain rendered deliverables;

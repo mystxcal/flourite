@@ -166,8 +166,13 @@ nothing becomes authoritative. Retrying the same move is idempotent.
 
 An execution or transport failure is not converted into a semantic repair task.
 The run pauses, retains the exact live workspace, and queues the same move with
-explicit retry lineage. After infrastructure recovery it continues in place;
-the model is not asked to reinterpret a broken pipe as part of the objective.
+explicit retry lineage. A typed fault receipt crosses into a separate
+infrastructure plane. There, Codex may repair an isolated copy of the failed
+component. The stable supervisor admits only a new immutable generation and
+replays the exact failed activity; that replay, not the repairer's prose, is the
+acceptance test. A no-change diagnosis gets one exact retry. Repetition of the
+same fault at the same semantic activity stops with a precise receipt instead
+of burning an unbounded repair loop.
 
 This boundary is the core reliability primitive. Provider activity, tool calls,
 and transcripts are useful evidence, but none is progress until the resulting
@@ -268,9 +273,10 @@ Pause, stop, and steering are admitted between moves. They never pretend an
 in-flight call was cleanly integrated. A stopped or paused run remains
 reconstructible from the journal.
 
-Infrastructure pauses retain the original semantic move unchanged. External
-durable execution may retry that move after recovery; it may not grade a
-non-terminal projection or reuse a stale pre-terminal seal.
+Infrastructure pauses retain the original semantic move unchanged. The stable
+supervisor can repair, live-bind, and retry it without restarting the durable
+run; it may not grade a non-terminal projection or reuse a stale pre-terminal
+seal.
 
 ## Ownership map
 
@@ -284,8 +290,9 @@ non-terminal projection or reuse a stale pre-terminal seal.
 | OMP provider | Transport attempts, schema retry, safe telemetry, exact usage | Search policy or semantic progress |
 | Adapter | Artifact capture, direct checks, materialization, explicit apply | Universal search policy |
 | `KernelEngine` | Run lifecycle, commands, locks, activity, source staging | Deciding what an observation means |
-| Step supervisor | Lease a component generation, run one activity, verify its receipt, repeat | Planning, semantic state, or model judgment |
+| Step supervisor | Lease a component generation, verify one activity receipt, capture typed faults, admit replay-proven repairs | Planning, semantic state, or task judgment |
 | Component registry | Immutable code snapshots and one atomic active pointer | In-flight mutation or semantic authority |
+| Infrastructure repairer | Diagnose a typed runtime fault in an isolated source copy | Reframing the task, editing durable run state, or self-certifying a patch |
 | Blob store | Immutable bytes and digest verification | Semantic authority |
 | Live UI | Projection and operator input | Hidden state or progress claims |
 

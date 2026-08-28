@@ -10,12 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..control import RunControlPlane, RuntimeStatus
+from ..config import HarnessConfig
+from ..control import CommandKind, RunControlPlane, RuntimeStatus
 from ..errors import FrontierError
 from ..locking import RunLock
 from ..util import utc_now
 from .components import STEP_PROTOCOL, ComponentBinding, ComponentRegistry
 from .engine import KernelEngine
+from .repair import CodexComponentRepairer, ComponentFault
 
 
 @dataclass(frozen=True)
@@ -38,11 +40,15 @@ class StepSupervisor:
         manifest = json.loads(
             (self.run_dir / KernelEngine.MANIFEST_FILE).read_text(encoding="utf-8")
         )
+        config = HarnessConfig.model_validate_json(
+            (self.run_dir / KernelEngine.CONFIG_FILE).read_text(encoding="utf-8")
+        )
         self.control = RunControlPlane(
             self.run_dir / KernelEngine.CONTROL_FILE,
             str(manifest["run_id"]),
         )
         self.lock = RunLock(self.run_dir / ".supervisor.lock")
+        self.repairer = CodexComponentRepairer(self.run_dir, self.registry, config.runtime)
 
     @staticmethod
     def _state(run_dir: Path) -> dict[str, Any]:
@@ -68,6 +74,9 @@ class StepSupervisor:
                 while True:
                     state = self._state(self.run_dir)
                     status = str(state.get("status", "active"))
+                    recoverable_pause = (
+                        status == "paused" and state.get("pause_kind") == "execution"
+                    )
                     pending_resume = status == "paused" and any(
                         command.kind.value == "resume"
                         for command in self.control.commands(pending_only=True)
@@ -83,6 +92,7 @@ class StepSupervisor:
                             "paused",
                         }
                         and not pending_resume
+                        and not recoverable_pause
                     ):
                         return state
 
@@ -101,7 +111,13 @@ class StepSupervisor:
                     try:
                         process = await self._spawn(binding)
                     except (OSError, FrontierError) as exc:
-                        if self._recover_component(binding, f"worker could not start: {exc}"):
+                        if await self._recover_component(
+                            binding,
+                            stage="worker_start",
+                            detail=f"worker could not start: {exc}",
+                            before_seq=before_seq,
+                            after_seq=before_seq,
+                        ):
                             continue
                         raise
                     stdout, stderr = await process.communicate()
@@ -120,9 +136,12 @@ class StepSupervisor:
                             }
                         )
                         detail = stderr.decode(errors="replace").strip()
-                        if self._recover_component(
+                        if await self._recover_component(
                             binding,
-                            detail or "worker exited without a receipt",
+                            stage="worker_exit",
+                            detail=detail or "worker exited without a receipt",
+                            before_seq=before_seq,
+                            after_seq=after_seq,
                         ):
                             continue
                         raise FrontierError(
@@ -133,7 +152,13 @@ class StepSupervisor:
                     try:
                         receipt = self._receipt(stdout)
                     except FrontierError as exc:
-                        if self._recover_component(binding, str(exc)):
+                        if await self._recover_component(
+                            binding,
+                            stage="worker_receipt",
+                            detail=str(exc),
+                            before_seq=before_seq,
+                            after_seq=after_seq,
+                        ):
                             continue
                         raise
                     self.registry.record_receipt(
@@ -148,9 +173,30 @@ class StepSupervisor:
                     )
                     if receipt.before_seq != before_seq or receipt.after_seq != after_seq:
                         detail = "component receipt does not match the durable journal"
-                        if self._recover_component(binding, detail):
+                        if await self._recover_component(
+                            binding,
+                            stage="journal_receipt",
+                            detail=detail,
+                            before_seq=before_seq,
+                            after_seq=after_seq,
+                        ):
                             continue
                         raise FrontierError(detail)
+                    if receipt.status == "paused" and current.get("pause_kind") == "execution":
+                        detail = str(current.get("terminal_reason") or "execution paused")
+                        if await self._recover_component(
+                            binding,
+                            stage="execution_pause",
+                            detail=detail,
+                            before_seq=before_seq,
+                            after_seq=after_seq,
+                        ):
+                            self.control.enqueue(
+                                CommandKind.RESUME,
+                                text="infrastructure repaired; retry the preserved move",
+                            )
+                            continue
+                        raise FrontierError(f"automatic repair could not recover: {detail}")
                     if (
                         receipt.status
                         in {
@@ -211,7 +257,15 @@ class StepSupervisor:
             stderr=asyncio.subprocess.PIPE,
         )
 
-    def _recover_component(self, failed: ComponentBinding, detail: str) -> bool:
+    async def _recover_component(
+        self,
+        failed: ComponentBinding,
+        *,
+        stage: str,
+        detail: str,
+        before_seq: int,
+        after_seq: int,
+    ) -> bool:
         fallback = self.registry.rollback_if_current(failed)
         if fallback is not None:
             self.control.record_activity(
@@ -224,7 +278,53 @@ class StepSupervisor:
                 payload={"failed_digest": failed.digest, "detail": detail},
             )
             return True
-        return self.registry.active().generation != failed.generation
+        if self.registry.active().generation != failed.generation:
+            return True
+        fault = ComponentFault(
+            stage=stage,
+            detail=detail,
+            generation=failed.generation,
+            digest=failed.digest,
+            before_seq=before_seq,
+            after_seq=after_seq,
+            activity_key=self._activity_key(),
+        )
+        recovered = await self.repairer.recover(failed, fault)
+        if recovered:
+            active = self.registry.active()
+            self.control.record_activity(
+                kind="component.repair",
+                label="component",
+                message=(
+                    f"fault {fault.fingerprint[:10]} recovered · generation {active.generation}"
+                ),
+                state="warn",
+                payload={"stage": stage, "failed_digest": failed.digest},
+            )
+        return recovered
+
+    def _activity_key(self) -> str:
+        state = self._state(self.run_dir)
+        moves = state.get("moves")
+        if not isinstance(moves, dict):
+            return "run-boundary"
+        candidates = [
+            value
+            for value in moves.values()
+            if isinstance(value, dict) and value.get("status") in {"running", "failed", "proposed"}
+        ]
+        if not candidates:
+            return "run-boundary"
+        move = candidates[-1]
+        seen: set[str] = set()
+        while isinstance(move, dict):
+            move_id = str(move.get("move_id") or "run-boundary")
+            parent = move.get("retry_of_move_id")
+            if not parent or str(parent) in seen or str(parent) not in moves:
+                return move_id
+            seen.add(move_id)
+            move = moves[str(parent)]
+        return "run-boundary"
 
     @staticmethod
     def _receipt(stdout: bytes) -> StepReceipt:

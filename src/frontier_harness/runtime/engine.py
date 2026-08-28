@@ -20,6 +20,7 @@ from ..core.types import (
     ComputeEnvelope,
     Observation,
     ObservationKind,
+    PauseKind,
     RunPaused,
     RunResumed,
     RunState,
@@ -321,10 +322,10 @@ class KernelEngine:
                         readiness_error = f"{type(exc).__name__}: {exc}"
                     if readiness_error is not None and not self.state.status.terminal:
                         self.journal.append(
-                            "run.failed",
-                            RunTerminated(
-                                status="failed",
+                            "run.paused",
+                            RunPaused(
                                 reason=f"provider preflight failed: {readiness_error}",
+                                kind=PauseKind.EXECUTION,
                             ),
                             actor="runtime",
                         )

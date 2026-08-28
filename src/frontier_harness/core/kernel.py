@@ -27,6 +27,7 @@ from .types import (
     Objective,
     Observation,
     ObservationKind,
+    PauseKind,
     RunPaused,
     RunStarted,
     RunState,
@@ -368,7 +369,8 @@ class IntelligenceKernel:
                     reason=(
                         "execution paused with the original move preserved: "
                         + (result.error or "move execution failed without a reason")
-                    )
+                    ),
+                    kind=PauseKind.EXECUTION,
                 ),
                 actor="runtime",
                 action_id=move.move_id,
