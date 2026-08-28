@@ -227,6 +227,65 @@ def test_declared_generated_deliverable_survives_between_isolated_calls(
         adapter.close_call(reopened)
 
 
+def test_release_glob_cannot_capture_or_restore_runtime_context(
+    tmp_path: Path, git_repo: Path
+) -> None:
+    run_dir = tmp_path / "run-runtime-boundary"
+    adapter = SoftwareAdapter(
+        run_dir=run_dir,
+        blobs=BlobStore(run_dir / "blobs"),
+        workspace=git_repo,
+        policy=SoftwarePolicy(release_artifacts=["**/*.mp4"]),
+    )
+    adapter.prepare()
+    workspace = adapter.open_call(
+        call_id="render",
+        call_kind="final",
+        current_artifact=None,
+    )
+    try:
+        rendered = workspace.cwd / "dist" / "film.mp4"
+        rendered.parent.mkdir(parents=True)
+        rendered.write_bytes(b"rendered-film")
+        context_copy = workspace.context_dir / "artifacts" / "prior.mp4"
+        context_copy.parent.mkdir(parents=True)
+        context_copy.write_bytes(b"runtime-copy")
+        atomic_write_text(workspace.expected_artifact_path, "Rendered film.\n")
+        artifact = adapter.capture_artifact(
+            workspace,
+            declared_path=workspace.expected_artifact_path.relative_to(workspace.cwd).as_posix(),
+            version=1,
+            summary="film",
+            parent=None,
+            source_action_ids=[],
+        )
+    finally:
+        adapter.close_call(workspace)
+
+    assert [item.original_name for item in artifact.deliverables] == ["dist/film.mp4"]
+
+    # Legacy metadata from before the boundary fix must not poison the next
+    # isolated call by pre-creating its runtime context directory.
+    legacy_copy = adapter.blobs.put_bytes(
+        b"legacy-runtime-copy",
+        media_type="video/mp4",
+        original_name=".sfh_context/artifacts/legacy.mp4",
+    )
+    legacy_artifact = artifact.model_copy(
+        update={"deliverables": [legacy_copy, *artifact.deliverables]}
+    )
+    reopened = adapter.open_call(
+        call_id="challenge",
+        call_kind="challenge",
+        current_artifact=legacy_artifact,
+    )
+    try:
+        assert (reopened.cwd / "dist" / "film.mp4").read_bytes() == b"rendered-film"
+        assert not (reopened.context_dir / "artifacts" / "legacy.mp4").exists()
+    finally:
+        adapter.close_call(reopened)
+
+
 def test_missing_declared_release_artifact_cannot_pass_release_evidence(
     tmp_path: Path, git_repo: Path
 ) -> None:

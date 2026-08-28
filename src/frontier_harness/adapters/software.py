@@ -40,6 +40,7 @@ class SoftwareAdapter(ArtifactAdapter):
     name = "software"
     artifact_kind = "git-patch"
     final_suffix = ".patch"
+    _RUNTIME_NAMESPACES = (".sfh_context", ".sfh_output")
 
     def __init__(
         self,
@@ -140,6 +141,14 @@ class SoftwareAdapter(ArtifactAdapter):
         return any(
             fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(f"{normalized}/", pattern)
             for pattern in self.policy.excluded_untracked_globs
+        )
+
+    @classmethod
+    def _runtime_owned(cls, relative: str | Path) -> bool:
+        normalized = str(relative).replace("\\", "/").strip("/")
+        return any(
+            normalized == namespace or normalized.startswith(namespace + "/")
+            for namespace in cls._RUNTIME_NAMESPACES
         )
 
     def _eligible_untracked(self, root: Path) -> list[str]:
@@ -384,6 +393,12 @@ class SoftwareAdapter(ArtifactAdapter):
                     raise WorkspaceError(
                         f"Unsafe durable deliverable path in artifact: {ref.original_name}"
                     )
+                # These namespaces are reconstructed by the runtime for every
+                # call. Older artifacts may contain copies captured by a broad
+                # release glob; they are control-plane residue, not durable
+                # user deliverables.
+                if self._runtime_owned(relative):
+                    continue
                 destination = (path / relative).resolve()
                 try:
                     destination.relative_to(path.resolve())
@@ -396,8 +411,8 @@ class SoftwareAdapter(ArtifactAdapter):
         baseline_commit = self._commit_current_state(path)
         context = path / ".sfh_context"
         output = path / ".sfh_output"
-        context.mkdir(parents=True)
-        output.mkdir(parents=True)
+        context.mkdir(parents=True, exist_ok=True)
+        output.mkdir(parents=True, exist_ok=True)
         return CallWorkspace(
             call_id=call_id,
             call_kind=call_kind,
@@ -421,7 +436,7 @@ class SoftwareAdapter(ArtifactAdapter):
         paths = [
             path
             for path in paths
-            if not path.startswith(".sfh_context/") and not path.startswith(".sfh_output/")
+            if not self._runtime_owned(path)
         ]
         for start in range(0, len(paths), 100):
             chunk = paths[start : start + 100]
@@ -440,7 +455,9 @@ class SoftwareAdapter(ArtifactAdapter):
                 base_commit,
                 "--",
                 ".",
+                ":(exclude).sfh_context",
                 ":(exclude).sfh_context/**",
+                ":(exclude).sfh_output",
                 ":(exclude).sfh_output/**",
             ],
         ).stdout
@@ -472,6 +489,8 @@ class SoftwareAdapter(ArtifactAdapter):
                     raise WorkspaceError(
                         f"Declared {label} escapes the isolated workspace: {path}"
                     ) from exc
+                if self._runtime_owned(relative):
+                    continue
                 if resolved in seen:
                     continue
                 seen.add(resolved)
