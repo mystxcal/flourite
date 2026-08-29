@@ -85,6 +85,13 @@ class ChallengeVerdict(StrEnum):
     UNCERTAIN = "uncertain"
 
 
+class PromotionGate(CoreModel):
+    """Bind a challenge or revision move to one exact artifact head."""
+
+    role: Literal["challenge", "revision"]
+    target_artifact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ComputeEnvelope(CoreModel):
     """Operator-owned hard boundaries, never phase allocations."""
 
@@ -183,6 +190,7 @@ class Move(CoreModel):
     mode: MoveMode
     intent: str
     instructions: str = ""
+    promotion_gate: PromotionGate | None = None
     input_refs: list[ContentRef] = Field(default_factory=list)
     declared_ceiling: ComputeEnvelope = Field(default_factory=ComputeEnvelope)
     idempotency_key: str

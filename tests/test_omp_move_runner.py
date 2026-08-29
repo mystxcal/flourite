@@ -61,6 +61,8 @@ class FakeOmpProvider:
             }
             thread_id = "thread-lead"
         else:
+            evidence = request.cwd / "promotion-assay.txt"
+            evidence.write_text("direct inspection passed\n", encoding="utf-8")
             value = {
                 "artifact_changed": False,
                 "observations": [
@@ -68,6 +70,7 @@ class FakeOmpProvider:
                         "kind": "challenge",
                         "summary": "Direct inspection supports the completion claim",
                         "verdict": "supports",
+                        "evidence_path": "promotion-assay.txt",
                     }
                 ],
             }
@@ -104,7 +107,11 @@ class CommitRepairProvider(FakeOmpProvider):
 class EphemeralChallengeRepairProvider(FakeOmpProvider):
     async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
         result = await super().run(request)
-        if request.call_kind == "challenge" and "-repair-" not in request.call_id:
+        if (
+            request.call_kind == "challenge"
+            and "promotion gate" not in request.prompt
+            and "-repair-" not in request.call_id
+        ):
             value = result.response.model_dump(mode="python")
             value["observations"][0]["evidence_path"] = "/outside-the-live-workspace"
             return result.model_copy(
@@ -138,6 +145,8 @@ class ExploratoryChallengeProvider(FakeOmpProvider):
             }
             thread_id = "lead-thread"
         else:
+            evidence = request.cwd / "promotion-assay.txt"
+            evidence.write_text("direct inspection passed\n", encoding="utf-8")
             value = {
                 "artifact_changed": False,
                 "observations": [
@@ -212,6 +221,8 @@ class VanishingSessionProvider(FakeOmpProvider):
                 }
                 thread_id = "thread-rebuilt"
         else:
+            evidence = request.cwd / "promotion-assay.txt"
+            evidence.write_text("direct inspection passed\n", encoding="utf-8")
             value = {
                 "artifact_changed": False,
                 "observations": [
@@ -219,6 +230,7 @@ class VanishingSessionProvider(FakeOmpProvider):
                         "kind": "challenge",
                         "summary": "Direct inspection supports the reconstructed artifact",
                         "verdict": "supports",
+                        "evidence_path": "promotion-assay.txt",
                     }
                 ],
             }
@@ -298,6 +310,8 @@ class PersistentSoftwareProvider(FakeOmpProvider):
             expected_film = b"film one" if self.lead_calls == 1 else b"film two"
             assert (request.cwd / "app.txt").read_text(encoding="utf-8") == expected_epoch
             assert (request.cwd / "dist" / "film.mp4").read_bytes() == expected_film
+            evidence = request.cwd / "promotion-assay.txt"
+            evidence.write_text("direct projection passed\n", encoding="utf-8")
             value = {
                 "artifact_changed": False,
                 "observations": [
@@ -310,6 +324,7 @@ class PersistentSoftwareProvider(FakeOmpProvider):
                         ),
                         "verdict": "supports",
                         "artifact_digest": hashlib.sha256(expected_film).hexdigest(),
+                        "evidence_path": "promotion-assay.txt",
                     }
                 ],
             }
@@ -356,6 +371,8 @@ class BranchingSoftwareProvider(FakeOmpProvider):
             assert self.root_cwd is not None
             assert request.cwd != self.root_cwd
             assert (request.cwd / "base.txt").read_text(encoding="utf-8") == "fork point\n"
+            evidence = request.cwd / "promotion-assay.txt"
+            evidence.write_text("fork inspection passed\n", encoding="utf-8")
             value = {
                 "artifact_changed": False,
                 "observations": [
@@ -363,6 +380,7 @@ class BranchingSoftwareProvider(FakeOmpProvider):
                         "kind": "challenge",
                         "summary": "The exact fork point survives independent inspection",
                         "verdict": "supports",
+                        "evidence_path": "promotion-assay.txt",
                     }
                 ],
             }
@@ -702,7 +720,10 @@ async def test_ephemeral_challenge_keeps_optional_bad_evidence_locator_without_r
     challenge_requests = [item for item in provider.requests if item.call_kind == "challenge"]
     assert len(challenge_requests) == 2
     challenge = next(
-        item for item in kernel.state.observations.values() if item.kind.value == "challenge"
+        item
+        for item in kernel.state.observations.values()
+        if item.kind.value == "challenge"
+        and item.metadata.get("evidence_capture") == "unresolved_optional_locator"
     )
     assert challenge.metadata["evidence_capture"] == "unresolved_optional_locator"
 

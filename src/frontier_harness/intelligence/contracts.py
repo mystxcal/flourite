@@ -15,6 +15,7 @@ from ..core.types import (
     Move,
     MoveMode,
     ObservationKind,
+    PromotionGate,
     RunState,
 )
 from .context import ContextFrame
@@ -27,6 +28,7 @@ class MoveDirective(CoreModel):
     trajectory_id: str | None = None
     retry_of_move_id: str | None = None
     fork_purpose: str | None = None
+    promotion_gate: PromotionGate | None = None
     declared_ceiling: ComputeEnvelope = Field(default_factory=ComputeEnvelope)
 
 

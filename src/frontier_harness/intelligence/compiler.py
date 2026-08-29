@@ -15,6 +15,7 @@ from ..core.types import (
     MoveMode,
     Observation,
     ObservationKind,
+    PromotionGate,
     RunState,
     Trajectory,
     TrajectoryStatus,
@@ -67,7 +68,7 @@ class MoveResultCompiler:
         repeated_low_information = self._record_information_signal(move, artifact, observations)
         workspace = self._workspace(move, result, artifact, observations=visible_observations)
         resulting_workspace = self._resulting_workspace(result, workspace)
-        falsify_early = self._requires_early_falsification(
+        promotion = self._promotion_continuation(
             move,
             result,
             artifact,
@@ -75,7 +76,7 @@ class MoveResultCompiler:
         )
         finish_claim = (
             None
-            if falsify_early
+            if promotion is not None
             else self._finish_claim(result, resulting_workspace, observations)
         )
         continuations = self._continuations(
@@ -84,7 +85,7 @@ class MoveResultCompiler:
             workspace=resulting_workspace,
             repeated_low_information=repeated_low_information,
             has_finish_claim=finish_claim is not None,
-            falsify_artifact=artifact if falsify_early else None,
+            forced_directive=promotion,
         )
         workspace = self._include_new_trajectories(workspace, continuations.trajectories)
         blocker = result.blocker
@@ -313,11 +314,11 @@ class MoveResultCompiler:
         workspace: WorkspaceVersion | None,
         repeated_low_information: bool,
         has_finish_claim: bool,
-        falsify_artifact: ArtifactVersion | None,
+        forced_directive: MoveDirective | None,
     ) -> CompiledContinuations:
         directives = (
-            [self._early_falsification(move, falsify_artifact)]
-            if falsify_artifact is not None
+            [forced_directive]
+            if forced_directive is not None
             else self._directives(result)
         )
         if repeated_low_information and directives and not has_finish_claim:
@@ -346,31 +347,36 @@ class MoveResultCompiler:
                 reserved_keys.add(candidate.idempotency_key)
         return CompiledContinuations(tuple(moves), tuple(trajectories))
 
-    def _requires_early_falsification(
+    def _promotion_continuation(
         self,
         move: Move,
         result: MoveExecutionResult,
         artifact: ArtifactVersion | None,
         workspace: WorkspaceVersion | None,
-    ) -> bool:
+    ) -> MoveDirective | None:
         if (
             not result.success
             or result.blocker is not None
             or move.mode != MoveMode.LEAD
             or move.trajectory_id != self.state.root_trajectory_id
-            or artifact is None
             or workspace is None
         ):
-            return False
-        return not any(
-            existing.mode == MoveMode.CHALLENGE
-            and self.state.trajectories[existing.trajectory_id].parent_trajectory_id
-            == self.state.root_trajectory_id
-            for existing in self.state.moves.values()
-        )
+            return None
+        if move.promotion_gate is not None and move.promotion_gate.role == "revision":
+            if (
+                artifact is not None
+                and artifact.digest != move.promotion_gate.target_artifact_digest
+            ):
+                return self._promotion_challenge(move, artifact)
+            return self._required_revision(move)
+        if artifact is None or any(
+            existing.promotion_gate is not None for existing in self.state.moves.values()
+        ):
+            return None
+        return self._promotion_challenge(move, artifact)
 
     @staticmethod
-    def _early_falsification(
+    def _promotion_challenge(
         move: Move,
         artifact: ArtifactVersion,
     ) -> MoveDirective:
@@ -381,13 +387,37 @@ class MoveResultCompiler:
             instructions=(
                 "Independently inspect and stress the exact frozen artifact with canonical "
                 f"digest {artifact.digest}. Find the strongest concrete reason its governing "
-                "premise would fail the objective, using artifact-native tests or matched "
-                "counterexamples where possible. Return a scoped supports, challenges, or "
-                "uncertain disposition backed by direct evidence. Do not edit or elaborate it."
+                "premise would fail the objective. Execute the smallest discriminating "
+                "artifact-native assay or matched counterexample available and attach its "
+                "durable evidence. A support verdict requires direct evidence; absence of a "
+                "criticism is not support. Return a scoped supports, challenges, or uncertain "
+                "disposition. Do not edit or elaborate the artifact."
             ),
             fork_purpose=(
                 "Independently falsify the first representative artifact before scale-out"
             ),
+            promotion_gate=PromotionGate(
+                role="challenge",
+                target_artifact_digest=artifact.digest,
+            ),
+        )
+
+    @staticmethod
+    def _required_revision(move: Move) -> MoveDirective:
+        gate = move.promotion_gate
+        assert gate is not None and gate.role == "revision"
+        return MoveDirective(
+            mode=MoveMode.LEAD,
+            trajectory_id=move.trajectory_id,
+            intent="Produce a distinct artifact head before promotion",
+            instructions=(
+                "The attempted revision in move "
+                f"{move.move_id} did not produce an artifact digest distinct from the blocked "
+                f"head {gate.target_artifact_digest}. Continue the substantive revision now. "
+                "Scale-out and finish remain blocked until a distinct head is challenged and "
+                "passes on direct evidence."
+            ),
+            promotion_gate=gate,
         )
 
     @staticmethod

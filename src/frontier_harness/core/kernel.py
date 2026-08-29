@@ -28,6 +28,7 @@ from .types import (
     Observation,
     ObservationKind,
     PauseKind,
+    PromotionGate,
     RunPaused,
     RunStarted,
     RunState,
@@ -178,6 +179,8 @@ class IntelligenceKernel:
             f"- {item.challenge_verdict or ChallengeVerdict.UNCERTAIN}: {item.summary}"
             for item in findings
         ) or "- uncertain: the fork returned no challenge disposition"
+        if move.promotion_gate is not None:
+            return self._resolve_promotion_gate(move, findings, disposition)
         self._propose(
             MoveDirective(
                 mode=MoveMode.LEAD,
@@ -188,6 +191,68 @@ class IntelligenceKernel:
                     "frozen fork boundary. Read its direct evidence. Revise, replace, or retain "
                     "the governing premise according to that evidence before scaling; do not "
                     "continue the pre-fork plan by inertia.\n" + disposition
+                ),
+            )
+        )
+        return True
+
+    def _resolve_promotion_gate(
+        self,
+        move: Move,
+        findings: list[Observation],
+        disposition: str,
+    ) -> bool:
+        gate = move.promotion_gate
+        assert gate is not None and gate.role == "challenge"
+        relevant = [
+            item
+            for item in findings
+            if item.artifact_digest == gate.target_artifact_digest
+        ]
+        blocking = [
+            item
+            for item in relevant
+            if item.challenge_verdict
+            in {ChallengeVerdict.CHALLENGES, ChallengeVerdict.UNCERTAIN}
+            and item.metadata.get("material_to_claim", True) is not False
+        ]
+        supported = [
+            item
+            for item in relevant
+            if item.challenge_verdict == ChallengeVerdict.SUPPORTS
+            and (item.raw_ref is not None or item.source == "artifact-check")
+        ]
+        if supported and not blocking:
+            self._propose(
+                MoveDirective(
+                    mode=MoveMode.LEAD,
+                    trajectory_id=self.state.trajectories[move.trajectory_id].parent_trajectory_id,
+                    intent="Continue from a representative artifact that passed promotion",
+                    instructions=(
+                        "The artifact-bound promotion assay passed on canonical digest "
+                        f"{gate.target_artifact_digest}. Continue ordinary construction from "
+                        "this tested premise. Preserve the direct evidence and do not turn the "
+                        "gate into recurring review ceremony.\n" + disposition
+                    ),
+                )
+            )
+            return True
+        self._propose(
+            MoveDirective(
+                mode=MoveMode.LEAD,
+                trajectory_id=self.state.trajectories[move.trajectory_id].parent_trajectory_id,
+                intent="Replace the artifact head that failed promotion",
+                instructions=(
+                    "Promotion is blocked for canonical digest "
+                    f"{gate.target_artifact_digest}. Use the Challenger's direct evidence to "
+                    "revise or replace the governing premise. Produce a materially changed "
+                    "artifact head; an unchanged head, scale-out, or finish claim cannot pass. "
+                    "The replacement will be challenged at its exact digest before promotion.\n"
+                    + disposition
+                ),
+                promotion_gate=PromotionGate(
+                    role="revision",
+                    target_artifact_digest=gate.target_artifact_digest,
                 ),
             )
         )
@@ -313,6 +378,11 @@ class IntelligenceKernel:
             "intent": directive.intent,
             "instructions": directive.instructions,
             "retry_of_move_id": directive.retry_of_move_id,
+            "promotion_gate": (
+                directive.promotion_gate.model_dump(mode="json")
+                if directive.promotion_gate is not None
+                else None
+            ),
         }
         idempotency_key = sha256_text(canonical_json(basis))
         for existing in state.moves.values():
@@ -326,6 +396,7 @@ class IntelligenceKernel:
             mode=directive.mode,
             intent=directive.intent,
             instructions=directive.instructions,
+            promotion_gate=directive.promotion_gate,
             declared_ceiling=directive.declared_ceiling,
             idempotency_key=idempotency_key,
             proposed_at=utc_now(),
@@ -383,6 +454,7 @@ class IntelligenceKernel:
                         instructions=move.instructions,
                         trajectory_id=move.trajectory_id,
                         retry_of_move_id=move.move_id,
+                        promotion_gate=move.promotion_gate,
                         declared_ceiling=move.declared_ceiling,
                     )
                 }

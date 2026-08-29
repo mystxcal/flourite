@@ -675,6 +675,13 @@ Use your tools and do real work. Do not spend the move narrating a process, manu
 ceremony, or merely proposing work you can perform now. Preserve inconvenient evidence.
 The typed final response is a concise durable boundary, not the work itself.
 """
+        if move.promotion_gate is not None:
+            common += (
+                "\nThis move participates in an artifact promotion gate for canonical digest "
+                f"{move.promotion_gate.target_artifact_digest} as a "
+                f"{move.promotion_gate.role} move. The gate is a real construction boundary, "
+                "not advisory commentary.\n"
+            )
         if move.mode in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
             return (
                 common
