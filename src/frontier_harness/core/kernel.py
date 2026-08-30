@@ -16,6 +16,7 @@ from ..intelligence.contracts import (
 )
 from ..util import canonical_json, sha256_text, utc_now
 from .journal import KernelJournal
+from .promotion import lease_matches, root_artifact_digest
 from .types import (
     ChallengeVerdict,
     ComputeEnvelope,
@@ -136,6 +137,33 @@ class IntelligenceKernel:
         last_move = max(state.moves.values(), key=lambda item: item.proposed_at, default=None)
         if last_move is not None and self._is_fork_challenge(last_move):
             return self._continue_after_fork_challenge(last_move)
+        root_digest = root_artifact_digest(state)
+        if root_digest is not None and not lease_matches(state, root_digest):
+            denied = any(
+                item.artifact_digest == root_digest and item.disposition == "denied"
+                for item in state.promotion_decisions
+            )
+            directive = MoveDirective(
+                mode=MoveMode.LEAD if denied else MoveMode.CHALLENGE,
+                intent=(
+                    "Replace the artifact head that failed promotion"
+                    if denied
+                    else "Re-establish the exact artifact promotion boundary"
+                ),
+                instructions=(
+                    "Produce a materially distinct replacement for the denied root artifact."
+                    if denied
+                    else "Directly falsify the exact root artifact and bind every finding to "
+                    "its canonical digest. Direct support is required to promote it."
+                ),
+                trajectory_id=state.root_trajectory_id,
+                promotion_gate=PromotionGate(
+                    role="revision" if denied else "challenge",
+                    target_artifact_digest=root_digest,
+                ),
+            )
+            self._propose(directive)
+            return True
         if last_move is not None and last_move.mode == MoveMode.NAVIGATE:
             directive = MoveDirective(
                 mode=MoveMode.LEAD,
@@ -204,25 +232,18 @@ class IntelligenceKernel:
     ) -> bool:
         gate = move.promotion_gate
         assert gate is not None and gate.role == "challenge"
-        relevant = [
+        decision = next(
             item
-            for item in findings
-            if item.artifact_digest == gate.target_artifact_digest
-        ]
-        blocking = [
-            item
-            for item in relevant
-            if item.challenge_verdict
-            in {ChallengeVerdict.CHALLENGES, ChallengeVerdict.UNCERTAIN}
-            and item.metadata.get("material_to_claim", True) is not False
-        ]
-        supported = [
-            item
-            for item in relevant
-            if item.challenge_verdict == ChallengeVerdict.SUPPORTS
-            and (item.raw_ref is not None or item.source == "artifact-check")
-        ]
-        if supported and not blocking:
+            for item in reversed(self.state.promotion_decisions)
+            if item.challenge_move_id == move.move_id
+        )
+        lease = self.state.promotion_lease
+        if (
+            decision.disposition == "granted"
+            and lease is not None
+            and lease.decision_id == decision.decision_id
+            and lease.artifact_digest == gate.target_artifact_digest
+        ):
             self._propose(
                 MoveDirective(
                     mode=MoveMode.LEAD,
@@ -253,6 +274,7 @@ class IntelligenceKernel:
                 promotion_gate=PromotionGate(
                     role="revision",
                     target_artifact_digest=gate.target_artifact_digest,
+                    predecessor_artifact_digest=gate.predecessor_artifact_digest,
                 ),
             )
         )

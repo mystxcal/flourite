@@ -417,6 +417,111 @@ async def test_first_root_artifact_is_falsified_on_its_exact_fork_before_scale(
     assert kernel.state.current_workspace is not None
     assert kernel.state.current_workspace.summary == "Promoted construction"
     assert all(item.intent != "Scale the untested premise" for item in kernel.state.moves.values())
+    assert [item.disposition for item in kernel.state.promotion_decisions] == [
+        "denied",
+        "granted",
+    ]
+    granted = kernel.state.promotion_decisions[-1]
+    assert granted.artifact_digest == revised.content_ref.digest
+    assert granted.predecessor_artifact_digest == first.content_ref.digest
+    assert granted.direct_evidence_observation_ids
+    assert kernel.state.promotion_lease is not None
+    assert kernel.state.promotion_lease.artifact_digest == revised.content_ref.digest
+    assert kernel.state.promotion_lease.decision_id == granted.decision_id
+
+
+async def test_root_artifact_replacement_revokes_lease_and_forces_exact_rechallenge(
+    tmp_path: Path,
+) -> None:
+    def candidate(text: str) -> ArtifactDraft:
+        encoded = text.encode()
+        digest = sha256_text(text)
+        return ArtifactDraft(
+            content_ref=ContentRef(
+                digest=digest,
+                size=len(encoded),
+                media_type="text/markdown",
+                relative_path=f"sha256/{digest}",
+                original_name="artifact.md",
+            )
+        )
+
+    first = candidate("# First")
+    replacement = candidate("# Replacement")
+    outcomes = [
+        MoveExecutionResult(artifact=first, workspace=workspace("First")),
+        MoveExecutionResult(
+            observations=[
+                ObservationDraft(
+                    kind=ObservationKind.CHALLENGE,
+                    summary="The exact first head passes a direct assay",
+                    source="artifact-check",
+                    artifact_digest=first.content_ref.digest,
+                    challenge_verdict=ChallengeVerdict.SUPPORTS,
+                )
+            ]
+        ),
+        MoveExecutionResult(
+            artifact=replacement,
+            workspace=workspace("Replacement"),
+        ),
+    ]
+    kernel, runner = kernel_for(tmp_path, outcomes)
+
+    await kernel.run(max_steps=4)
+
+    assert [mode for mode, _, _ in runner.calls] == [
+        MoveMode.LEAD,
+        MoveMode.CHALLENGE,
+        MoveMode.LEAD,
+    ]
+    assert kernel.state.promotion_lease is None
+    challenge = next(
+        item
+        for item in kernel.state.moves.values()
+        if item.status == MoveStatus.PROPOSED and item.promotion_gate is not None
+    )
+    assert challenge.mode == MoveMode.CHALLENGE
+    assert challenge.promotion_gate is not None
+    assert challenge.promotion_gate.target_artifact_digest == replacement.content_ref.digest
+    assert challenge.promotion_gate.predecessor_artifact_digest == first.content_ref.digest
+
+
+async def test_promotion_support_without_direct_evidence_is_denied(tmp_path: Path) -> None:
+    text = "# Candidate"
+    digest = sha256_text(text)
+    candidate = ArtifactDraft(
+        content_ref=ContentRef(
+            digest=digest,
+            size=len(text.encode()),
+            media_type="text/markdown",
+            relative_path=f"sha256/{digest}",
+            original_name="artifact.md",
+        )
+    )
+    kernel, _ = kernel_for(
+        tmp_path,
+        [
+            MoveExecutionResult(artifact=candidate, workspace=workspace("Candidate")),
+            MoveExecutionResult(
+                observations=[
+                    ObservationDraft(
+                        kind=ObservationKind.CHALLENGE,
+                        summary="The model reports no objection without an attached assay",
+                        source="fresh-challenger",
+                        artifact_digest=digest,
+                        challenge_verdict=ChallengeVerdict.SUPPORTS,
+                    )
+                ]
+            ),
+        ],
+    )
+
+    await kernel.run(max_steps=2)
+
+    assert kernel.state.promotion_decisions[-1].disposition == "denied"
+    assert kernel.state.promotion_decisions[-1].direct_evidence_observation_ids == []
+    assert kernel.state.promotion_lease is None
 
 
 async def test_promotion_gate_identity_survives_a_failed_challenge_retry(

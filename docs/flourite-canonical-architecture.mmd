@@ -6,6 +6,7 @@ flowchart LR
       LOG["Hash-chained journal<br/>semantic source of truth"]
       BLOBS["Content-addressed store<br/>artifacts · evidence · traces"]
       PROTO["Step protocol<br/>stable activity contract"]
+      PROMO["Promotion authority<br/>exact digest · decision · evidence · lease"]
     end
 
     subgraph R["Replaceable runtime"]
@@ -24,7 +25,7 @@ flowchart LR
     subgraph I["Intelligence"]
       LEAD["Persistent Lead<br/>construct · inspect · use tools"]
       NAV["Fresh Navigator<br/>reframe when the local view stalls"]
-      CHAL["Fresh Challenger<br/>falsify the exact finish claim"]
+      CHAL["Fresh Challenger<br/>falsify the exact artifact or finish claim"]
     end
 
     subgraph K["Deterministic kernel"]
@@ -49,7 +50,7 @@ flowchart LR
     WORK --> CTX
     CTX --> LEAD
     CTX -. "stagnation / no live continuation" .-> NAV
-    CTX -. "concrete finish claim" .-> CHAL
+    CTX -. "new root artifact / finish claim" .-> CHAL
     LEAD --> MOVE
     NAV --> MOVE
     CHAL --> MOVE
@@ -60,9 +61,12 @@ flowchart LR
     REDUCE --> ART
     REDUCE --> OBS
     REDUCE --> TRAJ
+    REDUCE --> PROMO
     ART --> BLOBS
     OBS --> BLOBS
     LOG --> CTX
-    CHAL -->|"material finding"| LEAD
+    CHAL -->|"exact evidence"| PROMO
+    ART -. "digest change revokes" .-> PROMO
+    PROMO -->|"lease or denied successor work"| LEAD
     CHAL -->|"direct support for every claimed head"| TERM
     OP -->|"pause · resume · stop · steer"| K

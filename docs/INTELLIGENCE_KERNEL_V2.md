@@ -330,10 +330,13 @@ objective and artifact itself. It is used when independence has decision value:
 - diagnosing surprising failure;
 - evaluating a completion claim.
 
-A challenge is evidence, not authority. The Lead may accept it, contest it with
-direct evidence, or request a discriminating probe. Material disagreement stays
-explicit in the Workspace until evidence resolves it. No single critic can
-silently veto the objective or force an infinite repair loop.
+A challenge supplies evidence rather than rewriting the objective or choosing
+the solution. At an artifact promotion boundary, the controller nevertheless
+enforces the direct evidence mechanically: it records the exact disposition and
+mints a digest-bound lease only for supported evidence. The Lead remains free to
+contest a denial with direct evidence or produce any materially distinct
+replacement, but it cannot silently continue from the denied bytes. No critic
+can prescribe the repair or force an infinite review phase.
 
 A rejection opens work in the same loop. It never sends the run to a separate
 repair world.

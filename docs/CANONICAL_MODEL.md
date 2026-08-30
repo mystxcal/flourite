@@ -19,6 +19,7 @@ flowchart LR
       LOG["Hash-chained journal<br/>semantic source of truth"]
       BLOBS["Content-addressed store<br/>artifacts · evidence · traces"]
       PROTO["Step protocol<br/>stable activity contract"]
+      PROMO["Promotion authority<br/>exact digest · decision · evidence · lease"]
     end
 
     subgraph R["Replaceable runtime"]
@@ -37,7 +38,7 @@ flowchart LR
     subgraph I["Intelligence"]
       LEAD["Persistent Lead<br/>construct · inspect · use tools"]
       NAV["Fresh Navigator<br/>reframe when the local view stalls"]
-      CHAL["Fresh Challenger<br/>falsify the exact finish claim"]
+      CHAL["Fresh Challenger<br/>falsify the exact artifact or finish claim"]
     end
 
     subgraph K["Deterministic kernel"]
@@ -62,7 +63,7 @@ flowchart LR
     WORK --> CTX
     CTX --> LEAD
     CTX -. "stagnation / no live continuation" .-> NAV
-    CTX -. "concrete finish claim" .-> CHAL
+    CTX -. "new root artifact / finish claim" .-> CHAL
     LEAD --> MOVE
     NAV --> MOVE
     CHAL --> MOVE
@@ -73,10 +74,13 @@ flowchart LR
     REDUCE --> ART
     REDUCE --> OBS
     REDUCE --> TRAJ
+    REDUCE --> PROMO
     ART --> BLOBS
     OBS --> BLOBS
     LOG --> CTX
-    CHAL -->|"material finding"| LEAD
+    CHAL -->|"exact evidence"| PROMO
+    ART -. "digest change revokes" .-> PROMO
+    PROMO -->|"lease or denied successor work"| LEAD
     CHAL -->|"direct support for every claimed head"| TERM
     OP -->|"pause · resume · stop · steer"| K
 ```
@@ -117,7 +121,7 @@ therefore cannot create a second semantic controller.
 At a safe boundary the whole run is:
 
 ```text
-Xₜ = ⟨O, Wₜ, Aₜ, Eₜ, Tₜ, Mₜ, Cₜ, Uₜ⟩
+Xₜ = ⟨O, Wₜ, Aₜ, Eₜ, Tₜ, Mₜ, Pₜ, Cₜ, Uₜ⟩
 ```
 
 | Symbol | Meaning | Invariant |
@@ -128,6 +132,7 @@ Xₜ = ⟨O, Wₜ, Aₜ, Eₜ, Tₜ, Mₜ, Cₜ, Uₜ⟩
 | `Eₜ` | Observations | Provenance-bearing evidence, tests, failure residue, and challenge findings. |
 | `Tₜ` | Trajectories | A small set of alternatives opened only for real uncertainty width. |
 | `Mₜ` | Moves | Proposed, running, and completed semantic units of work. |
+| `Pₜ` | Promotion lease | Controller-owned authorization bound to one exact root artifact digest and its direct challenge evidence. |
 | `Cₜ` | Finish claim | Exact satisfaction claims bound to an exact workspace and artifact digests. |
 | `Uₜ` | Usage | Observed time, tokens, turns, tools, and cost against operator limits. |
 
@@ -208,10 +213,19 @@ cannot declare completion.
 
 ### Challenger
 
-The Challenger appears only after the Lead makes a concrete finish claim. It is
-fresh, read-only, and instructed to inspect the actual artifacts and evidence.
-Support must bind to every claimed artifact digest. A stale review cannot bless
-a changed result.
+The Challenger appears at two decision boundaries: before ordinary construction
+scales from a representative root artifact, and after the Lead makes a concrete
+finish claim. It is fresh, read-only, and instructed to inspect the actual
+artifacts and evidence. Support must bind to the exact challenged digest. A
+stale review cannot bless a changed result.
+
+At the early boundary the controller records a durable decision receipt tying
+the digest, Challenger move, predecessor, disposition, and evidence together.
+Only direct support mints a promotion lease. Replacing the root artifact revokes
+that lease atomically; the successor must earn its own. This is a capability
+check, not a review phase: a promoted digest returns immediately to ordinary
+construction, while an unpromoted digest cannot scale, finish, or be sealed for
+evaluation.
 
 Material criticism and uncertainty veto completion and flow back into ordinary
 construction. Non-material observations remain in the record without forcing

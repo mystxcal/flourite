@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..blobs import BlobStore
+from ..core.promotion import decide_promotion, lease_matches, root_artifact_digest
 from ..core.types import (
     ArtifactVersion,
     FinishClaim,
@@ -65,6 +66,21 @@ class MoveResultCompiler:
     ) -> MoveApplied:
         artifact = self._artifact(move, result)
         observations = self._observations(move, result.observations, artifact)
+        promotion_decision = None
+        promotion_lease = None
+        if (
+            result.success
+            and move.promotion_gate is not None
+            and move.promotion_gate.role == "challenge"
+        ):
+            promotion_decision, promotion_lease = decide_promotion(
+                gate=move.promotion_gate,
+                challenge_move_id=move.move_id,
+                observations=observations,
+                decision_id=new_id("promotion-decision"),
+                lease_id=new_id("promotion-lease"),
+                created_at=self.now,
+            )
         repeated_low_information = self._record_information_signal(move, artifact, observations)
         workspace = self._workspace(move, result, artifact, observations=visible_observations)
         resulting_workspace = self._resulting_workspace(result, workspace)
@@ -72,13 +88,25 @@ class MoveResultCompiler:
             move,
             result,
             artifact,
-            resulting_workspace,
         )
-        finish_claim = (
-            None
-            if promotion is not None
-            else self._finish_claim(result, resulting_workspace, observations)
+        requested_finish = self._finish_claim(result, resulting_workspace, observations)
+        defer_until_promotion = (
+            promotion is not None
+            and promotion.promotion_gate is not None
+            and promotion.promotion_gate.role == "challenge"
         )
+        deferred_finish = requested_finish if defer_until_promotion else None
+        finish_claim = requested_finish if promotion is None else None
+        clear_deferred_finish = False
+        if promotion_decision is not None:
+            clear_deferred_finish = True
+            pending = self.state.pending_promotion_finish_claim
+            if (
+                promotion_lease is not None
+                and pending is not None
+                and self._claim_contains_digest(pending, promotion_lease.artifact_digest)
+            ):
+                finish_claim = pending
         continuations = self._continuations(
             move,
             result,
@@ -99,6 +127,10 @@ class MoveResultCompiler:
             new_trajectories=list(continuations.trajectories),
             workspace=workspace,
             activate_workspace=result.workspace.activate if result.workspace is not None else True,
+            promotion_decision=promotion_decision,
+            promotion_lease=promotion_lease,
+            deferred_finish_claim=deferred_finish,
+            clear_deferred_finish_claim=clear_deferred_finish,
             finish_claim=finish_claim,
             next_moves=list(continuations.moves),
             blocked_reason=blocker.reason if blocker is not None else None,
@@ -306,6 +338,13 @@ class MoveResultCompiler:
             created_at=self.now,
         )
 
+    def _claim_contains_digest(self, claim: FinishClaim, digest: str) -> bool:
+        return any(
+            self.state.artifacts[item].digest == digest
+            for item in claim.artifact_head_ids
+            if item in self.state.artifacts
+        )
+
     def _continuations(
         self,
         move: Move,
@@ -352,14 +391,12 @@ class MoveResultCompiler:
         move: Move,
         result: MoveExecutionResult,
         artifact: ArtifactVersion | None,
-        workspace: WorkspaceVersion | None,
     ) -> MoveDirective | None:
         if (
             not result.success
             or result.blocker is not None
             or move.mode != MoveMode.LEAD
             or move.trajectory_id != self.state.root_trajectory_id
-            or workspace is None
         ):
             return None
         if move.promotion_gate is not None and move.promotion_gate.role == "revision":
@@ -367,23 +404,31 @@ class MoveResultCompiler:
                 artifact is not None
                 and artifact.digest != move.promotion_gate.target_artifact_digest
             ):
-                return self._promotion_challenge(move, artifact)
+                return self._promotion_challenge(
+                    move,
+                    artifact,
+                    predecessor_digest=move.promotion_gate.target_artifact_digest,
+                )
             return self._required_revision(move)
-        if artifact is None or any(
-            existing.promotion_gate is not None for existing in self.state.moves.values()
-        ):
+        if artifact is None or lease_matches(self.state, artifact.digest):
             return None
-        return self._promotion_challenge(move, artifact)
+        return self._promotion_challenge(
+            move,
+            artifact,
+            predecessor_digest=root_artifact_digest(self.state),
+        )
 
     @staticmethod
     def _promotion_challenge(
         move: Move,
         artifact: ArtifactVersion,
+        *,
+        predecessor_digest: str | None,
     ) -> MoveDirective:
         return MoveDirective(
             mode=MoveMode.CHALLENGE,
             trajectory_id=move.trajectory_id,
-            intent="Falsify the first representative artifact before scale-out",
+            intent="Falsify the exact representative artifact before promotion",
             instructions=(
                 "Independently inspect and stress the exact frozen artifact with canonical "
                 f"digest {artifact.digest}. Find the strongest concrete reason its governing "
@@ -394,11 +439,12 @@ class MoveResultCompiler:
                 "disposition. Do not edit or elaborate the artifact."
             ),
             fork_purpose=(
-                "Independently falsify the first representative artifact before scale-out"
+                "Independently falsify the exact representative artifact before promotion"
             ),
             promotion_gate=PromotionGate(
                 role="challenge",
                 target_artifact_digest=artifact.digest,
+                predecessor_artifact_digest=predecessor_digest,
             ),
         )
 

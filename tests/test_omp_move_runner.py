@@ -498,7 +498,6 @@ async def test_omp_runner_connects_transport_adapter_and_kernel(tmp_path: Path) 
     assert [request.call_kind for request in provider.requests] == [
         "lead",
         "challenge",
-        "lead",
         "challenge",
     ]
     assert provider.requests[0].preserve_session is True
@@ -804,10 +803,12 @@ async def test_vanished_lead_session_reconstructs_from_durable_context(
         "lead",
         "lead",
         "challenge",
+        "challenge",
     ]
     assert provider.requests[2].resume_thread_id == "thread-lead"
     assert provider.requests[3].resume_thread_id is None
-    assert kernel.state.usage.model_turns == 11
+    assert kernel.state.usage.model_turns == 13
+    assert kernel.state.pending_promotion_finish_claim is None
     assert any(
         item.metadata.get("session_reconstructed") is True
         for item in kernel.state.observations.values()

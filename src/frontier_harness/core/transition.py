@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..errors import LedgerIntegrityError
+from .promotion import decide_promotion, move_allowed_at_boundary, root_artifact_digest
 from .types import (
     ChallengeVerdict,
     FinishClaim,
@@ -13,6 +14,7 @@ from .types import (
     MoveStatus,
     Observation,
     ObservationKind,
+    PromotionLease,
     RunState,
     RunStatus,
     RunTerminated,
@@ -41,7 +43,9 @@ class TransitionIndex:
         trajectory_ids = tuple(item.trajectory_id for item in payload.new_trajectories)
         workspace_id = payload.workspace.workspace_id if payload.workspace is not None else None
         resulting_workspace_id = (
-            workspace_id if payload.activate_workspace else state.current_workspace_id
+            workspace_id
+            if payload.activate_workspace and workspace_id is not None
+            else state.current_workspace_id
         )
         return cls(
             observation_ids=observation_ids,
@@ -79,6 +83,7 @@ class AtomicMoveTransition:
         self._validate_trajectories()
         self._validate_artifacts()
         self._validate_observations()
+        self._validate_promotion_decision()
         self._validate_workspace()
         self._validate_continuations()
         self._validate_terminal_intent()
@@ -142,6 +147,35 @@ class AtomicMoveTransition:
                 and observation.artifact_digest not in self.index.known_artifact_digests
             ):
                 raise LedgerIntegrityError("move observation is bound to an unknown artifact")
+
+    def _validate_promotion_decision(self) -> None:
+        gate = self.move.promotion_gate
+        decision = self.payload.promotion_decision
+        lease = self.payload.promotion_lease
+        is_challenge = gate is not None and gate.role == "challenge"
+        if not self.payload.success:
+            if decision is not None or lease is not None:
+                raise LedgerIntegrityError("failed move cannot decide promotion")
+            return
+        if not is_challenge:
+            if decision is not None or lease is not None:
+                raise LedgerIntegrityError("only a gated challenge can decide promotion")
+            return
+        if decision is None:
+            raise LedgerIntegrityError("gated challenge lacks a promotion decision")
+        assert gate is not None
+        expected, expected_lease = decide_promotion(
+            gate=gate,
+            challenge_move_id=self.move.move_id,
+            observations=self.payload.observations,
+            decision_id=decision.decision_id,
+            lease_id=lease.lease_id if lease is not None else "promotion-lease-denied",
+            created_at=decision.created_at,
+        )
+        if decision != expected:
+            raise LedgerIntegrityError("promotion decision differs from direct evidence")
+        if lease != expected_lease:
+            raise LedgerIntegrityError("promotion lease differs from its decision")
 
     def _validate_workspace(self) -> None:
         workspace = self.payload.workspace
@@ -210,20 +244,52 @@ class AtomicMoveTransition:
             raise LedgerIntegrityError("move continuation workspace is missing")
         if move.based_on_workspace_id is None and self.index.resulting_workspace_id is not None:
             raise LedgerIntegrityError("move continuation omitted an available workspace")
+        if not move_allowed_at_boundary(
+            move,
+            root_digest=self._resulting_root_digest(),
+            lease=self._resulting_promotion_lease(),
+        ):
+            raise LedgerIntegrityError("move crosses an unpromoted artifact boundary")
 
     def _validate_terminal_intent(self) -> None:
         claim = self.payload.finish_claim
         if claim is not None:
-            if claim.workspace_id != self.index.resulting_workspace_id:
-                raise LedgerIntegrityError("finish claim does not describe the resulting workspace")
-            if any(item not in self.index.known_artifacts for item in claim.artifact_head_ids):
-                raise LedgerIntegrityError("finish claim references a missing artifact")
-            if any(item not in self.index.known_observations for item in claim.evidence_refs):
-                raise LedgerIntegrityError("finish claim references missing evidence")
+            self._validate_finish_claim(claim)
+            root_digest = self._resulting_root_digest()
+            lease = self._resulting_promotion_lease()
+            if root_digest is not None and (
+                lease is None or lease.artifact_digest != root_digest
+            ):
+                raise LedgerIntegrityError("finish claim crosses an unpromoted artifact boundary")
+        deferred = self.payload.deferred_finish_claim
+        if deferred is not None:
+            self._validate_finish_claim(deferred)
+            root_digest = self._resulting_root_digest()
+            if root_digest is None or not any(
+                move.promotion_gate is not None
+                and move.promotion_gate.role == "challenge"
+                and move.promotion_gate.target_artifact_digest == root_digest
+                for move in self.payload.next_moves
+            ):
+                raise LedgerIntegrityError(
+                    "deferred finish claim lacks its exact promotion challenge"
+                )
         if any(
             item not in self.index.known_observations for item in self.payload.blocker_evidence_refs
         ):
             raise LedgerIntegrityError("blocker references missing evidence")
+
+    def _validate_finish_claim(self, claim: FinishClaim) -> None:
+        if claim.workspace_id != self.index.resulting_workspace_id:
+            raise LedgerIntegrityError(
+                "finish claim workspace "
+                f"{claim.workspace_id} differs from resulting workspace "
+                f"{self.index.resulting_workspace_id}"
+            )
+        if any(item not in self.index.known_artifacts for item in claim.artifact_head_ids):
+            raise LedgerIntegrityError("finish claim references a missing artifact")
+        if any(item not in self.index.known_observations for item in claim.evidence_refs):
+            raise LedgerIntegrityError("finish claim references missing evidence")
 
     def _commit(self) -> None:
         for trajectory in self.payload.new_trajectories:
@@ -231,16 +297,52 @@ class AtomicMoveTransition:
         for artifact in self.payload.artifacts:
             self.state.artifacts[artifact.artifact_id] = artifact
             self.state.trajectories[artifact.trajectory_id].artifact_head_id = artifact.artifact_id
+            if (
+                artifact.trajectory_id == self.state.root_trajectory_id
+                and (
+                    self.state.promotion_lease is None
+                    or self.state.promotion_lease.artifact_digest != artifact.digest
+                )
+            ):
+                self.state.promotion_lease = None
+            if artifact.trajectory_id == self.state.root_trajectory_id:
+                self.state.pending_promotion_finish_claim = None
         for observation in self.payload.observations:
             self.state.observations[observation.observation_id] = observation
+        if self.payload.promotion_decision is not None:
+            self.state.promotion_decisions.append(self.payload.promotion_decision)
+            self.state.promotion_lease = self.payload.promotion_lease
+        if self.payload.clear_deferred_finish_claim:
+            self.state.pending_promotion_finish_claim = None
         self._commit_workspace()
         self._finish_move()
+        if self.payload.deferred_finish_claim is not None:
+            self.state.pending_promotion_finish_claim = self.payload.deferred_finish_claim
         self.state.finish_claim = self.payload.finish_claim or self.state.finish_claim
+        if self.payload.finish_claim is not None:
+            self.state.pending_promotion_finish_claim = None
         for move in self.payload.next_moves:
             self.state.moves[move.move_id] = move
         if self.payload.blocked_reason is not None:
             self.state.status = RunStatus.BLOCKED
             self.state.terminal_reason = self.payload.blocked_reason
+
+    def _resulting_root_digest(self) -> str | None:
+        root_artifacts = [
+            item
+            for item in self.payload.artifacts
+            if item.trajectory_id == self.state.root_trajectory_id
+        ]
+        if root_artifacts:
+            return root_artifacts[-1].digest
+        return root_artifact_digest(self.state)
+
+    def _resulting_promotion_lease(self) -> PromotionLease | None:
+        if self.payload.promotion_decision is not None:
+            return self.payload.promotion_lease
+        digest = self._resulting_root_digest()
+        lease = self.state.promotion_lease
+        return lease if lease is not None and lease.artifact_digest == digest else None
 
     def _commit_workspace(self) -> None:
         workspace = self.payload.workspace
@@ -255,6 +357,12 @@ class AtomicMoveTransition:
             and self.state.finish_claim.workspace_id != workspace.workspace_id
         ):
             self.state.finish_claim = None
+        if (
+            self.state.pending_promotion_finish_claim is not None
+            and self.payload.deferred_finish_claim is None
+            and self.state.pending_promotion_finish_claim.workspace_id != workspace.workspace_id
+        ):
+            self.state.pending_promotion_finish_claim = None
         consumed = set(workspace.consumed_observation_ids)
         self.state.pending_steering_ids = [
             item for item in self.state.pending_steering_ids if item not in consumed
@@ -282,6 +390,12 @@ class CompletionValidator:
 
     def validate(self) -> None:
         claim = self._current_claim()
+        root_digest = root_artifact_digest(self.state)
+        if root_digest is not None and (
+            self.state.promotion_lease is None
+            or self.state.promotion_lease.artifact_digest != root_digest
+        ):
+            raise LedgerIntegrityError("satisfied run lacks an exact promotion lease")
         relevant = self._challenge_observations(claim)
         if any(self._is_material_challenge(item) for item in relevant):
             raise LedgerIntegrityError("satisfied run has unresolved challenge evidence")
