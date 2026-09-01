@@ -85,38 +85,11 @@ class ChallengeVerdict(StrEnum):
     UNCERTAIN = "uncertain"
 
 
-class PromotionGate(CoreModel):
-    """Bind a challenge or revision move to one exact artifact head."""
+class AssayStatus(StrEnum):
+    """Whether an evaluator could actually inspect the claimed target."""
 
-    role: Literal["challenge", "revision"]
-    target_artifact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    predecessor_artifact_digest: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
-
-
-class PromotionDecision(CoreModel):
-    """Controller-owned disposition for one exact artifact challenge."""
-
-    decision_id: str
-    artifact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    predecessor_artifact_digest: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
-    challenge_move_id: str
-    disposition: Literal["granted", "denied"]
-    evidence_observation_ids: list[str]
-    direct_evidence_observation_ids: list[str]
-    created_at: str
-
-
-class PromotionLease(CoreModel):
-    """Capability to build from, finish, or export one immutable artifact head."""
-
-    lease_id: str
-    artifact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    decision_id: str
-    issued_at: str
+    VALID = "valid"
+    INVALID = "invalid"
 
 
 class ComputeEnvelope(CoreModel):
@@ -217,7 +190,6 @@ class Move(CoreModel):
     mode: MoveMode
     intent: str
     instructions: str = ""
-    promotion_gate: PromotionGate | None = None
     input_refs: list[ContentRef] = Field(default_factory=list)
     declared_ceiling: ComputeEnvelope = Field(default_factory=ComputeEnvelope)
     idempotency_key: str
@@ -243,12 +215,31 @@ class Observation(CoreModel):
     raw_ref: ContentRef | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     challenge_verdict: ChallengeVerdict | None = None
+    claim_id: str | None = None
+    assay_status: AssayStatus | None = None
+    assay_coverage: str | None = None
+    material_to_claim: bool = True
+    direct_inspection: bool = False
+    quality_delta: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_assay_semantics(self) -> Observation:
+        if self.assay_status == AssayStatus.INVALID:
+            raise ValueError("invalid assay cannot enter semantic evidence")
+        if self.challenge_verdict is not None and self.assay_status != AssayStatus.VALID:
+            raise ValueError("challenge verdict requires a valid assay")
+        if self.quality_delta and (
+            self.assay_status != AssayStatus.VALID or not self.direct_inspection
+        ):
+            raise ValueError("quality-lens change requires valid direct inspection")
+        return self
 
 
 class WorkspaceVersion(CoreModel):
     workspace_id: str
     document_ref: ContentRef
+    quality_ref: ContentRef | None = None
     summary: str
     based_on_event_seq: int = Field(ge=0)
     created_at: str
@@ -262,6 +253,7 @@ class WorkspaceVersion(CoreModel):
 class FinishClaim(CoreModel):
     claim_id: str
     workspace_id: str
+    quality_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     artifact_head_ids: list[str] = Field(default_factory=list)
     satisfaction_claims: list[str]
     evidence_refs: list[str] = Field(default_factory=list)
@@ -284,9 +276,6 @@ class RunState(CoreModel):
     moves: dict[str, Move] = Field(default_factory=dict)
     active_move_ids: list[str] = Field(default_factory=list)
     pending_steering_ids: list[str] = Field(default_factory=list)
-    promotion_decisions: list[PromotionDecision] = Field(default_factory=list)
-    promotion_lease: PromotionLease | None = None
-    pending_promotion_finish_claim: FinishClaim | None = None
     finish_claim: FinishClaim | None = None
     usage: ComputeUsage = Field(default_factory=ComputeUsage)
     terminal_reason: str | None = None
@@ -313,42 +302,6 @@ class RunState(CoreModel):
             raise ValueError("active move is missing")
         if any(obs_id not in self.observations for obs_id in self.pending_steering_ids):
             raise ValueError("pending steering observation is missing")
-        decision_ids = {item.decision_id for item in self.promotion_decisions}
-        if len(decision_ids) != len(self.promotion_decisions):
-            raise ValueError("promotion decision id is duplicated")
-        for decision in self.promotion_decisions:
-            if decision.challenge_move_id not in self.moves:
-                raise ValueError("promotion decision challenge move is missing")
-            if any(item not in self.observations for item in decision.evidence_observation_ids):
-                raise ValueError("promotion decision evidence is missing")
-            if not set(decision.direct_evidence_observation_ids).issubset(
-                decision.evidence_observation_ids
-            ):
-                raise ValueError("promotion decision direct evidence is not in its evidence set")
-        if self.promotion_lease is not None:
-            if self.promotion_lease.decision_id not in decision_ids:
-                raise ValueError("promotion lease decision is missing")
-            decision = next(
-                item
-                for item in self.promotion_decisions
-                if item.decision_id == self.promotion_lease.decision_id
-            )
-            if (
-                decision.disposition != "granted"
-                or decision.artifact_digest != self.promotion_lease.artifact_digest
-            ):
-                raise ValueError("promotion lease differs from its decision")
-            root = self.trajectories[self.root_trajectory_id]
-            if root.artifact_head_id is None:
-                raise ValueError("promotion lease exists without a root artifact")
-            if self.artifacts[root.artifact_head_id].digest != self.promotion_lease.artifact_digest:
-                raise ValueError("promotion lease is stale for the root artifact")
-        pending = self.pending_promotion_finish_claim
-        if pending is not None:
-            if pending.workspace_id not in self.workspaces:
-                raise ValueError("deferred finish workspace is missing")
-            if any(item not in self.artifacts for item in pending.artifact_head_ids):
-                raise ValueError("deferred finish artifact is missing")
         return self
 
 
@@ -386,10 +339,6 @@ class MoveApplied(CoreModel):
     new_trajectories: list[Trajectory] = Field(default_factory=list)
     workspace: WorkspaceVersion | None = None
     activate_workspace: bool = True
-    promotion_decision: PromotionDecision | None = None
-    promotion_lease: PromotionLease | None = None
-    deferred_finish_claim: FinishClaim | None = None
-    clear_deferred_finish_claim: bool = False
     finish_claim: FinishClaim | None = None
     next_moves: list[Move] = Field(default_factory=list)
     blocked_reason: str | None = None
@@ -404,19 +353,10 @@ class MoveApplied(CoreModel):
             raise ValueError("successful move application cannot carry an error")
         if not self.success and not self.error:
             raise ValueError("failed move application requires an error")
-        if self.promotion_lease is not None and self.promotion_decision is None:
-            raise ValueError("promotion lease requires its decision")
-        if self.clear_deferred_finish_claim and self.promotion_decision is None:
-            raise ValueError("only a promotion decision can clear a deferred finish claim")
-        if self.deferred_finish_claim is not None and self.finish_claim is not None:
-            raise ValueError("finish claim cannot be active and deferred together")
-        continuations = (
-            int(self.finish_claim is not None)
-            + int(bool(self.next_moves))
-            + int(self.blocked_reason is not None)
-        )
-        if continuations > 1:
-            raise ValueError("move application may choose only one continuation")
+        if self.blocked_reason is not None and (
+            self.finish_claim is not None or self.next_moves
+        ):
+            raise ValueError("a blocked move cannot also continue or claim completion")
         return self
 
 

@@ -46,8 +46,8 @@ class MarkdownAdapter(ArtifactAdapter):
     ) -> CallWorkspace:
         root = self.run_dir / "capsules" / call_id
         if root.exists():
-            context = root / "input"
-            output = root / "output"
+            context = root / ".sfh_context"
+            output = root / ".sfh_output"
             context.mkdir(parents=True, exist_ok=True)
             output.mkdir(parents=True, exist_ok=True)
             return CallWorkspace(
@@ -60,8 +60,8 @@ class MarkdownAdapter(ArtifactAdapter):
                 expected_artifact_path=output / "artifact.md",
                 metadata={"profile": self.profile.name, "resumed": True},
             )
-        context = root / "input"
-        output = root / "output"
+        context = root / ".sfh_context"
+        output = root / ".sfh_output"
         context.mkdir(parents=True)
         output.mkdir(parents=True)
         expected_artifact = output / "artifact.md"

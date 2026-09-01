@@ -1,72 +1,42 @@
 flowchart LR
-    OP["Operator<br/>task · sources · steering · hard envelope"]
+    U["Operator<br/>objective · sources · steering · hard envelope"]
 
-    subgraph A["Stable authority"]
-      OBJ["Objective<br/>immutable text + amendments"]
-      LOG["Hash-chained journal<br/>semantic source of truth"]
-      BLOBS["Content-addressed store<br/>artifacts · evidence · traces"]
-      PROTO["Step protocol<br/>stable activity contract"]
-      PROMO["Promotion authority<br/>exact digest · decision · evidence · lease"]
+    subgraph M["Live intelligence state"]
+      O["Objective<br/>exact and immutable"]
+      F["Frontier<br/>invariants · causal model · unknowns<br/>dead ends · best next discriminators"]
+      Q["Quality lens<br/>task-native signatures · coverage<br/>proxy traps · blind spots"]
+      A["Artifact<br/>actual current result"]
+      E["Evidence<br/>provenance · scope · validity · effect"]
     end
 
-    subgraph R["Replaceable runtime"]
-      SUP["Stable supervisor<br/>one run · no semantic authority"]
-      REG["Atomic component registry<br/>immutable generations"]
-      WORK["Disposable activity worker<br/>one leased generation"]
+    W["Capable worker<br/>reason · inspect · build · use tools"]
+    R["Causal router<br/>send each signal to the layer that caused it"]
+    X["Fresh perspective<br/>only for frame failure or exact challenge"]
+
+    U --> O
+    O --> W
+    F --> W
+    Q --> W
+    A --> W
+    E --> W
+    W -->|"highest-EV move"| A
+    W -->|"observation"| E
+    E --> R
+    R -->|"solution evidence"| A
+    R -->|"world-model correction"| F
+    R -->|"quality discriminator"| Q
+    R -->|"execution recovery"| W
+    F -. "samsara / missing frame" .-> X
+    Q -. "blind spot / uncovered claim" .-> X
+    X --> E
+
+    subgraph D["Durable substrate"]
+      J["Append-only journal"]
+      B["Content-addressed artifacts and evidence"]
+      S["Replaceable step runtime"]
     end
 
-    subgraph S["Live search state"]
-      WS["Current workspace<br/>compact global understanding"]
-      ART["Artifact heads<br/>actual current deliverables"]
-      OBS["Observations<br/>tests · sources · failures · challenge"]
-      TRAJ["Trajectories<br/>only earned alternatives"]
-    end
-
-    subgraph I["Intelligence"]
-      LEAD["Persistent Lead<br/>construct · inspect · use tools"]
-      NAV["Fresh Navigator<br/>reframe when the local view stalls"]
-      CHAL["Fresh Challenger<br/>falsify the exact artifact or finish claim"]
-    end
-
-    subgraph K["Deterministic kernel"]
-      CTX["Context lens<br/>objective + relevant direct state"]
-      MOVE["Move<br/>one semantic unit of work"]
-      APPLY["Atomic application<br/>all meaning or none"]
-      REDUCE["Reducer<br/>legal state transition"]
-      TERM["Terminal truth<br/>satisfied · exhausted · blocked<br/>stopped · failed"]
-    end
-
-    OP --> OBJ
-    OP -->|"bind / rollback"| REG
-    REG -->|"lease at boundary"| SUP
-    SUP --> WORK
-    PROTO --> SUP
-    PROTO --> WORK
-    OBJ --> CTX
-    WS --> CTX
-    ART --> CTX
-    OBS --> CTX
-    TRAJ --> CTX
-    WORK --> CTX
-    CTX --> LEAD
-    CTX -. "stagnation / no live continuation" .-> NAV
-    CTX -. "new root artifact / finish claim" .-> CHAL
-    LEAD --> MOVE
-    NAV --> MOVE
-    CHAL --> MOVE
-    MOVE --> APPLY
-    APPLY --> REDUCE
-    REDUCE --> LOG
-    REDUCE --> WS
-    REDUCE --> ART
-    REDUCE --> OBS
-    REDUCE --> TRAJ
-    REDUCE --> PROMO
-    ART --> BLOBS
-    OBS --> BLOBS
-    LOG --> CTX
-    CHAL -->|"exact evidence"| PROMO
-    ART -. "digest change revokes" .-> PROMO
-    PROMO -->|"lease or denied successor work"| LEAD
-    CHAL -->|"direct support for every claimed head"| TERM
-    OP -->|"pause · resume · stop · steer"| K
+    M --> J
+    A --> B
+    E --> B
+    S --> W

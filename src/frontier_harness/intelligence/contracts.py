@@ -7,6 +7,7 @@ from typing import Protocol
 from pydantic import Field, model_validator
 
 from ..core.types import (
+    AssayStatus,
     ChallengeVerdict,
     ComputeEnvelope,
     ComputeUsage,
@@ -15,7 +16,6 @@ from ..core.types import (
     Move,
     MoveMode,
     ObservationKind,
-    PromotionGate,
     RunState,
 )
 from .context import ContextFrame
@@ -28,7 +28,6 @@ class MoveDirective(CoreModel):
     trajectory_id: str | None = None
     retry_of_move_id: str | None = None
     fork_purpose: str | None = None
-    promotion_gate: PromotionGate | None = None
     declared_ceiling: ComputeEnvelope = Field(default_factory=ComputeEnvelope)
 
 
@@ -41,6 +40,12 @@ class ObservationDraft(CoreModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     bind_to_new_artifact: bool = False
     challenge_verdict: ChallengeVerdict | None = None
+    claim_id: str | None = None
+    assay_status: AssayStatus | None = None
+    assay_coverage: str | None = None
+    material_to_claim: bool = True
+    direct_inspection: bool = False
+    quality_delta: bool = False
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
@@ -53,6 +58,7 @@ class ArtifactDraft(CoreModel):
 
 class WorkspaceDraft(CoreModel):
     document: str
+    quality_document: str | None = None
     summary: str
     consumed_observation_ids: list[str] = Field(default_factory=list)
     artifact_head_ids: list[str] = Field(default_factory=list)

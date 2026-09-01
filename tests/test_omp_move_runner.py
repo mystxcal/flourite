@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -12,7 +12,7 @@ from frontier_harness.blobs import BlobStore
 from frontier_harness.config import ProviderConfig, SoftwarePolicy
 from frontier_harness.core.journal import KernelJournal
 from frontier_harness.core.kernel import IntelligenceKernel
-from frontier_harness.core.types import ComputeEnvelope, RunResumed, RunStatus
+from frontier_harness.core.types import AssayStatus, ComputeEnvelope, RunResumed, RunStatus
 from frontier_harness.errors import ProviderCallError
 from frontier_harness.intelligence.omp_runner import OmpMoveRunner
 from frontier_harness.ledger import EventLedger
@@ -61,16 +61,17 @@ class FakeOmpProvider:
             }
             thread_id = "thread-lead"
         else:
-            evidence = request.cwd / "promotion-assay.txt"
+            evidence = request.cwd / "challenge-assay.txt"
             evidence.write_text("direct inspection passed\n", encoding="utf-8")
             value = {
                 "artifact_changed": False,
+                "assay": {"status": "valid", "coverage": "whole artifact"},
                 "observations": [
                     {
                         "kind": "challenge",
                         "summary": "Direct inspection supports the completion claim",
                         "verdict": "supports",
-                        "evidence_path": "promotion-assay.txt",
+                        "evidence_path": "challenge-assay.txt",
                     }
                 ],
             }
@@ -109,7 +110,6 @@ class EphemeralChallengeRepairProvider(FakeOmpProvider):
         result = await super().run(request)
         if (
             request.call_kind == "challenge"
-            and "promotion gate" not in request.prompt
             and "-repair-" not in request.call_id
         ):
             value = result.response.model_dump(mode="python")
@@ -122,6 +122,64 @@ class EphemeralChallengeRepairProvider(FakeOmpProvider):
                 }
             )
         return result
+
+
+class AssayHandshakeProvider(FakeOmpProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.challenge_calls = 0
+
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        if request.call_kind != "challenge":
+            return await super().run(request)
+        self.requests.append(request)
+        self.challenge_calls += 1
+        if self.challenge_calls == 1:
+            index = json.loads(
+                (request.cwd / ".sfh_context" / "index.json").read_text(encoding="utf-8")
+            )
+            (request.cwd / index["artifact_heads"][0]["local_path"]).unlink()
+            value = {
+                "artifact_changed": False,
+                "assay": {
+                    "status": "invalid",
+                    "reason": "the target path was copied incorrectly",
+                    "missing_material": [".sfh_context/artifacts/target.md"],
+                },
+                "observations": [],
+            }
+        else:
+            index = json.loads(
+                (request.cwd / ".sfh_context" / "index.json").read_text(encoding="utf-8")
+            )
+            assert (request.cwd / index["artifact_heads"][0]["local_path"]).is_file()
+            value = {
+                "artifact_changed": False,
+                "assay": {
+                    "status": "valid",
+                    "coverage": "read the complete artifact from the relative manifest path",
+                },
+                "observations": [
+                    {
+                        "kind": "challenge",
+                        "summary": "Direct whole-artifact inspection supports the claim",
+                        "verdict": "supports",
+                    }
+                ],
+                "quality_delta": (
+                    ["A complete artifact must remain understandable without hidden context."]
+                    if self.challenge_calls == 2
+                    else []
+                ),
+            }
+        return ProviderCallResult(
+            call_id=request.call_id,
+            response=request.response_model.model_validate(value),
+            usage=Usage(calls=1, model_requests=1, input_tokens=10, output_tokens=5),
+            duration_seconds=0.01,
+            thread_id=None,
+            trace_summary=ProviderTraceSummary(model_turns=1),
+        )
 
 
 class ExploratoryChallengeProvider(FakeOmpProvider):
@@ -145,17 +203,22 @@ class ExploratoryChallengeProvider(FakeOmpProvider):
             }
             thread_id = "lead-thread"
         else:
-            evidence = request.cwd / "promotion-assay.txt"
+            evidence = request.cwd / "challenge-assay.txt"
             evidence.write_text("direct inspection passed\n", encoding="utf-8")
+            index = json.loads(
+                (request.cwd / ".sfh_context" / "index.json").read_text(encoding="utf-8")
+            )
+            artifact_digest = index["artifact_heads"][0]["digest"]
             value = {
                 "artifact_changed": False,
+                "assay": {"status": "valid", "coverage": "whole artifact"},
                 "observations": [
                     {
                         "kind": "challenge",
                         "summary": "A file-level inspection found a material defect",
                         "verdict": "challenges",
-                        "artifact_digest": "a" * 64,
-                        "evidence_path": "/tmp/non-durable-challenge-evidence",
+                        "artifact_digest": artifact_digest,
+                        "evidence_path": "challenge-assay.txt",
                     }
                 ],
             }
@@ -221,16 +284,17 @@ class VanishingSessionProvider(FakeOmpProvider):
                 }
                 thread_id = "thread-rebuilt"
         else:
-            evidence = request.cwd / "promotion-assay.txt"
+            evidence = request.cwd / "challenge-assay.txt"
             evidence.write_text("direct inspection passed\n", encoding="utf-8")
             value = {
                 "artifact_changed": False,
+                "assay": {"status": "valid", "coverage": "whole artifact"},
                 "observations": [
                     {
                         "kind": "challenge",
                         "summary": "Direct inspection supports the reconstructed artifact",
                         "verdict": "supports",
-                        "evidence_path": "promotion-assay.txt",
+                        "evidence_path": "challenge-assay.txt",
                     }
                 ],
             }
@@ -310,10 +374,11 @@ class PersistentSoftwareProvider(FakeOmpProvider):
             expected_film = b"film one" if self.lead_calls == 1 else b"film two"
             assert (request.cwd / "app.txt").read_text(encoding="utf-8") == expected_epoch
             assert (request.cwd / "dist" / "film.mp4").read_bytes() == expected_film
-            evidence = request.cwd / "promotion-assay.txt"
+            evidence = request.cwd / "challenge-assay.txt"
             evidence.write_text("direct projection passed\n", encoding="utf-8")
             value = {
                 "artifact_changed": False,
+                "assay": {"status": "valid", "coverage": "whole artifact"},
                 "observations": [
                     {
                         "kind": "challenge",
@@ -323,8 +388,12 @@ class PersistentSoftwareProvider(FakeOmpProvider):
                             else "The exact durable film survives independent projection"
                         ),
                         "verdict": "supports",
-                        "artifact_digest": hashlib.sha256(expected_film).hexdigest(),
-                        "evidence_path": "promotion-assay.txt",
+                        "artifact_digest": json.loads(
+                            (request.cwd / ".sfh_context" / "index.json").read_text(
+                                encoding="utf-8"
+                            )
+                        )["artifact_heads"][0]["digest"],
+                        "evidence_path": "challenge-assay.txt",
                     }
                 ],
             }
@@ -371,16 +440,17 @@ class BranchingSoftwareProvider(FakeOmpProvider):
             assert self.root_cwd is not None
             assert request.cwd != self.root_cwd
             assert (request.cwd / "base.txt").read_text(encoding="utf-8") == "fork point\n"
-            evidence = request.cwd / "promotion-assay.txt"
+            evidence = request.cwd / "challenge-assay.txt"
             evidence.write_text("fork inspection passed\n", encoding="utf-8")
             value = {
                 "artifact_changed": False,
+                "assay": {"status": "valid", "coverage": "whole artifact"},
                 "observations": [
                     {
                         "kind": "challenge",
                         "summary": "The exact fork point survives independent inspection",
                         "verdict": "supports",
-                        "evidence_path": "promotion-assay.txt",
+                        "evidence_path": "challenge-assay.txt",
                     }
                 ],
             }
@@ -498,7 +568,6 @@ async def test_omp_runner_connects_transport_adapter_and_kernel(tmp_path: Path) 
     assert [request.call_kind for request in provider.requests] == [
         "lead",
         "challenge",
-        "challenge",
     ]
     assert provider.requests[0].preserve_session is True
     assert provider.requests[1].preserve_session is False
@@ -557,11 +626,9 @@ async def test_software_lead_keeps_one_live_workspace_and_durable_outputs(
         item
         for item in kernel.state.observations.values()
         if item.challenge_verdict is not None
-        and item.metadata.get("inspected_content_digest")
-        == hashlib.sha256(b"film two").hexdigest()
     )
     assert support.artifact_digest == artifact.digest
-    assert support.metadata["inspected_content_digest"] == hashlib.sha256(b"film two").hexdigest()
+    assert support.direct_inspection is True
 
 
 async def test_interrupted_software_move_resumes_same_workspace_without_fake_repair(
@@ -686,7 +753,7 @@ async def test_commit_error_is_repaired_in_the_same_live_codex_workspace(
     assert "Exact error:" in repair.prompt
 
 
-async def test_ephemeral_challenge_keeps_optional_bad_evidence_locator_without_replay(
+async def test_ephemeral_challenge_repairs_bad_evidence_path_before_admission(
     tmp_path: Path,
 ) -> None:
     blobs = BlobStore(tmp_path / "blobs")
@@ -718,13 +785,65 @@ async def test_ephemeral_challenge_keeps_optional_bad_evidence_locator_without_r
     assert kernel.state.status == RunStatus.SATISFIED
     challenge_requests = [item for item in provider.requests if item.call_kind == "challenge"]
     assert len(challenge_requests) == 2
+    assert challenge_requests[0].cwd == challenge_requests[1].cwd
+    assert "AssayInvalidError" in challenge_requests[1].prompt
     challenge = next(
         item
         for item in kernel.state.observations.values()
         if item.kind.value == "challenge"
-        and item.metadata.get("evidence_capture") == "unresolved_optional_locator"
     )
-    assert challenge.metadata["evidence_capture"] == "unresolved_optional_locator"
+    assert challenge.metadata["evidence_capture"] == "durable"
+
+
+async def test_invalid_assay_repairs_same_capsule_before_any_verdict(
+    tmp_path: Path,
+) -> None:
+    blobs = BlobStore(tmp_path / "blobs")
+    adapter = MarkdownAdapter(
+        profile=get_profile("generic"),
+        run_dir=tmp_path,
+        blobs=blobs,
+        workspace=None,
+    )
+    provider = AssayHandshakeProvider()
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_assay_handshake"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=OmpMoveRunner(
+            provider=provider,  # type: ignore[arg-type]
+            adapter=adapter,
+            run_dir=tmp_path,
+        ),
+    )
+    kernel.start("Build and verify an artifact.")
+
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.SATISFIED
+    challenges = [item for item in provider.requests if item.call_kind == "challenge"]
+    assert len(challenges) == 3
+    assert challenges[0].cwd == challenges[1].cwd
+    assert "AssayInvalidError" in challenges[1].prompt
+    verdicts = [
+        item
+        for item in kernel.state.observations.values()
+        if item.challenge_verdict is not None
+    ]
+    assert len(verdicts) == 2
+    assert all(item.assay_status == AssayStatus.VALID for item in verdicts)
+    assert any(
+        item.quality_delta
+        for item in kernel.state.observations.values()
+    )
+    assert kernel.state.current_workspace is not None
+    assert kernel.state.current_workspace.quality_ref is not None
+    quality = blobs.read_text(kernel.state.current_workspace.quality_ref)
+    assert "understandable without hidden context" in quality
+    assert kernel.state.finish_claim is not None
+    assert kernel.state.finish_claim.quality_digest == kernel.state.current_workspace.quality_ref.digest
 
 
 async def test_exploratory_challenge_binds_to_frozen_workspace_without_finish_claim(
@@ -762,9 +881,7 @@ async def test_exploratory_challenge_binds_to_frozen_workspace_without_finish_cl
         item for item in kernel.state.observations.values() if item.kind.value == "challenge"
     )
     assert challenge.artifact_digest == artifact.digest
-    assert challenge.metadata["artifact_binding"] == "single_frozen_target"
-    assert challenge.metadata["inspected_content_digest"] == "a" * 64
-    assert challenge.metadata["evidence_capture"] == "unresolved_optional_locator"
+    assert challenge.metadata["evidence_capture"] == "durable"
     assert not any("-repair-" in item.call_id for item in provider.requests)
 
 
@@ -799,16 +916,13 @@ async def test_vanished_lead_session_reconstructs_from_durable_context(
     assert kernel.state.status == RunStatus.SATISFIED
     assert [item.call_kind for item in provider.requests] == [
         "lead",
-        "challenge",
         "lead",
         "lead",
-        "challenge",
         "challenge",
     ]
-    assert provider.requests[2].resume_thread_id == "thread-lead"
-    assert provider.requests[3].resume_thread_id is None
-    assert kernel.state.usage.model_turns == 13
-    assert kernel.state.pending_promotion_finish_claim is None
+    assert provider.requests[1].resume_thread_id == "thread-lead"
+    assert provider.requests[2].resume_thread_id is None
+    assert kernel.state.usage.model_turns == 9
     assert any(
         item.metadata.get("session_reconstructed") is True
         for item in kernel.state.observations.values()

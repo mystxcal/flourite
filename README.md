@@ -33,7 +33,7 @@ Flourite is an independent open-source project, not an OpenAI product.
 | --- | --- |
 | Fixed phases and agent roles | One adaptive loop around the live artifact |
 | Many independent answers | One current best, with optional real branches |
-| Chat history as memory | Explicit workspace plus content-addressed evidence |
+| Chat history as memory | Compressed frontier, evolving quality lens, and content-addressed evidence |
 | Criticism as more prose | Findings that change the next construction move |
 | Stop at a call or round limit | Stop when the claim survives direct challenge, or an explicit operator limit is exhausted |
 | Crash between model output and integration | Commit the whole semantic move atomically or not at all |
@@ -155,13 +155,12 @@ receipt beside the journal.
 
 ## How it works
 
-Flourite keeps five kinds of state:
+Flourite keeps five semantic objects:
 
 - **Objective** — immutable original task plus explicit operator amendments.
-- **Workspace** — the compact, expressive understanding needed to continue.
-- **Move** — one semantic unit of construction, navigation, challenge, or
-  environment work.
-- **Observation** — provenance-bearing evidence, tests, failures, steering,
+- **Frontier** — the shortest causal model from which a fresh strong model can continue.
+- **Quality lens** — task-native success and failure signatures, observable discriminators, proxy traps, and blind spots that evolve from evidence.
+- **Evidence** — provenance-bearing observations, tests, failures, steering,
   and challenge findings.
 - **Artifact and trajectory heads** — the actual current deliverables and the
   few live alternatives that earned independent development.
@@ -169,7 +168,7 @@ Flourite keeps five kinds of state:
 One loop advances them:
 
 ```text
-exact objective + current workspace + direct evidence
+exact objective + frontier + quality lens + direct evidence
                          │
                          ▼
               Lead makes the strongest move
@@ -185,7 +184,7 @@ exact objective + current workspace + direct evidence
                          │
              finish claim or next construction
                          │
-              fresh artifact-bound challenge
+                 valid direct challenge
                   │                  │
                support          material finding
                   │                  │
@@ -199,7 +198,10 @@ when local continuation stops producing information; it reconstructs the
 global frontier without inheriting the Lead's framing. A fresh Challenger can
 support, challenge, or remain uncertain about a concrete finish claim. A
 material rejection is not a terminal “review phase”—it becomes evidence for
-the next normal construction move.
+the next normal construction move. A challenge first proves that its assay can
+actually perceive the target. Missing material repairs and replays the same
+evaluation; it cannot become a semantic verdict. New material distinctions
+update the quality lens and reopen affected claims.
 
 Every external result is committed as one `move.applied` transaction:
 observations, artifact, workspace, branches, continuation, finish claim, usage,

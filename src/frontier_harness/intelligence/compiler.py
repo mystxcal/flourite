@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..blobs import BlobStore
-from ..core.promotion import decide_promotion, lease_matches, root_artifact_digest
 from ..core.types import (
     ArtifactVersion,
     FinishClaim,
@@ -16,7 +15,6 @@ from ..core.types import (
     MoveMode,
     Observation,
     ObservationKind,
-    PromotionGate,
     RunState,
     Trajectory,
     TrajectoryStatus,
@@ -25,6 +23,14 @@ from ..core.types import (
 from ..ids import new_id
 from ..util import utc_now
 from .contracts import MoveDirective, MoveExecutionResult, ObservationDraft
+
+DEFAULT_QUALITY_LENS = """# Quality lens
+
+- Satisfy the exact objective, including explicit constraints and amendments.
+- Judge the real artifact with task-native evidence, not activity or proxy checks.
+- Preserve correctness, completeness, coherence, usability, and robustness where they matter.
+- Record newly discovered success signatures, failure signatures, and blind spots here.
+"""
 
 
 class MoveBuilder(Protocol):
@@ -66,54 +72,17 @@ class MoveResultCompiler:
     ) -> MoveApplied:
         artifact = self._artifact(move, result)
         observations = self._observations(move, result.observations, artifact)
-        promotion_decision = None
-        promotion_lease = None
-        if (
-            result.success
-            and move.promotion_gate is not None
-            and move.promotion_gate.role == "challenge"
-        ):
-            promotion_decision, promotion_lease = decide_promotion(
-                gate=move.promotion_gate,
-                challenge_move_id=move.move_id,
-                observations=observations,
-                decision_id=new_id("promotion-decision"),
-                lease_id=new_id("promotion-lease"),
-                created_at=self.now,
-            )
         repeated_low_information = self._record_information_signal(move, artifact, observations)
         workspace = self._workspace(move, result, artifact, observations=visible_observations)
         resulting_workspace = self._resulting_workspace(result, workspace)
-        promotion = self._promotion_continuation(
-            move,
-            result,
-            artifact,
-        )
-        requested_finish = self._finish_claim(result, resulting_workspace, observations)
-        defer_until_promotion = (
-            promotion is not None
-            and promotion.promotion_gate is not None
-            and promotion.promotion_gate.role == "challenge"
-        )
-        deferred_finish = requested_finish if defer_until_promotion else None
-        finish_claim = requested_finish if promotion is None else None
-        clear_deferred_finish = False
-        if promotion_decision is not None:
-            clear_deferred_finish = True
-            pending = self.state.pending_promotion_finish_claim
-            if (
-                promotion_lease is not None
-                and pending is not None
-                and self._claim_contains_digest(pending, promotion_lease.artifact_digest)
-            ):
-                finish_claim = pending
+        finish_claim = self._finish_claim(result, resulting_workspace, observations)
         continuations = self._continuations(
             move,
             result,
             workspace=resulting_workspace,
             repeated_low_information=repeated_low_information,
             has_finish_claim=finish_claim is not None,
-            forced_directive=promotion,
+            forced_directive=None,
         )
         workspace = self._include_new_trajectories(workspace, continuations.trajectories)
         blocker = result.blocker
@@ -127,10 +96,6 @@ class MoveResultCompiler:
             new_trajectories=list(continuations.trajectories),
             workspace=workspace,
             activate_workspace=result.workspace.activate if result.workspace is not None else True,
-            promotion_decision=promotion_decision,
-            promotion_lease=promotion_lease,
-            deferred_finish_claim=deferred_finish,
-            clear_deferred_finish_claim=clear_deferred_finish,
             finish_claim=finish_claim,
             next_moves=list(continuations.moves),
             blocked_reason=blocker.reason if blocker is not None else None,
@@ -169,8 +134,9 @@ class MoveResultCompiler:
         artifact: ArtifactVersion | None,
     ) -> Observation:
         metadata = dict(draft.metadata)
-        if move.mode == MoveMode.CHALLENGE and self.state.finish_claim is not None:
-            metadata.setdefault("claim_id", self.state.finish_claim.claim_id)
+        claim_id = draft.claim_id
+        if claim_id is None and move.mode == MoveMode.CHALLENGE and self.state.finish_claim:
+            claim_id = self.state.finish_claim.claim_id
         bound_digest = draft.artifact_digest
         if bound_digest is None and draft.bind_to_new_artifact and artifact is not None:
             bound_digest = artifact.digest
@@ -186,6 +152,12 @@ class MoveResultCompiler:
             raw_ref=draft.raw_ref,
             confidence=draft.confidence,
             challenge_verdict=draft.challenge_verdict,
+            claim_id=claim_id,
+            assay_status=draft.assay_status,
+            assay_coverage=draft.assay_coverage,
+            material_to_claim=draft.material_to_claim,
+            direct_inspection=draft.direct_inspection,
+            quality_delta=draft.quality_delta,
             metadata=metadata,
         )
 
@@ -272,6 +244,24 @@ class MoveResultCompiler:
             media_type="text/markdown; charset=utf-8",
             original_name="workspace.md",
         )
+        base = self.state.workspaces.get(move.based_on_workspace_id or "")
+        quality_ref = (
+            self.blobs.put_text(
+                draft.quality_document,
+                media_type="text/markdown; charset=utf-8",
+                original_name="quality.md",
+            )
+            if draft.quality_document is not None
+            else (
+                base.quality_ref
+                if base is not None and base.quality_ref is not None
+                else self.blobs.put_text(
+                    DEFAULT_QUALITY_LENS,
+                    media_type="text/markdown; charset=utf-8",
+                    original_name="quality.md",
+                )
+            )
+        )
         heads = draft.artifact_head_ids or self._artifact_heads(move, artifact)
         trajectories = draft.active_trajectory_ids or [
             item.trajectory_id
@@ -287,6 +277,7 @@ class MoveResultCompiler:
             workspace_id=new_id("ws"),
             parent_workspace_id=move.based_on_workspace_id,
             document_ref=document_ref,
+            quality_ref=quality_ref,
             summary=draft.summary,
             based_on_event_seq=self.state.last_event_seq,
             artifact_head_ids=heads,
@@ -331,18 +322,14 @@ class MoveResultCompiler:
         return FinishClaim(
             claim_id=new_id("claim"),
             workspace_id=workspace.workspace_id,
+            quality_digest=(
+                workspace.quality_ref.digest if workspace.quality_ref is not None else None
+            ),
             artifact_head_ids=draft.artifact_head_ids or workspace.artifact_head_ids,
             satisfaction_claims=draft.satisfaction_claims,
             evidence_refs=draft.evidence_refs or [item.observation_id for item in observations],
             residual_uncertainty=draft.residual_uncertainty,
             created_at=self.now,
-        )
-
-    def _claim_contains_digest(self, claim: FinishClaim, digest: str) -> bool:
-        return any(
-            self.state.artifacts[item].digest == digest
-            for item in claim.artifact_head_ids
-            if item in self.state.artifacts
         )
 
     def _continuations(
@@ -385,86 +372,6 @@ class MoveResultCompiler:
                 moves.append(candidate)
                 reserved_keys.add(candidate.idempotency_key)
         return CompiledContinuations(tuple(moves), tuple(trajectories))
-
-    def _promotion_continuation(
-        self,
-        move: Move,
-        result: MoveExecutionResult,
-        artifact: ArtifactVersion | None,
-    ) -> MoveDirective | None:
-        if (
-            not result.success
-            or result.blocker is not None
-            or move.mode != MoveMode.LEAD
-            or move.trajectory_id != self.state.root_trajectory_id
-        ):
-            return None
-        if move.promotion_gate is not None and move.promotion_gate.role == "revision":
-            if (
-                artifact is not None
-                and artifact.digest != move.promotion_gate.target_artifact_digest
-            ):
-                return self._promotion_challenge(
-                    move,
-                    artifact,
-                    predecessor_digest=move.promotion_gate.target_artifact_digest,
-                )
-            return self._required_revision(move)
-        if artifact is None or lease_matches(self.state, artifact.digest):
-            return None
-        return self._promotion_challenge(
-            move,
-            artifact,
-            predecessor_digest=root_artifact_digest(self.state),
-        )
-
-    @staticmethod
-    def _promotion_challenge(
-        move: Move,
-        artifact: ArtifactVersion,
-        *,
-        predecessor_digest: str | None,
-    ) -> MoveDirective:
-        return MoveDirective(
-            mode=MoveMode.CHALLENGE,
-            trajectory_id=move.trajectory_id,
-            intent="Falsify the exact representative artifact before promotion",
-            instructions=(
-                "Independently inspect and stress the exact frozen artifact with canonical "
-                f"digest {artifact.digest}. Find the strongest concrete reason its governing "
-                "premise would fail the objective. Execute the smallest discriminating "
-                "artifact-native assay or matched counterexample available and attach its "
-                "durable evidence. A support verdict requires direct evidence; absence of a "
-                "criticism is not support. Return a scoped supports, challenges, or uncertain "
-                "disposition. Do not edit or elaborate the artifact."
-            ),
-            fork_purpose=(
-                "Independently falsify the exact representative artifact before promotion"
-            ),
-            promotion_gate=PromotionGate(
-                role="challenge",
-                target_artifact_digest=artifact.digest,
-                predecessor_artifact_digest=predecessor_digest,
-            ),
-        )
-
-    @staticmethod
-    def _required_revision(move: Move) -> MoveDirective:
-        gate = move.promotion_gate
-        assert gate is not None and gate.role == "revision"
-        return MoveDirective(
-            mode=MoveMode.LEAD,
-            trajectory_id=move.trajectory_id,
-            intent="Produce a distinct artifact head before promotion",
-            instructions=(
-                "The attempted revision in move "
-                f"{move.move_id} did not produce an artifact digest distinct from the blocked "
-                f"head {gate.target_artifact_digest}. Continue the substantive revision now. "
-                "Scale-out and finish remain blocked until a distinct head is challenged and "
-                "passes on direct evidence."
-            ),
-            promotion_gate=gate,
-        )
 
     @staticmethod
     def _directives(result: MoveExecutionResult) -> list[MoveDirective]:

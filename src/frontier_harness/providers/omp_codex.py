@@ -881,8 +881,9 @@ class OmpCodexProvider(ModelProvider):
         workspace_prefix = (
             f"<frontier_workspace>{request.cwd.resolve()}</frontier_workspace>\n"
             "Treat that explicit directory as the sole task workspace for this call. "
-            "Use the absolute paths in the prompt; do not infer files from the provider "
-            "session directory.\n\n" + delta_note
+            "The process already runs there. Resolve every workspace-relative path from the "
+            "current working directory; do not copy or retype the long absolute path and do "
+            "not infer files from the provider session directory.\n\n" + delta_note
         )
         boundary = (
             "\n\n<frontier_boundary>\nReturn exactly one JSON object and no Markdown. "

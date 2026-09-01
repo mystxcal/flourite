@@ -8,6 +8,7 @@ it is not a second controller and it does not simulate model intelligence.
 from __future__ import annotations
 
 from ..core.types import (
+    AssayStatus,
     ChallengeVerdict,
     ComputeUsage,
     Move,
@@ -42,10 +43,12 @@ class DeterministicMoveRunner:
                     ObservationDraft(
                         kind=ObservationKind.CHALLENGE,
                         summary="Direct deterministic inspection supports the completion claim",
-                        source="offline deterministic challenger",
+                        source="fresh-challenger",
                         challenge_verdict=ChallengeVerdict.SUPPORTS,
                         confidence=1.0,
-                        metadata={"material_to_claim": False},
+                        assay_status=AssayStatus.VALID,
+                        material_to_claim=True,
+                        direct_inspection=True,
                     )
                 ],
                 usage=ComputeUsage(model_turns=1),

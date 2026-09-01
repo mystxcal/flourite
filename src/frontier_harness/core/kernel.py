@@ -16,8 +16,8 @@ from ..intelligence.contracts import (
 )
 from ..util import canonical_json, sha256_text, utc_now
 from .journal import KernelJournal
-from .promotion import lease_matches, root_artifact_digest
 from .types import (
+    AssayStatus,
     ChallengeVerdict,
     ComputeEnvelope,
     Move,
@@ -29,7 +29,6 @@ from .types import (
     Observation,
     ObservationKind,
     PauseKind,
-    PromotionGate,
     RunPaused,
     RunStarted,
     RunState,
@@ -137,33 +136,6 @@ class IntelligenceKernel:
         last_move = max(state.moves.values(), key=lambda item: item.proposed_at, default=None)
         if last_move is not None and self._is_fork_challenge(last_move):
             return self._continue_after_fork_challenge(last_move)
-        root_digest = root_artifact_digest(state)
-        if root_digest is not None and not lease_matches(state, root_digest):
-            denied = any(
-                item.artifact_digest == root_digest and item.disposition == "denied"
-                for item in state.promotion_decisions
-            )
-            directive = MoveDirective(
-                mode=MoveMode.LEAD if denied else MoveMode.CHALLENGE,
-                intent=(
-                    "Replace the artifact head that failed promotion"
-                    if denied
-                    else "Re-establish the exact artifact promotion boundary"
-                ),
-                instructions=(
-                    "Produce a materially distinct replacement for the denied root artifact."
-                    if denied
-                    else "Directly falsify the exact root artifact and bind every finding to "
-                    "its canonical digest. Direct support is required to promote it."
-                ),
-                trajectory_id=state.root_trajectory_id,
-                promotion_gate=PromotionGate(
-                    role="revision" if denied else "challenge",
-                    target_artifact_digest=root_digest,
-                ),
-            )
-            self._propose(directive)
-            return True
         if last_move is not None and last_move.mode == MoveMode.NAVIGATE:
             directive = MoveDirective(
                 mode=MoveMode.LEAD,
@@ -207,8 +179,6 @@ class IntelligenceKernel:
             f"- {item.challenge_verdict or ChallengeVerdict.UNCERTAIN}: {item.summary}"
             for item in findings
         ) or "- uncertain: the fork returned no challenge disposition"
-        if move.promotion_gate is not None:
-            return self._resolve_promotion_gate(move, findings, disposition)
         self._propose(
             MoveDirective(
                 mode=MoveMode.LEAD,
@@ -224,62 +194,6 @@ class IntelligenceKernel:
         )
         return True
 
-    def _resolve_promotion_gate(
-        self,
-        move: Move,
-        findings: list[Observation],
-        disposition: str,
-    ) -> bool:
-        gate = move.promotion_gate
-        assert gate is not None and gate.role == "challenge"
-        decision = next(
-            item
-            for item in reversed(self.state.promotion_decisions)
-            if item.challenge_move_id == move.move_id
-        )
-        lease = self.state.promotion_lease
-        if (
-            decision.disposition == "granted"
-            and lease is not None
-            and lease.decision_id == decision.decision_id
-            and lease.artifact_digest == gate.target_artifact_digest
-        ):
-            self._propose(
-                MoveDirective(
-                    mode=MoveMode.LEAD,
-                    trajectory_id=self.state.trajectories[move.trajectory_id].parent_trajectory_id,
-                    intent="Continue from a representative artifact that passed promotion",
-                    instructions=(
-                        "The artifact-bound promotion assay passed on canonical digest "
-                        f"{gate.target_artifact_digest}. Continue ordinary construction from "
-                        "this tested premise. Preserve the direct evidence and do not turn the "
-                        "gate into recurring review ceremony.\n" + disposition
-                    ),
-                )
-            )
-            return True
-        self._propose(
-            MoveDirective(
-                mode=MoveMode.LEAD,
-                trajectory_id=self.state.trajectories[move.trajectory_id].parent_trajectory_id,
-                intent="Replace the artifact head that failed promotion",
-                instructions=(
-                    "Promotion is blocked for canonical digest "
-                    f"{gate.target_artifact_digest}. Use the Challenger's direct evidence to "
-                    "revise or replace the governing premise. Produce a materially changed "
-                    "artifact head; an unchanged head, scale-out, or finish claim cannot pass. "
-                    "The replacement will be challenged at its exact digest before promotion.\n"
-                    + disposition
-                ),
-                promotion_gate=PromotionGate(
-                    role="revision",
-                    target_artifact_digest=gate.target_artifact_digest,
-                    predecessor_artifact_digest=gate.predecessor_artifact_digest,
-                ),
-            )
-        )
-        return True
-
     def _advance_finish_claim(self) -> bool:
         state = self.state
         claim = state.finish_claim
@@ -287,20 +201,68 @@ class IntelligenceKernel:
         relevant = [
             obs
             for obs in state.observations.values()
-            if obs.kind == ObservationKind.CHALLENGE
-            and obs.metadata.get("claim_id") == claim.claim_id
+            if obs.challenge_verdict is not None
+            and obs.claim_id == claim.claim_id
+            and obs.assay_status == AssayStatus.VALID
         ]
+        lens_deltas = [
+            obs
+            for obs in state.observations.values()
+            if obs.claim_id == claim.claim_id and obs.quality_delta
+        ]
+        if lens_deltas:
+            findings = "\n".join(f"- {item.summary}" for item in lens_deltas)
+            self._propose(
+                MoveDirective(
+                    mode=MoveMode.LEAD,
+                    intent="Integrate a newly exposed quality distinction",
+                    instructions=(
+                        "The fresh inspection exposed a material distinction missing from the "
+                        "quality lens. Integrate it, determine which claims it reopens, and "
+                        "improve the artifact where needed before making a new finish claim:\n"
+                        + findings
+                    ),
+                )
+            )
+            return True
         challenged = [
             obs
             for obs in relevant
             if obs.challenge_verdict in {ChallengeVerdict.CHALLENGES, ChallengeVerdict.UNCERTAIN}
-            and obs.metadata.get("material_to_claim", True) is not False
+            and obs.material_to_claim
         ]
         if challenged:
             return self._continue_after_challenge(challenged)
-        support = [obs for obs in relevant if obs.challenge_verdict == ChallengeVerdict.SUPPORTS]
+        support = [
+            obs
+            for obs in relevant
+            if obs.challenge_verdict == ChallengeVerdict.SUPPORTS
+            and obs.material_to_claim
+            and (
+                obs.raw_ref is not None
+                or obs.source == "artifact-check"
+                or obs.source == "fresh-challenger"
+                or obs.direct_inspection
+            )
+        ]
         if support:
             return self._resolve_support(support)
+        if relevant:
+            summaries = "\n".join(f"- {item.summary}" for item in relevant)
+            directive = MoveDirective(
+                mode=MoveMode.LEAD,
+                intent="Establish material evidence for the finish claim",
+                instructions=(
+                    "The prior assay was valid but produced no material support for the exact "
+                    "finish claim. Do not treat proxy or non-material checks as completion. "
+                    "Strengthen the artifact, narrow the claim, or obtain a decision-relevant "
+                    f"observation. Prior findings:\n{summaries}"
+                ),
+            )
+            if self._propose(directive) is None:
+                directive.instructions += f"\nRe-evaluate at event {state.last_event_seq}."
+                self._propose(directive)
+            return True
         return self._request_finish_challenge()
 
     def _continue_after_challenge(self, challenged: list[Observation]) -> bool:
@@ -400,11 +362,6 @@ class IntelligenceKernel:
             "intent": directive.intent,
             "instructions": directive.instructions,
             "retry_of_move_id": directive.retry_of_move_id,
-            "promotion_gate": (
-                directive.promotion_gate.model_dump(mode="json")
-                if directive.promotion_gate is not None
-                else None
-            ),
         }
         idempotency_key = sha256_text(canonical_json(basis))
         for existing in state.moves.values():
@@ -418,7 +375,6 @@ class IntelligenceKernel:
             mode=directive.mode,
             intent=directive.intent,
             instructions=directive.instructions,
-            promotion_gate=directive.promotion_gate,
             declared_ceiling=directive.declared_ceiling,
             idempotency_key=idempotency_key,
             proposed_at=utc_now(),
@@ -476,7 +432,6 @@ class IntelligenceKernel:
                         instructions=move.instructions,
                         trajectory_id=move.trajectory_id,
                         retry_of_move_id=move.move_id,
-                        promotion_gate=move.promotion_gate,
                         declared_ceiling=move.declared_ceiling,
                     )
                 }

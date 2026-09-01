@@ -7,6 +7,7 @@ from frontier_harness.blobs import BlobStore
 from frontier_harness.core.journal import KernelJournal
 from frontier_harness.core.kernel import IntelligenceKernel
 from frontier_harness.core.types import (
+    AssayStatus,
     ChallengeVerdict,
     ComputeEnvelope,
     ComputeUsage,
@@ -84,6 +85,8 @@ async def test_rejected_finish_reenters_normal_construction(tmp_path: Path) -> N
                     summary="The artifact is structurally valid but conceptually sparse",
                     source="fresh-challenger",
                     challenge_verdict=ChallengeVerdict.CHALLENGES,
+                    assay_status=AssayStatus.VALID,
+                    direct_inspection=True,
                 )
             ],
             usage=ComputeUsage(model_turns=1),
@@ -100,6 +103,8 @@ async def test_rejected_finish_reenters_normal_construction(tmp_path: Path) -> N
                     summary="Direct inspection supports the rebuilt artifact",
                     source="fresh-challenger",
                     challenge_verdict=ChallengeVerdict.SUPPORTS,
+                    assay_status=AssayStatus.VALID,
+                    direct_inspection=True,
                 )
             ],
             usage=ComputeUsage(model_turns=1),
@@ -221,12 +226,16 @@ async def test_challenge_contradiction_outranks_support(tmp_path: Path) -> None:
                     summary="Visual review supports the artifact",
                     source="fresh-challenger",
                     challenge_verdict=ChallengeVerdict.SUPPORTS,
+                    assay_status=AssayStatus.VALID,
+                    direct_inspection=True,
                 ),
                 ObservationDraft(
                     kind=ObservationKind.CHALLENGE,
                     summary="The executable acceptance check fails",
                     source="artifact-check",
                     challenge_verdict=ChallengeVerdict.CHALLENGES,
+                    assay_status=AssayStatus.VALID,
+                    direct_inspection=True,
                 ),
             ]
         ),
@@ -261,13 +270,17 @@ async def test_non_material_criticism_is_preserved_without_vetoing_completion(
                     summary="Direct artifact inspection supports the objective",
                     source="fresh-challenger",
                     challenge_verdict=ChallengeVerdict.SUPPORTS,
+                    assay_status=AssayStatus.VALID,
+                    direct_inspection=True,
                 ),
                 ObservationDraft(
                     kind=ObservationKind.CHALLENGE,
                     summary="An earlier evidence label was imprecise but output is correct",
                     source="fresh-challenger",
                     challenge_verdict=ChallengeVerdict.CHALLENGES,
-                    metadata={"material_to_claim": False},
+                    assay_status=AssayStatus.VALID,
+                    material_to_claim=False,
+                    direct_inspection=True,
                 ),
             ]
         ),
@@ -278,9 +291,58 @@ async def test_non_material_criticism_is_preserved_without_vetoing_completion(
 
     assert kernel.state.status == RunStatus.SATISFIED
     assert any(
-        item.metadata.get("material_to_claim") is False
+        item.material_to_claim is False
         for item in kernel.state.observations.values()
     )
+
+
+async def test_non_material_support_cannot_close_a_semantic_claim(tmp_path: Path) -> None:
+    outcomes = [
+        MoveExecutionResult(
+            workspace=workspace("Looks finished"),
+            finish=FinishDraft(satisfaction_claims=["The semantic objective is satisfied"]),
+        ),
+        MoveExecutionResult(
+            observations=[
+                ObservationDraft(
+                    kind=ObservationKind.CHALLENGE,
+                    summary="The file opens and its checksum is stable",
+                    source="artifact-check",
+                    challenge_verdict=ChallengeVerdict.SUPPORTS,
+                    assay_status=AssayStatus.VALID,
+                    material_to_claim=False,
+                    direct_inspection=True,
+                )
+            ]
+        ),
+        MoveExecutionResult(
+            workspace=workspace("Strengthened semantic result"),
+            finish=FinishDraft(satisfaction_claims=["The revised result is understandable"]),
+        ),
+        MoveExecutionResult(
+            observations=[
+                ObservationDraft(
+                    kind=ObservationKind.CHALLENGE,
+                    summary="Whole-result inspection directly supports understandability",
+                    source="fresh-challenger",
+                    challenge_verdict=ChallengeVerdict.SUPPORTS,
+                    assay_status=AssayStatus.VALID,
+                    direct_inspection=True,
+                )
+            ]
+        ),
+    ]
+    kernel, runner = kernel_for(tmp_path, outcomes)
+
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.SATISFIED
+    assert [mode for mode, _, _ in runner.calls] == [
+        MoveMode.LEAD,
+        MoveMode.CHALLENGE,
+        MoveMode.LEAD,
+        MoveMode.CHALLENGE,
+    ]
 
 
 async def test_post_move_evidence_cannot_be_consumed_by_the_earlier_workspace(
@@ -309,253 +371,6 @@ async def test_post_move_evidence_cannot_be_consumed_by_the_earlier_workspace(
         item.summary == "A post-construction check found a boundary flaw"
         for item in runner.calls[1][1].observations
     )
-
-
-async def test_first_root_artifact_is_falsified_on_its_exact_fork_before_scale(
-    tmp_path: Path,
-) -> None:
-    def candidate(text: str) -> ArtifactDraft:
-        encoded = text.encode()
-        return ArtifactDraft(
-            content_ref=ContentRef(
-                digest=sha256_text(text),
-                size=len(encoded),
-                media_type="text/markdown",
-                relative_path=f"sha256/{sha256_text(text)}",
-                original_name="artifact.md",
-            )
-        )
-
-    first = candidate("# Representative artifact")
-    revised = candidate("# Materially revised artifact")
-    evidence_text = "the revised assay passed"
-    evidence = ContentRef(
-        digest=sha256_text(evidence_text),
-        size=len(evidence_text.encode()),
-        media_type="text/plain",
-        relative_path=f"sha256/{sha256_text(evidence_text)}",
-        original_name="promotion-assay.txt",
-    )
-    outcomes = [
-        MoveExecutionResult(
-            artifact=first,
-            workspace=workspace("Representative"),
-            next_move=MoveDirective(
-                mode=MoveMode.LEAD,
-                intent="Scale the untested premise",
-            ),
-        ),
-        MoveExecutionResult(
-            observations=[
-                ObservationDraft(
-                    kind=ObservationKind.CHALLENGE,
-                    summary="A matched counterexample falsifies the first premise",
-                    source="fresh-challenger",
-                    artifact_digest=first.content_ref.digest,
-                    challenge_verdict=ChallengeVerdict.CHALLENGES,
-                )
-            ]
-        ),
-        MoveExecutionResult(
-            artifact=first,
-            workspace=workspace("Unchanged attempted escape"),
-            finish=FinishDraft(satisfaction_claims=["The unchanged artifact is done"]),
-        ),
-        MoveExecutionResult(
-            artifact=revised,
-            workspace=workspace("Revised from the counterexample"),
-            next_move=MoveDirective(mode=MoveMode.LEAD, intent="Scale the revised premise"),
-        ),
-        MoveExecutionResult(
-            observations=[
-                ObservationDraft(
-                    kind=ObservationKind.CHALLENGE,
-                    summary="The revised head passes its artifact-native assay",
-                    source="fresh-challenger",
-                    raw_ref=evidence,
-                    artifact_digest=revised.content_ref.digest,
-                    challenge_verdict=ChallengeVerdict.SUPPORTS,
-                )
-            ]
-        ),
-        MoveExecutionResult(workspace=workspace("Promoted construction")),
-    ]
-    kernel, runner = kernel_for(tmp_path, outcomes)
-
-    await kernel.run(max_steps=8)
-
-    assert [mode for mode, _, _ in runner.calls] == [
-        MoveMode.LEAD,
-        MoveMode.CHALLENGE,
-        MoveMode.LEAD,
-        MoveMode.LEAD,
-        MoveMode.CHALLENGE,
-        MoveMode.LEAD,
-    ]
-    root_id = kernel.state.root_trajectory_id
-    fork = next(
-        item
-        for item in kernel.state.trajectories.values()
-        if item.parent_trajectory_id == root_id
-        and item.base_workspace_id
-        == next(
-            move.workspace_id
-            for move in kernel.state.moves.values()
-            if move.mode == MoveMode.LEAD and move.intent.startswith("Establish")
-        )
-    )
-    first_move = next(item for item in kernel.state.moves.values() if item.mode == MoveMode.LEAD)
-    first_workspace = kernel.state.workspaces[first_move.workspace_id or ""]
-    assert fork.base_workspace_id == first_workspace.workspace_id
-    assert runner.calls[1][1].artifact_heads[0].digest == first.content_ref.digest
-    assert runner.calls[4][1].artifact_heads[0].digest == revised.content_ref.digest
-    assert any(
-        "matched counterexample" in item.summary
-        for item in runner.calls[2][1].observations
-    )
-    assert kernel.state.finish_claim is None
-    assert kernel.state.current_workspace is not None
-    assert kernel.state.current_workspace.summary == "Promoted construction"
-    assert all(item.intent != "Scale the untested premise" for item in kernel.state.moves.values())
-    assert [item.disposition for item in kernel.state.promotion_decisions] == [
-        "denied",
-        "granted",
-    ]
-    granted = kernel.state.promotion_decisions[-1]
-    assert granted.artifact_digest == revised.content_ref.digest
-    assert granted.predecessor_artifact_digest == first.content_ref.digest
-    assert granted.direct_evidence_observation_ids
-    assert kernel.state.promotion_lease is not None
-    assert kernel.state.promotion_lease.artifact_digest == revised.content_ref.digest
-    assert kernel.state.promotion_lease.decision_id == granted.decision_id
-
-
-async def test_root_artifact_replacement_revokes_lease_and_forces_exact_rechallenge(
-    tmp_path: Path,
-) -> None:
-    def candidate(text: str) -> ArtifactDraft:
-        encoded = text.encode()
-        digest = sha256_text(text)
-        return ArtifactDraft(
-            content_ref=ContentRef(
-                digest=digest,
-                size=len(encoded),
-                media_type="text/markdown",
-                relative_path=f"sha256/{digest}",
-                original_name="artifact.md",
-            )
-        )
-
-    first = candidate("# First")
-    replacement = candidate("# Replacement")
-    outcomes = [
-        MoveExecutionResult(artifact=first, workspace=workspace("First")),
-        MoveExecutionResult(
-            observations=[
-                ObservationDraft(
-                    kind=ObservationKind.CHALLENGE,
-                    summary="The exact first head passes a direct assay",
-                    source="artifact-check",
-                    artifact_digest=first.content_ref.digest,
-                    challenge_verdict=ChallengeVerdict.SUPPORTS,
-                )
-            ]
-        ),
-        MoveExecutionResult(
-            artifact=replacement,
-            workspace=workspace("Replacement"),
-        ),
-    ]
-    kernel, runner = kernel_for(tmp_path, outcomes)
-
-    await kernel.run(max_steps=4)
-
-    assert [mode for mode, _, _ in runner.calls] == [
-        MoveMode.LEAD,
-        MoveMode.CHALLENGE,
-        MoveMode.LEAD,
-    ]
-    assert kernel.state.promotion_lease is None
-    challenge = next(
-        item
-        for item in kernel.state.moves.values()
-        if item.status == MoveStatus.PROPOSED and item.promotion_gate is not None
-    )
-    assert challenge.mode == MoveMode.CHALLENGE
-    assert challenge.promotion_gate is not None
-    assert challenge.promotion_gate.target_artifact_digest == replacement.content_ref.digest
-    assert challenge.promotion_gate.predecessor_artifact_digest == first.content_ref.digest
-
-
-async def test_promotion_support_without_direct_evidence_is_denied(tmp_path: Path) -> None:
-    text = "# Candidate"
-    digest = sha256_text(text)
-    candidate = ArtifactDraft(
-        content_ref=ContentRef(
-            digest=digest,
-            size=len(text.encode()),
-            media_type="text/markdown",
-            relative_path=f"sha256/{digest}",
-            original_name="artifact.md",
-        )
-    )
-    kernel, _ = kernel_for(
-        tmp_path,
-        [
-            MoveExecutionResult(artifact=candidate, workspace=workspace("Candidate")),
-            MoveExecutionResult(
-                observations=[
-                    ObservationDraft(
-                        kind=ObservationKind.CHALLENGE,
-                        summary="The model reports no objection without an attached assay",
-                        source="fresh-challenger",
-                        artifact_digest=digest,
-                        challenge_verdict=ChallengeVerdict.SUPPORTS,
-                    )
-                ]
-            ),
-        ],
-    )
-
-    await kernel.run(max_steps=2)
-
-    assert kernel.state.promotion_decisions[-1].disposition == "denied"
-    assert kernel.state.promotion_decisions[-1].direct_evidence_observation_ids == []
-    assert kernel.state.promotion_lease is None
-
-
-async def test_promotion_gate_identity_survives_a_failed_challenge_retry(
-    tmp_path: Path,
-) -> None:
-    text = "# Representative artifact"
-    candidate = ArtifactDraft(
-        content_ref=ContentRef(
-            digest=sha256_text(text),
-            size=len(text.encode()),
-            media_type="text/markdown",
-            relative_path=f"sha256/{sha256_text(text)}",
-            original_name="artifact.md",
-        )
-    )
-    kernel, _ = kernel_for(
-        tmp_path,
-        [
-            MoveExecutionResult(
-                artifact=candidate,
-                workspace=workspace("Representative"),
-            ),
-            MoveExecutionResult(success=False, error="temporary provider failure"),
-        ],
-    )
-
-    await kernel.run()
-
-    assert kernel.state.status == RunStatus.PAUSED
-    retry = next(item for item in kernel.state.moves.values() if item.status == MoveStatus.PROPOSED)
-    assert retry.retry_of_move_id is not None
-    assert retry.promotion_gate is not None
-    assert retry.promotion_gate.role == "challenge"
-    assert retry.promotion_gate.target_artifact_digest == candidate.content_ref.digest
 
 
 async def test_problem_selected_branches_remain_isolated_then_rejoin_context(
@@ -639,7 +454,6 @@ async def test_completion_requires_direct_support_for_every_claimed_head(
         def __init__(self) -> None:
             self.calls: list[MoveMode] = []
             self.challenge_count = 0
-            self.root_reentered = False
 
         async def run(
             self,
@@ -667,36 +481,7 @@ async def test_completion_requires_direct_support_for_every_claimed_head(
                         ),
                     ],
                 )
-            if move.mode == MoveMode.CHALLENGE and state.finish_claim is None:
-                root = state.trajectories[state.root_trajectory_id]
-                assert root.artifact_head_id is not None
-                return MoveExecutionResult(
-                    observations=[
-                        ObservationDraft(
-                            kind=ObservationKind.CHALLENGE,
-                            summary="The representative root survives early falsification",
-                            source="artifact-check",
-                            artifact_digest=state.artifacts[root.artifact_head_id].digest,
-                            challenge_verdict=ChallengeVerdict.SUPPORTS,
-                        )
-                    ]
-                )
             if move.mode == MoveMode.LEAD and move.trajectory_id == state.root_trajectory_id:
-                if not self.root_reentered:
-                    self.root_reentered = True
-                    return MoveExecutionResult(
-                        next_moves=[
-                            MoveDirective(
-                                mode=MoveMode.LEAD,
-                                intent="Develop the independent alternative",
-                                fork_purpose="A materially different solution family",
-                            ),
-                            MoveDirective(
-                                mode=MoveMode.LEAD,
-                                intent="Integrate all viable heads",
-                            ),
-                        ]
-                    )
                 heads = list(state.artifacts)
                 return MoveExecutionResult(
                     workspace=WorkspaceDraft(
@@ -730,6 +515,8 @@ async def test_completion_requires_direct_support_for_every_claimed_head(
                         source="fresh-challenger",
                         artifact_digest=state.artifacts[artifact_id].digest,
                         challenge_verdict=ChallengeVerdict.SUPPORTS,
+                        assay_status=AssayStatus.VALID,
+                        direct_inspection=True,
                     )
                 ]
             )
@@ -763,8 +550,6 @@ async def test_completion_requires_direct_support_for_every_claimed_head(
     assert kernel.state.status == RunStatus.SATISFIED
     assert runner.challenge_count == 2
     assert runner.calls == [
-        MoveMode.LEAD,
-        MoveMode.CHALLENGE,
         MoveMode.LEAD,
         MoveMode.LEAD,
         MoveMode.LEAD,

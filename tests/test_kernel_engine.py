@@ -9,6 +9,7 @@ from rich.console import Console
 from frontier_harness.config import HarnessConfig, ProviderConfig, RunPolicy
 from frontier_harness.control import CommandKind
 from frontier_harness.core.types import (
+    AssayStatus,
     ChallengeVerdict,
     ComputeUsage,
     Move,
@@ -73,8 +74,10 @@ async def test_kernel_engine_create_control_execute_verify_and_materialize(
                     ObservationDraft(
                         kind=ObservationKind.CHALLENGE,
                         summary="Direct review supports completion",
-                        source="challenger",
+                        source="fresh-challenger",
                         challenge_verdict=ChallengeVerdict.SUPPORTS,
+                        assay_status=AssayStatus.VALID,
+                        direct_inspection=True,
                     )
                 ],
                 usage=ComputeUsage(model_turns=1),

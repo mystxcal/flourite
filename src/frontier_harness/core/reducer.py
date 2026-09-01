@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 from ..errors import LedgerIntegrityError
 from ..ledger import LedgerEvent
-from .promotion import move_allowed_at_boundary, root_artifact_digest
+from .legacy import canonical_payload
 from .transition import AtomicMoveTransition, CompletionValidator
 from .types import (
     FinishClaimed,
@@ -116,13 +116,14 @@ class KernelReducer:
             raise LedgerIntegrityError(f"duplicate observation: {obs.observation_id}")
         state.observations[obs.observation_id] = obs
         state.pending_steering_ids.append(obs.observation_id)
-        state.pending_promotion_finish_claim = None
         state.finish_claim = None
 
     @classmethod
     def _propose_move(cls, state: RunState, event: LedgerEvent) -> None:
         cls._require_active(state, event.event_type)
-        payload = MoveProposed.model_validate(event.payload)
+        payload = MoveProposed.model_validate(
+            canonical_payload(event.event_type, event.payload, state)
+        )
         move = payload.move
         if move.move_id in state.moves:
             raise LedgerIntegrityError(f"duplicate move: {move.move_id}")
@@ -144,12 +145,6 @@ class KernelReducer:
             raise LedgerIntegrityError("move omitted the existing workspace base")
         if len(state.active_move_ids) >= state.objective.envelope.max_parallel:
             raise LedgerIntegrityError("hard parallel move envelope reached")
-        if not move_allowed_at_boundary(
-            move,
-            root_digest=root_artifact_digest(state),
-            lease=state.promotion_lease,
-        ):
-            raise LedgerIntegrityError("move crosses an unpromoted artifact boundary")
         state.moves[move.move_id] = move
 
     @classmethod
@@ -170,7 +165,9 @@ class KernelReducer:
         """Atomically admit one externally executed move result."""
 
         cls._require_active(state, event.event_type)
-        payload = MoveApplied.model_validate(event.payload)
+        payload = MoveApplied.model_validate(
+            canonical_payload(event.event_type, event.payload, state)
+        )
         AtomicMoveTransition(state, payload, event_seq=event.seq).apply()
 
     @classmethod
@@ -186,12 +183,6 @@ class KernelReducer:
             raise LedgerIntegrityError("finish claim references a missing artifact")
         if any(obs_id not in state.observations for obs_id in claim.evidence_refs):
             raise LedgerIntegrityError("finish claim references missing evidence")
-        root_digest = root_artifact_digest(state)
-        if root_digest is not None and (
-            state.promotion_lease is None
-            or state.promotion_lease.artifact_digest != root_digest
-        ):
-            raise LedgerIntegrityError("finish claim crosses an unpromoted artifact boundary")
         state.finish_claim = claim
 
     @classmethod

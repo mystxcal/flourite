@@ -1,346 +1,316 @@
 # Flourite, crystallized
 
-This is the canonical object Flourite implements. It is intentionally smaller
-than the source tree and more exact than a product tour.
+Flourite is not an agent workflow. It is a feedback controller around a highly
+capable model.
 
-> Flourite holds one objective still while an intelligent model repeatedly
-> improves one live solution. It preserves the evidence and causal residue
-> needed to escape local mistakes, widens only when the problem truly branches,
-> and accepts completion only after a fresh inspection of the actual result.
+> Hold the real objective still. Give intelligence its full tool plane. Preserve
+> the smallest world model that prevents forgetting and repetition. Let direct
+> evidence change both the solution and the system's idea of quality. Spend the
+> next unit of compute where it is most likely to change the result.
 
-## The whole system
+Durability keeps that loop alive. It is not a substitute for the loop.
+
+## The complete object
 
 ```mermaid
 flowchart LR
-    OP["Operator<br/>task · sources · steering · hard envelope"]
+    U["Operator<br/>objective · sources · steering · hard envelope"]
 
-    subgraph A["Stable authority"]
-      OBJ["Objective<br/>immutable text + amendments"]
-      LOG["Hash-chained journal<br/>semantic source of truth"]
-      BLOBS["Content-addressed store<br/>artifacts · evidence · traces"]
-      PROTO["Step protocol<br/>stable activity contract"]
-      PROMO["Promotion authority<br/>exact digest · decision · evidence · lease"]
+    subgraph M["Live intelligence state"]
+      O["Objective<br/>exact and immutable"]
+      F["Frontier<br/>invariants · causal model · unknowns<br/>dead ends · best next discriminators"]
+      Q["Quality lens<br/>task-native success and failure signatures<br/>coverage · proxy traps · blind spots"]
+      A["Artifact<br/>the actual current result"]
+      E["Evidence<br/>provenance · scope · validity · effect"]
     end
 
-    subgraph R["Replaceable runtime"]
-      SUP["Stable supervisor<br/>one run · no semantic authority"]
-      REG["Atomic component registry<br/>immutable generations"]
-      WORK["Disposable activity worker<br/>one leased generation"]
+    W["Capable worker<br/>reason · inspect · build · use tools"]
+    R["Causal router<br/>send each signal to the layer that caused it"]
+    X["Fresh perspective<br/>only for a real frame failure or exact challenge"]
+
+    U --> O
+    O --> W
+    F --> W
+    Q --> W
+    A --> W
+    E --> W
+    W -->|"highest-EV thought, tool, or construction move"| A
+    W -->|"observation"| E
+    E --> R
+    R -->|"solution evidence"| A
+    R -->|"world-model correction"| F
+    R -->|"new quality discriminator"| Q
+    R -->|"execution fault"| W
+    F -. "samsara or missing frame" .-> X
+    Q -. "uncovered claim or blind spot" .-> X
+    X --> E
+
+    subgraph D["Durable substrate"]
+      J["Append-only journal"]
+      B["Content-addressed artifacts and evidence"]
+      S["Replaceable step runtime"]
     end
 
-    subgraph S["Live search state"]
-      WS["Current workspace<br/>compact global understanding"]
-      ART["Artifact heads<br/>actual current deliverables"]
-      OBS["Observations<br/>tests · sources · failures · challenge"]
-      TRAJ["Trajectories<br/>only earned alternatives"]
-    end
-
-    subgraph I["Intelligence"]
-      LEAD["Persistent Lead<br/>construct · inspect · use tools"]
-      NAV["Fresh Navigator<br/>reframe when the local view stalls"]
-      CHAL["Fresh Challenger<br/>falsify the exact artifact or finish claim"]
-    end
-
-    subgraph K["Deterministic kernel"]
-      CTX["Context lens<br/>objective + relevant direct state"]
-      MOVE["Move<br/>one semantic unit of work"]
-      APPLY["Atomic application<br/>all meaning or none"]
-      REDUCE["Reducer<br/>legal state transition"]
-      TERM["Terminal truth<br/>satisfied · exhausted · blocked<br/>stopped · failed"]
-    end
-
-    OP --> OBJ
-    OP -->|"bind / rollback"| REG
-    REG -->|"lease at boundary"| SUP
-    SUP --> WORK
-    PROTO --> SUP
-    PROTO --> WORK
-    OBJ --> CTX
-    WS --> CTX
-    ART --> CTX
-    OBS --> CTX
-    TRAJ --> CTX
-    WORK --> CTX
-    CTX --> LEAD
-    CTX -. "stagnation / no live continuation" .-> NAV
-    CTX -. "new root artifact / finish claim" .-> CHAL
-    LEAD --> MOVE
-    NAV --> MOVE
-    CHAL --> MOVE
-    MOVE --> APPLY
-    APPLY --> REDUCE
-    REDUCE --> LOG
-    REDUCE --> WS
-    REDUCE --> ART
-    REDUCE --> OBS
-    REDUCE --> TRAJ
-    REDUCE --> PROMO
-    ART --> BLOBS
-    OBS --> BLOBS
-    LOG --> CTX
-    CHAL -->|"exact evidence"| PROMO
-    ART -. "digest change revokes" .-> PROMO
-    PROMO -->|"lease or denied successor work"| LEAD
-    CHAL -->|"direct support for every claimed head"| TERM
-    OP -->|"pause · resume · stop · steer"| K
+    M --> J
+    A --> B
+    E --> B
+    S --> W
 ```
 
-This is one learning loop, not a sequence of phases.
-
-## Ship of Theseus runtime
-
-The durable run pins a protocol and state—not a Python implementation. Each
-semantic activity leases one immutable component generation and runs in a fresh
-worker process. A live binding change is one atomic registry update:
+The semantic state is deliberately small:
 
 ```text
-activity n leases generation g
-         ↓
-g runs to the next journal boundary
-         ↓
-supervisor resolves the registry again
-         ↓
-activity n+1 may lease generation g+1
+X_t = < objective, frontier, quality lens, artifact, evidence, usage >
 ```
 
-This makes planners, prompts, providers, adapters, evaluators, recovery policy,
-and the kernel implementation replaceable without restarting or reconstructing
-the run. In-flight code never changes underneath a tool call. New code must
-implement the same narrow step protocol, is captured as a content-addressed
-snapshot, and is validated before it can become active. A worker that cannot
-start cannot mutate the run; the registry can fall back to the prior distinct
-generation. The journal remains the authority throughout.
+Everything else is execution machinery or a temporary view.
 
-The supervisor is intentionally stupid. It chooses a generation, starts one
-worker, checks its receipt against the journal, and repeats. It does not plan,
-judge quality, or interpret model output. Replacing intelligence machinery
-therefore cannot create a second semantic controller.
+## The five semantic objects
 
-## Canonical state
+### Objective
 
-At a safe boundary the whole run is:
+The exact user task and explicit amendments. It is never silently rewritten by
+a planner, evaluator, reframe, summary, or prior run.
+
+### Frontier
+
+The shortest representation from which a fresh strong model can recover the
+real problem state. It contains:
+
+- current best causal understanding;
+- load-bearing invariants and constraints;
+- what has actually been established;
+- unresolved uncertainties that could change the solution;
+- failed approaches and why they failed;
+- assumptions shared by apparently different approaches;
+- the few next observations capable of changing a decision.
+
+It is not a diary, backlog, issue graph, transcript summary, or performance
+report. If it grows without making the problem easier to think about, it is
+broken and must be recompressed.
+
+### Quality lens
+
+The evolving, task-native model of what a genuinely excellent result means. It
+contains exact success and failure signatures, observable discriminators,
+coverage gaps, known proxies that can be gamed, and unresolved blind spots.
+
+The lens begins from the objective and supplied references. It changes only
+when grounded evidence reveals a new distinction, a prior criterion is a bad
+proxy, or an evaluator missed something material. A new criterion records why
+it matters and how one could tell. Adjectives without a discriminator do not
+become quality state.
+
+The worker sees the live lens because it guides construction. A fresh
+Challenger sees it as a fallible hypothesis: it must test both the artifact and
+whether the lens itself omits a material dimension. This avoids the two common
+failures of static rubrics: optimizing a stale proxy and sharing the same blind
+spot forever.
+
+### Artifact
+
+The actual result, not prose about the result. Software is inspected and run;
+media is watched and heard; a document is read; a research claim is traced to
+evidence. Intermediate work may remain live, but only content-addressed heads
+are eligible for exact evaluation or delivery.
+
+### Evidence
+
+A scoped observation with provenance, validity, and a declared consequence.
+Negative evidence is first-class. A failure that removes part of the search
+space is progress; a tool call or paragraph that changes no decision is not.
+
+Evidence is never flattened into a generic score. Its job is to change the
+frontier, quality lens, artifact, or confidence in a concrete claim.
+
+## The control law
+
+Each semantic step is:
 
 ```text
-Xₜ = ⟨O, Wₜ, Aₜ, Eₜ, Tₜ, Mₜ, Pₜ, Cₜ, Uₜ⟩
+1. Recover the objective, frontier, quality lens, artifact, and new evidence.
+2. Name the live decision or uncertainty with the greatest consequence.
+3. Choose the cheapest move likely to discriminate it.
+4. Prefer thought-space elimination when reasoning can settle it.
+5. Use tools, code, research, or parallel work when observation is worth its cost.
+6. Capture the result once, with provenance and scope.
+7. Route the signal to the layer it actually updates.
+8. Recompress the frontier and continue.
 ```
 
-| Symbol | Meaning | Invariant |
+The worker is allowed to do a great deal inside one step. Flourite must not
+split coherent work into ceremonial roles or calls merely to make activity
+visible. Calls, commits, tests, reports, and agent count are costs—not progress
+metrics.
+
+There are no fixed phases, top-level call grants, synthesis reserve, mandatory
+branch count, or review cadence. Only the operator sets a hard resource
+envelope. Inside it, compute allocation follows expected decision value.
+
+## Signal routing
+
+A failure is useful only if it reaches the layer capable of learning from it.
+
+| Signal | Correct destination | Never treat it as |
 | --- | --- | --- |
-| `O` | Objective | Original text never changes; steering is an explicit amendment. |
-| `Wₜ` | Workspace | One compact, expressive account of the current global understanding. |
-| `Aₜ` | Artifact heads | The actual deliverables currently being developed. |
-| `Eₜ` | Observations | Provenance-bearing evidence, tests, failure residue, and challenge findings. |
-| `Tₜ` | Trajectories | A small set of alternatives opened only for real uncertainty width. |
-| `Mₜ` | Moves | Proposed, running, and completed semantic units of work. |
-| `Pₜ` | Promotion lease | Controller-owned authorization bound to one exact root artifact digest and its direct challenge evidence. |
-| `Cₜ` | Finish claim | Exact satisfaction claims bound to an exact workspace and artifact digests. |
-| `Uₜ` | Usage | Observed time, tokens, turns, tools, and cost against operator limits. |
+| Artifact is wrong | Worker revises the earliest falsified premise or construction | A request for more ceremony |
+| Frontier is wrong or stale | Recompress or invoke one fresh perspective | A local artifact patch |
+| Quality lens missed a material distinction | Amend the lens, then re-evaluate affected claims | A one-off grader comment |
+| Assay cannot access or perceive its target | Repair/rematerialize the assay and replay the exact evaluation | Uncertainty about artifact quality |
+| Provider/runtime failed | Retry the exact semantic move after infrastructure recovery | A new semantic task |
+| Same bet repeats without information gain | Expose the repeated assumption and force a different discriminator | Permission to run the same loop longer |
+| Real external dependency is absent | Pause with the exact blocker | Model difficulty or low confidence |
 
-The state contains structure needed for integrity and navigation. It does not
-attempt to encode the task's semantic world into enums, issue graphs, roles, or
-universal scores. That meaning stays in the workspace where the model can
-reason about it directly.
+This router is a causal boundary, not an issue taxonomy. The semantic content
+remains free-form in the frontier and lens; only the destination of a signal is
+typed.
 
-## One transition
+## The evaluation handshake
 
-The transition law is deliberately plain:
+An evaluator cannot judge evidence it cannot access. Accessibility and semantic
+judgment are separate states.
 
 ```text
-contextₜ = lens(O, Wₜ, Aₜ, relevant(Eₜ), Tₜ, recent(Mₜ), Uₜ)
-resultₜ  = intelligent_move(contextₜ, full_capability_plane)
-eventₜ   = compile(resultₜ, exact live state)
-Xₜ₊₁    = atomic_transition(Xₜ, eventₜ)
+materialize exact digest
+        ↓
+write relative manifest + hashes
+        ↓
+preflight: objective, artifact, references and required viewers are readable
+        ↓
+VALID ASSAY ── inspect the whole decision-relevant artifact ── semantic verdict
+        │
+        └─ INVALID ASSAY ─ request exact missing material
+                              ↓
+                     rematerialize from durable state
+                              ↓
+                     replay the same evaluation
 ```
 
-A result may contain:
+The evaluator starts inside the capsule it must inspect. Durable manifests use
+workspace-relative paths and content digests; models are never asked to retype
+long ephemeral absolute paths. An inaccessible file, unsupported modality,
+unfinished render, or missing reference emits `assay_invalid`, not `uncertain`,
+`supports`, or `challenges`.
 
-- observations and their raw evidence handles;
-- a new artifact version and deliverables;
-- a new workspace;
-- a continuation move;
-- optional branch trajectories;
-- a finish claim or a genuine external blocker;
-- actual usage and failure residue.
+The controller services a typed missing-material request from the ledger and
+blob store, then repeats the exact evaluation against the same digest. If the
+assay still cannot be made valid, the run pauses as an infrastructure failure.
+It cannot satisfy the objective, revise the artifact, or contaminate the quality
+gradient.
 
-`MoveResultCompiler` turns the model/tool result into that one semantic fact;
-it does not mutate state. `AtomicMoveTransition` validates identity, ownership,
-lineage, digests, compare-and-swap, continuations, and terminal intent before
-performing one mutation. `move.applied` then commits the complete fact in a
-single ledger transaction. If compilation, validation, or persistence fails,
-nothing becomes authoritative. Retrying the same move is idempotent.
+Once valid, every material verdict is authoritative regardless of whether it
+arrived as prose, a direct test, or a domain-native inspection. Mechanical
+checks may establish only the named properties they actually observe. A valid
+file, build, checksum, or duration can never stand in for semantic quality.
 
-An execution or transport failure is not converted into a semantic repair task.
-The run pauses, retains the exact live workspace, and queues the same move with
-explicit retry lineage. A typed fault receipt crosses into a separate
-infrastructure plane. There, Codex may repair an isolated copy of the failed
-component. The stable supervisor admits only a new immutable generation and
-replays the exact failed activity; that replay, not the repairer's prose, is the
-acceptance test. A no-change diagnosis gets one exact retry. Repetition of the
-same fault at the same semantic activity stops with a precise receipt instead
-of burning an unbounded repair loop.
+## Evolving judgment
 
-This boundary is the core reliability primitive. Provider activity, tool calls,
-and transcripts are useful evidence, but none is progress until the resulting
-meaning is admitted atomically.
+Evaluation evolves at two distinct timescales.
 
-## Intelligence topology
+### Inside one run
 
-### Lead
+The quality lens is live. Direct failures, newly discovered trade-offs, user
+steering, and Challenger blind-spot findings amend it immediately. Any claim
+depending on the old lens is reopened. The artifact and the evaluator therefore
+learn from the same evidence without becoming the same agent.
 
-The Lead is the normal path. It receives the exact objective, current workspace,
-direct evidence paths, current artifact paths, live trajectory heads, recent
-moves, tools, and hard envelope. It may reason, research, inspect, code, render,
-test, or use bounded nested tasks. Its session persists within a trajectory so
-hard-won local understanding is not repeatedly discarded.
+### Across runs
 
-For software work, continuity includes the actual isolated worktree—not merely
-the conversation thread. Generated media, ignored caches, and partial work stay
-in that worktree across Lead epochs. Each real branch gets its own persistent
-worktree seeded from the exact parent artifact at the fork boundary. Fresh
-Challengers and deterministic checks receive disposable projections of the
-durably captured candidate.
+External benchmarks stay frozen within an experimental epoch so comparisons
+remain honest. After an epoch, grounded misses may produce a new evaluator
+version with explicit provenance and held-out checks. The next epoch freezes
+that version. Evolution without versioning destroys measurement; freezing
+forever destroys learning.
 
-If that session disappears, Flourite reconstructs it from durable state. Hidden
-conversation memory improves efficiency; it is never required for correctness.
+Candidate workers do not see hidden benchmark cases or grader scores. Transfer
+must come from a general causal Flourite change, not evaluator imitation.
 
-### Navigator
+## Anti-samsara
 
-The Navigator is not a manager and does not run every round. It gets a fresh
-context when the local continuation vanishes or repeated Lead moves produce no
-artifact or evidence change. Its job is to expose framing errors, missing
-hypothesis classes, drift, repetition, or a more informative next move. It
-cannot declare completion.
+The common failure is not lack of intelligence. It is a strong model repeatedly
+thinking inside the same representation.
 
-### Challenger
+Flourite detects repetition by semantic residue, not wording:
 
-The Challenger appears at two decision boundaries: before ordinary construction
-scales from a representative root artifact, and after the Lead makes a concrete
-finish claim. It is fresh, read-only, and instructed to inspect the actual
-artifacts and evidence. Support must bind to the exact challenged digest. A
-stale review cannot bless a changed result.
+- the same load-bearing assumption survives unchanged;
+- the artifact and evidence frontier do not materially move;
+- successive actions could change the same decision in the same way;
+- tool use repeats without increasing discriminative power;
+- complexity rises while explanatory compression falls.
 
-At the early boundary the controller records a durable decision receipt tying
-the digest, Challenger move, predecessor, disposition, and evidence together.
-Only direct support mints a promotion lease. Replacing the root artifact revokes
-that lease atomically; the successor must earn its own. This is a capability
-check, not a review phase: a promoted digest returns immediately to ordinary
-construction, while an unpromoted digest cannot scale, finish, or be sealed for
-evaluation.
-
-Material criticism and uncertainty veto completion and flow back into ordinary
-construction. Non-material observations remain in the record without forcing
-ceremonial repair. Successful deterministic adapter checks are evidence, but
-they do not replace semantic challenge where the objective is semantic.
-
-## Gradient flow
-
-Flourite's gradient is not a synthetic quality score. It is the path by which a
-real observation changes the next construction context:
-
-```text
-direct observation
-      ↓
-explicit provenance and scope
-      ↓
-workspace revision / artifact revision / branch decision
-      ↓
-next move sees the changed world
-      ↓
-fresh observation of the changed result
-```
-
-Negative results are retained because they remove parts of the search space.
-Rejected finish claims are retained because they reveal exactly which claim or
-artifact failed. A Navigator reframe is retained because it changes the global
-workspace, not because another agent spoke.
-
-An observation created after a workspace version cannot be marked as consumed
-by that earlier workspace. This temporal rule prevents evidence from vanishing
-before any model has seen it.
+At that point a fresh perspective receives the objective, compressed frontier,
+quality lens, artifact, and negative evidence—not the long conversation. Its
+only job is to identify the hidden shared assumption, missing representation,
+or better discriminator. The persistent worker then owns the decision and
+construction. Flourite does not create a permanent manager caste.
 
 ## Search width
 
-Most runs remain one Lead and one artifact. A model may open a trajectory only
-when two approaches need independent development before comparison. Each branch
-has its own artifact head and Lead continuity. Branch work cannot overwrite the
-global workspace; integration receives all heads and returns one new current
-best.
+One worker and one live artifact are the default. Independent trajectories are
+opened only when alternatives make genuinely different predictions and need
+separate development before comparison. Shared uncertainty is solved once.
+Parallelism is permission, not a utilization target.
 
-Parallelism is therefore a maximum permission, not a target. Flourite does not
-manufacture work to fill cores.
+The best branch is not selected by rhetoric or activity. It wins on direct
+decision-relevant evidence, and useful parts of rejected branches return to the
+frontier before their contexts are discarded.
 
-## Completion and stopping
+## Completion
 
-There are five honest terminal states:
+A finish claim names the exact objective claims, artifact digests, quality-lens
+version, and evidence on which it depends. Satisfaction requires:
 
-- `satisfied` — a concrete claim survived direct independent challenge;
-- `exhausted` — an explicit operator envelope was reached;
-- `blocked` — a real external dependency prevents progress;
-- `stopped` — the operator stopped at a safe boundary;
-- `failed` — the harness cannot continue correctly.
+1. a valid assay inspected every claimed artifact in its decision-relevant form;
+2. direct material support for the actual semantic claims—not proxy checks;
+3. no unresolved material `challenges` or `uncertain` verdict;
+4. no uncovered material dimension in the current quality lens;
+5. no stale evidence or evaluator result from another digest or lens version.
 
-There is no default call cap, round cap, repair cap, or synthesis reserve. A
-productive run continues until its claim is established or the operator's
-explicit boundary says otherwise.
+Non-material support cannot close a material claim. Invalid assays cannot vote.
+Changing an artifact, objective amendment, or load-bearing quality criterion
+revokes affected support automatically.
 
-Pause, stop, and steering are admitted between moves. They never pretend an
-in-flight call was cleanly integrated. A stopped or paused run remains
-reconstructible from the journal.
+Honest terminal states are `satisfied`, `exhausted`, `blocked`, `stopped`, and
+`failed`. Productive work ends only through established satisfaction or an
+operator-owned boundary.
 
-Infrastructure pauses retain the original semantic move unchanged. The stable
-supervisor can repair, live-bind, and retry it without restarting the durable
-run; it may not grade a non-terminal projection or reuse a stale pre-terminal
-seal.
+## Durable execution
 
-## Ownership map
+The journal records one atomic semantic move: its evidence, artifact, frontier,
+quality-lens update, continuation, and usage commit together or not at all.
+Retries are idempotent. Blobs are immutable. Derived state can be rebuilt.
 
-| Component | Owns | Must not own |
-| --- | --- | --- |
-| `IntelligenceKernel` | Next legal move, stagnation response, completion transition, envelope truth | Provider mechanics or domain semantics |
-| `MoveResultCompiler` | Translate one typed execution result into one complete transaction plan | Mutating run state |
-| `AtomicMoveTransition` | Aggregate invariants and all-or-nothing state mutation | Provider or model behavior |
-| `KernelJournal` + reducer | Atomic append, event dispatch, legal replay, derived state | Model judgment or I/O policy |
-| `OmpMoveRunner` | Context materialization, provider call, typed boundary, session recovery | Global state transitions |
-| OMP provider | Transport attempts, schema retry, safe telemetry, exact usage | Search policy or semantic progress |
-| Adapter | Artifact capture, direct checks, materialization, explicit apply | Universal search policy |
-| `KernelEngine` | Run lifecycle, commands, locks, activity, source staging | Deciding what an observation means |
-| Step supervisor | Lease a component generation, verify one activity receipt, capture typed faults, admit replay-proven repairs | Planning, semantic state, or task judgment |
-| Component registry | Immutable code snapshots and one atomic active pointer | In-flight mutation or semantic authority |
-| Infrastructure repairer | Diagnose a typed runtime fault in an isolated source copy | Reframing the task, editing durable run state, or self-certifying a patch |
-| Blob store | Immutable bytes and digest verification | Semantic authority |
-| Live UI | Projection and operator input | Hidden state or progress claims |
+Runtime components are replaceable at move boundaries. A provider, adapter,
+prompt, compiler, or evaluator implementation may be repaired and rebound
+without reconstructing the run. In-flight code never changes beneath a tool
+call. A repair is accepted only when replaying the exact failed activity works;
+repair prose has no authority.
 
-The implementation maps directly to these boundaries:
+The supervisor leases one component generation, runs one step, verifies its
+receipt, and repeats. It owns no planning or quality judgment.
+
+## What must remain absent
+
+- agent societies and permanent planner/researcher/critic casts;
+- fixed phase progressions or call allocations;
+- universal issue graphs or generic quality scores;
+- free-form agent chatter as the control plane;
+- progress credit for activity, prose, commits, or tool count;
+- static rubrics treated as truth forever;
+- evaluators that cannot ask for missing material;
+- semantic conclusions drawn from infrastructure failures;
+- proxy checks promoted beyond their observable scope;
+- a second completion path outside the canonical reducer.
+
+## Implementation map
 
 ```text
-src/frontier_harness/
-  core/          types · atomic transition · reducer · journal · intelligence kernel
-  intelligence/ context lens · OMP runner · result compiler · typed contracts
-  providers/     OMP transport · safe event projection · trace accounting
-  runtime/       lifecycle · component leases · disposable workers · commands · sources
-  adapters/      domain observation and artifact behavior
-  live.py        disposable operator projection
+core/          objective · frontier state · typed evidence · atomic transition · journal
+intelligence/  context · worker · fresh perspective · assay handshake · result compiler
+runtime/       replaceable steps · recovery · operator commands · source staging
+providers/     transport and usage only
+adapters/      artifact-native observation and deterministic property checks
+live.py        disposable projection; never semantic authority
 ```
 
-## What is deliberately absent
-
-- fixed stage progression;
-- permanent planner, researcher, critic, and manager personas;
-- agent-to-agent free-form chat;
-- a universal decomposition ontology;
-- progress credit for model calls, prose, rewritten bytes, or tool activity;
-- a second completion path outside the canonical reducer;
-- hidden resource grants that can strand unused operator compute.
-
-There is no compatibility controller or alternate state model. Every command
-enters the same kernel, reducer, and journal.
-
-## Open frontier
-
-Within-run continuity, replay, branching, challenge, steering, and recovery are
-implemented. Native cross-run learning is not yet part of the authoritative
-kernel. When added, it must be retrieval with explicit provenance and scope—not
-ambient lore that can silently bend a new objective.
-
-That boundary is intentional. Flourite should remember transferable evidence
-without making yesterday's local optimum today's hidden prior.
+The source tree may be larger than this map. Its behavior may not be.

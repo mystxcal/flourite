@@ -2,6 +2,10 @@
 
 Status: implemented architecture and design rationale.
 
+> Historical rebuild record. The authoritative current design is
+> [CANONICAL_MODEL.md](CANONICAL_MODEL.md); in particular, the former artifact
+> promotion gate is not part of the live control law.
+
 ## 1. The outcome
 
 Flourite exists to let a strong model solve one real task better than the same

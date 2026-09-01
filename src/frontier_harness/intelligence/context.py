@@ -26,6 +26,7 @@ class ContextFrame(CoreModel):
     objective_text: str
     amendments: list[str] = Field(default_factory=list)
     workspace_text: str | None = None
+    quality_text: str | None = None
     workspace_summary: str | None = None
     current_workspace_id: str | None = None
     trajectories: list[Trajectory] = Field(default_factory=list)
@@ -63,6 +64,11 @@ class ContextAssembler:
             objective_text=self._blobs.read_text(state.objective.original_text_ref),
             amendments=amendments,
             workspace_text=(self._blobs.read_text(workspace.document_ref) if workspace else None),
+            quality_text=(
+                self._blobs.read_text(workspace.quality_ref)
+                if workspace is not None and workspace.quality_ref is not None
+                else None
+            ),
             workspace_summary=workspace.summary if workspace else None,
             current_workspace_id=workspace.workspace_id if workspace is not None else None,
             trajectories=list(state.trajectories.values()),
@@ -96,8 +102,8 @@ class ContextAssembler:
             or observation.observation_id in state.pending_steering_ids
             or (
                 state.finish_claim is not None
-                and observation.kind.value == "challenge"
-                and observation.metadata.get("claim_id") == state.finish_claim.claim_id
+                and observation.challenge_verdict is not None
+                and observation.claim_id == state.finish_claim.claim_id
             )
         ]
 

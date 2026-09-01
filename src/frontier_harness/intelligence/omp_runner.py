@@ -16,6 +16,7 @@ from pydantic import Field, model_validator
 
 from ..adapters.base import ArtifactAdapter, CallWorkspace
 from ..core.types import (
+    AssayStatus,
     ChallengeVerdict,
     ComputeUsage,
     CoreModel,
@@ -29,7 +30,7 @@ from ..models import ArtifactRef, EvidenceRecord, Role, SandboxPolicy
 from ..providers.base import ProviderCallRequest, ProviderCallResult
 from ..providers.omp_codex import OmpCodexProvider
 from ..runtime.sources import StagedInput
-from ..util import atomic_write_text, utc_now
+from ..util import atomic_write_text, sha256_text, utc_now
 from .context import ContextFrame
 from .contracts import (
     ArtifactDraft,
@@ -54,6 +55,27 @@ class ModelChallengeObservation(ModelObservation):
     verdict: ChallengeVerdict
     material_to_claim: bool = True
     artifact_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class ModelAssayReceipt(CoreModel):
+    status: AssayStatus
+    coverage: str = ""
+    reason: str = ""
+    missing_material: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def explain_status(self) -> ModelAssayReceipt:
+        if self.status == AssayStatus.VALID and not self.coverage.strip():
+            raise ValueError("a valid assay requires concrete coverage")
+        if self.status == AssayStatus.INVALID and not (
+            self.reason.strip() or self.missing_material
+        ):
+            raise ValueError("an invalid assay requires the missing material or reason")
+        return self
+
+
+class AssayInvalidError(ValueError):
+    """The evaluator could not perceive the target, so no quality verdict exists."""
 
 
 class ModelNextMove(CoreModel):
@@ -106,11 +128,23 @@ class NavigatorModelOutput(ModelOutputBase):
 
 
 class ChallengeModelOutput(ModelOutputBase):
-    observations: Sequence[ModelChallengeObservation] = Field(min_length=1)
+    assay: ModelAssayReceipt
+    observations: Sequence[ModelChallengeObservation] = Field(default_factory=list)
+    quality_delta: Sequence[str] = Field(default_factory=list)
     next_move: None = None
     branches: Sequence[ModelNextMove] = Field(default_factory=list, max_length=0)
     finish: None = None
     blocker: None = None
+
+    @model_validator(mode="after")
+    def assay_controls_verdicts(self) -> ChallengeModelOutput:
+        if self.assay.status == AssayStatus.VALID and not self.observations:
+            raise ValueError("a valid assay requires at least one semantic observation")
+        if self.assay.status == AssayStatus.INVALID and (
+            self.observations or self.quality_delta
+        ):
+            raise ValueError("an invalid assay cannot emit semantic verdicts or quality changes")
+        return self
 
 
 ModelOutput = LeadModelOutput | NavigatorModelOutput | ChallengeModelOutput
@@ -169,6 +203,8 @@ class OmpMoveRunner:
         usage = ComputeUsage()
         try:
             self._write_context(workspace, context)
+            if move.mode == MoveMode.CHALLENGE:
+                self._preflight_assay(workspace)
             output_type = self._output_type(move.mode)
             runtime_dir = execution_dir / "provider"
             runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -262,6 +298,12 @@ class OmpMoveRunner:
                         return failed
                     previous_commit_error = commit_error
                     repair += 1
+                    if isinstance(exc, AssayInvalidError):
+                        # Rebuild the exact evaluation capsule from immutable state before
+                        # asking the same evaluator to retry. This repairs vanished material
+                        # without converting an execution fault into a quality judgment.
+                        self._write_context(workspace, context)
+                        self._preflight_assay(workspace)
                     repair_note = (
                         "The runtime could not commit your last result. Do not explain "
                         "or restart. Inspect the live workspace, fix the problem directly, "
@@ -516,6 +558,9 @@ class OmpMoveRunner:
         atomic_write_text(context_dir / "objective.md", self._objective_text(context))
         if context.workspace_text is not None:
             atomic_write_text(context_dir / "workspace.md", context.workspace_text)
+            atomic_write_text(context_dir / "frontier.md", context.workspace_text)
+        if context.quality_text is not None:
+            atomic_write_text(context_dir / "quality.md", context.quality_text)
         sources = self._write_sources(workspace, context_dir)
         self._write_observations(workspace, context)
         artifacts = self._write_artifacts(workspace, context)
@@ -634,6 +679,9 @@ class OmpMoveRunner:
             "mode": context.mode,
             "current_workspace_id": context.current_workspace_id,
             "workspace_summary": context.workspace_summary,
+            "quality_digest": (
+                sha256_text(context.quality_text) if context.quality_text is not None else None
+            ),
             "artifact_heads": artifacts,
             "trajectories": [item.model_dump(mode="json") for item in context.trajectories],
             "recent_moves": [
@@ -660,11 +708,17 @@ class OmpMoveRunner:
         objective_path = (workspace.context_dir / "objective.md").relative_to(workspace.cwd)
         index_path = (workspace.context_dir / "index.json").relative_to(workspace.cwd)
         observations_path = (workspace.context_dir / "observations.json").relative_to(workspace.cwd)
+        frontier_path = (workspace.context_dir / "frontier.md").relative_to(workspace.cwd)
+        quality_path = (workspace.context_dir / "quality.md").relative_to(workspace.cwd)
+        workspace_output = (workspace.output_dir / "workspace.md").relative_to(workspace.cwd)
+        quality_output = (workspace.output_dir / "quality.md").relative_to(workspace.cwd)
         expected_artifact = workspace.expected_artifact_path.relative_to(workspace.cwd)
         common = f"""You are executing one meaningful Flourite move for an exact user task.
 
 The original objective is authoritative: `{objective_path}`.
 The compact run index is `{index_path}` and new evidence is `{observations_path}`.
+The current compressed frontier, when present, is `{frontier_path}`.
+The current task-native quality lens, when present, is `{quality_path}`.
 Open the actual artifact, source, and raw evidence whenever the decision depends on them.
 
 Move intent: {move.intent}
@@ -673,15 +727,10 @@ Domain lens: {self.adapter.guidance or "Use the exact objective and direct evide
 
 Use your tools and do real work. Do not spend the move narrating a process, manufacturing
 ceremony, or merely proposing work you can perform now. Preserve inconvenient evidence.
+Prefer eliminating bad ideas in thought space when direct reasoning settles them; use tools
+when the resulting observation can change a decision. Calls and activity are costs, not proof.
 The typed final response is a concise durable boundary, not the work itself.
 """
-        if move.promotion_gate is not None:
-            common += (
-                "\nThis move participates in an artifact promotion gate for canonical digest "
-                f"{move.promotion_gate.target_artifact_digest} as a "
-                f"{move.promotion_gate.role} move. The gate is a real construction boundary, "
-                "not advisory commentary.\n"
-            )
         if move.mode in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
             return (
                 common
@@ -689,10 +738,13 @@ The typed final response is a concise durable boundary, not the work itself.
 
 Act as the persistent Lead. Improve the live result directly. For a document artifact,
 write the current best artifact to `{expected_artifact}`. For a software artifact, modify
-the isolated repository itself. Before returning, write a compact decision map to
-`.sfh_output/workspace.md`; it should capture the current best, strategy, causal evidence,
-failed approaches worth remembering, unresolved load-bearing uncertainty, and the next
-frontier. Choose one next move or make an evidenced
+the isolated repository itself. Before returning, write the shortest reconstructible frontier
+to `{workspace_output}`: causal model, load-bearing invariants, established facts,
+failed bets and why, unresolved decision-changing uncertainty, shared assumptions, and the
+few best discriminators. Also write `{quality_output}`: the evolving task-native success
+and failure signatures, observable discriminators, proxy traps, coverage gaps, and blind spots.
+Integrate only quality distinctions grounded in the objective or direct evidence. Choose one
+next move or make an evidenced
 finish claim. If no move is obvious, broaden or reframe rather than inferring completion.
 Use `blocker` only for a concrete external dependency that tools and further reasoning
 cannot resolve; difficulty, uncertainty, and failed attempts are not blockers.
@@ -714,13 +766,13 @@ one concrete observation and normally a next move for the Lead.
             )
         return (
             common
-            + """
+            + f"""
 
 Act as an independent Challenger. Do not judge a description of the work: inspect the
 actual current artifact and decision-relevant evidence. Test the requested live artifact
 or finish claim against the exact objective. Every observation must say whether it
 supports, challenges, or remains uncertain, with concrete scope. `artifact_digest` means
-the canonical artifact-head digest from `.sfh_context/index.json`, not the hash of a file
+the canonical artifact-head digest from `{index_path}`, not the hash of a file
 inside that artifact; when there is one target it may be omitted because the runtime binds
 it exactly. If you attach raw evidence, give one existing workspace-local file in
 `evidence_path`; put additional locators in the summary. Every claimed artifact head needs
@@ -728,6 +780,14 @@ direct support. Mark
 `material_to_claim=false` when a finding is real but cannot change whether the exact
 objective is satisfied. If such a finding is the only criticism, also state direct
 support for the claim. Do not edit the artifact or prescribe a ritual.
+
+First preflight what you can actually perceive. All paths in `{index_path}` are
+relative to the current working directory; use them directly and never retype the absolute
+workspace path. Return `assay.status=invalid` with the exact missing material only when the
+objective, target, reference, or required viewer is genuinely inaccessible. An invalid assay
+must emit no semantic verdict. When valid, summarize whole-artifact coverage in
+`assay.coverage`. Treat the quality lens as a fallible hypothesis: use `quality_delta` for a
+new material distinction or proxy trap revealed by direct inspection, not generic advice.
 """
         )
 
@@ -741,6 +801,10 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
         output: ModelOutput,
         usage: ComputeUsage,
     ) -> MoveExecutionResult:
+        if isinstance(output, ChallengeModelOutput) and output.assay.status == AssayStatus.INVALID:
+            missing = ", ".join(output.assay.missing_material) or "unspecified material"
+            reason = output.assay.reason or "the evaluator could not inspect the exact target"
+            raise AssayInvalidError(f"{reason}; missing: {missing}")
         artifact, candidate = self._capture_artifact(move, workspace, parent, output)
         challenge_artifacts = self._challenge_artifacts(state, move)
         observations = self._model_observations(
@@ -830,16 +894,34 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
     ) -> list[ObservationDraft]:
         digest_owners = self._artifact_digest_owners(challenge_artifacts)
         target_digests = {item.digest for item in challenge_artifacts}
-        return [
+        assay_coverage = (
+            output.assay.coverage if isinstance(output, ChallengeModelOutput) else None
+        )
+        observations = [
             self._model_observation(
                 move,
                 workspace,
                 item,
                 digest_owners=digest_owners,
                 target_digests=target_digests,
+                assay_coverage=assay_coverage,
             )
             for item in output.observations
         ]
+        if isinstance(output, ChallengeModelOutput):
+            observations.extend(
+                ObservationDraft(
+                    kind=ObservationKind.MODEL,
+                    summary=item,
+                    source="fresh-challenger",
+                    assay_status=AssayStatus.VALID,
+                    assay_coverage=output.assay.coverage,
+                    direct_inspection=True,
+                    quality_delta=True,
+                )
+                for item in output.quality_delta
+            )
+        return observations
 
     def _model_observation(
         self,
@@ -849,6 +931,7 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
         *,
         digest_owners: dict[str, str],
         target_digests: set[str],
+        assay_coverage: str | None,
     ) -> ObservationDraft:
         raw_ref, evidence_metadata = self._capture_model_evidence(
             move,
@@ -864,8 +947,6 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
             target_digests=target_digests,
         )
         metadata: dict[str, object] = {**evidence_metadata, **binding_metadata}
-        if challenge is not None:
-            metadata["material_to_claim"] = challenge.material_to_claim
         return ObservationDraft(
             kind=model_observation.kind,
             summary=model_observation.summary,
@@ -879,6 +960,10 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
             artifact_digest=bound_digest,
             confidence=model_observation.confidence,
             challenge_verdict=challenge.verdict if challenge is not None else None,
+            assay_status=AssayStatus.VALID if challenge is not None else None,
+            assay_coverage=assay_coverage if challenge is not None else None,
+            material_to_claim=challenge.material_to_claim if challenge is not None else True,
+            direct_inspection=challenge is not None,
             metadata=metadata,
         )
 
@@ -901,16 +986,17 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
             return None, {}
         try:
             evidence_path = self.adapter.resolve_declared_path(workspace, declared_path)
-        except (OSError, ValueError):
-            if move.mode != MoveMode.CHALLENGE:
-                raise
-            return None, {"evidence_capture": "unresolved_optional_locator"}
+        except (OSError, ValueError) as exc:
+            if move.mode == MoveMode.CHALLENGE:
+                raise AssayInvalidError(
+                    f"declared challenge evidence is not accessible: {declared_path}"
+                ) from exc
+            raise
         if not evidence_path.is_file():
-            if move.mode != MoveMode.CHALLENGE:
-                raise ValueError(
-                    "evidence_path must name an existing file inside the live workspace"
-                )
-            return None, {"evidence_capture": "unresolved_optional_locator"}
+            error = f"evidence_path is not an existing workspace file: {declared_path}"
+            if move.mode == MoveMode.CHALLENGE:
+                raise AssayInvalidError(error)
+            raise ValueError(error)
         return (
             self.adapter.blobs.put_file(evidence_path, original_name=evidence_path.name),
             {"evidence_capture": "durable"},
@@ -932,16 +1018,18 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
                 {"inspected_content_digest": reported} if reported != owner else {}
             )
             return owner, resolved_metadata
-        if len(target_digests) == 1:
+        if reported is None and len(target_digests) == 1:
             owner = next(iter(target_digests))
-            fallback_metadata: dict[str, object] = {"artifact_binding": "single_frozen_target"}
-            if reported is not None:
-                fallback_metadata["inspected_content_digest"] = reported
-            return owner, fallback_metadata
-        unresolved_metadata: dict[str, object] = (
-            {"artifact_binding": "unresolved"} if reported is not None else {}
+            return owner, {"artifact_binding": "single_frozen_target"}
+        if reported is not None:
+            raise AssayInvalidError(
+                "challenge artifact_digest does not identify a materialized artifact or "
+                "deliverable; reread the capsule context index and return the canonical digest"
+            )
+        raise AssayInvalidError(
+            "challenge observation is ambiguous across multiple artifact heads; return the "
+            "canonical artifact_digest for the inspected target"
         )
-        return None, unresolved_metadata
 
     def _artifact_observations(
         self,
@@ -964,7 +1052,12 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
                     else self.adapter.staged_checks(artifact, stage="candidate")
                 )
             except Exception as exc:
-                observations.append(self._check_failure(move, artifact, exc))
+                if move.mode == MoveMode.CHALLENGE:
+                    raise AssayInvalidError(
+                        "artifact-native verification could not run for "
+                        f"{artifact.blob.digest}: {type(exc).__name__}: {exc}"
+                    ) from exc
+                observations.append(self._check_failure(artifact, exc))
                 continue
             observations.extend(
                 self._check_observation(
@@ -977,20 +1070,17 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
 
     @staticmethod
     def _check_failure(
-        move: Move,
         artifact: ArtifactRef,
         error: Exception,
     ) -> ObservationDraft:
-        challenge = move.mode == MoveMode.CHALLENGE
         return ObservationDraft(
-            kind=ObservationKind.CHALLENGE if challenge else ObservationKind.ERROR,
+            kind=ObservationKind.ERROR,
             summary=(
                 f"Artifact-native verification could not run: {type(error).__name__}: {error}"
             ),
             source="artifact-check",
             artifact_digest=artifact.blob.digest,
             confidence=1.0,
-            challenge_verdict=ChallengeVerdict.UNCERTAIN if challenge else None,
         )
 
     def _workspace_result(
@@ -1002,14 +1092,76 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
     ) -> WorkspaceDraft | None:
         if not isinstance(output, LeadModelOutput):
             return None
-        path = workspace.cwd / ".sfh_output" / "workspace.md"
+        path = workspace.output_dir / "workspace.md"
         if not path.is_file():
-            raise ValueError("lead did not write the required .sfh_output/workspace.md")
+            relative = path.relative_to(workspace.cwd)
+            raise ValueError(f"lead did not write the required {relative}")
+        quality_path = workspace.output_dir / "quality.md"
+        quality_document = (
+            quality_path.read_text(encoding="utf-8")
+            if quality_path.is_file()
+            else self._bootstrap_quality(state)
+        )
+        consumed = set(
+            state.workspaces[move.based_on_workspace_id].consumed_observation_ids
+            if move.based_on_workspace_id in state.workspaces
+            else []
+        )
+        grounded_deltas = [
+            item.summary
+            for item in state.observations.values()
+            if item.observation_id not in consumed
+            and item.quality_delta
+            and item.summary not in quality_document
+        ]
+        if grounded_deltas:
+            quality_document = (
+                quality_document.rstrip()
+                + "\n\n## Evidence-driven updates\n\n"
+                + "\n".join(f"- {item}" for item in grounded_deltas)
+                + "\n"
+            )
         return WorkspaceDraft(
             document=path.read_text(encoding="utf-8"),
+            quality_document=quality_document,
             summary=output.workspace_summary,
             activate=move.trajectory_id == state.root_trajectory_id,
         )
+
+    def _bootstrap_quality(self, state: RunState) -> str:
+        current = state.current_workspace
+        if current is not None and current.quality_ref is not None:
+            return self.adapter.blobs.read_text(current.quality_ref)
+        return (
+            "# Quality lens\n\n"
+            "- Satisfy the exact objective in its decision-relevant form.\n"
+            "- Judge the actual artifact rather than descriptions or proxy checks.\n"
+            "- Treat this bootstrap as incomplete; replace it with task-native, observable "
+            "success and failure signatures.\n"
+        )
+
+    @staticmethod
+    def _preflight_assay(workspace: CallWorkspace) -> None:
+        required = [
+            workspace.context_dir / "objective.md",
+            workspace.context_dir / "index.json",
+            workspace.context_dir / "observations.json",
+        ]
+        missing = [path.name for path in required if not path.is_file()]
+        index_path = workspace.context_dir / "index.json"
+        if index_path.is_file():
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            for artifact in index.get("artifact_heads", []):
+                for relative in [
+                    artifact.get("local_path"),
+                    *artifact.get("local_deliverables", []),
+                ]:
+                    if relative and not (workspace.cwd / relative).is_file():
+                        missing.append(str(relative))
+        if missing:
+            raise AssayInvalidError(
+                "evaluation capsule preflight failed; missing: " + ", ".join(missing)
+            )
 
     @staticmethod
     def _directives(move: Move, output: ModelOutput) -> list[MoveDirective]:
@@ -1059,6 +1211,9 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
             artifact_digest=evidence.artifact_digest,
             confidence=1.0,
             challenge_verdict=verdict if challenge else None,
+            assay_status=AssayStatus.VALID if challenge else None,
+            material_to_claim=evidence.negative_result,
+            direct_inspection=challenge,
             metadata={
                 "evidence_id": evidence.evidence_id,
                 "scope": evidence.scope,
@@ -1069,6 +1224,5 @@ support for the claim. Do not edit the artifact or prescribe a ritual.
                 "establishes": evidence.establishes,
                 "cannot_establish": evidence.cannot_establish,
                 "negative_result": evidence.negative_result,
-                "material_to_claim": evidence.negative_result,
             },
         )

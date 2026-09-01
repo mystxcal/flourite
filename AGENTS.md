@@ -6,7 +6,7 @@ When modifying it:
 
 - Treat `ledger.sqlite3` events as authoritative and `state.json` as derived.
 - Preserve the immutable Objective; steering appends an explicit amendment rather than rewriting history.
-- Keep the current Workspace expressive. Do not encode a task's semantic world into controller schemas.
+- Keep the compressed Frontier and task-native Quality Lens expressive. Do not encode a task's semantic world into controller schemas.
 - Treat one Move as the semantic unit of work. Its observations, artifacts, workspace, continuation, and usage commit atomically or not at all.
 - Preserve Lead continuity by trajectory, but never depend on hidden session memory for integrity.
 - Externalize large data into `BlobStore`; event payloads must remain compact.
