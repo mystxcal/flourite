@@ -28,6 +28,7 @@ class ContextFrame(CoreModel):
     workspace_text: str | None = None
     quality_text: str | None = None
     workspace_summary: str | None = None
+    decision_boundary: str | None = None
     current_workspace_id: str | None = None
     trajectories: list[Trajectory] = Field(default_factory=list)
     artifact_heads: list[ArtifactVersion] = Field(default_factory=list)
@@ -70,6 +71,7 @@ class ContextAssembler:
                 else None
             ),
             workspace_summary=workspace.summary if workspace else None,
+            decision_boundary=workspace.decision_boundary if workspace else None,
             current_workspace_id=workspace.workspace_id if workspace is not None else None,
             trajectories=list(state.trajectories.values()),
             artifact_heads=heads,
@@ -102,8 +104,13 @@ class ContextAssembler:
             or observation.observation_id in state.pending_steering_ids
             or (
                 state.finish_claim is not None
-                and observation.challenge_verdict is not None
-                and observation.claim_id == state.finish_claim.claim_id
+                and (
+                    observation.observation_id in state.finish_claim.evidence_refs
+                    or (
+                        observation.challenge_verdict is not None
+                        and observation.claim_id == state.finish_claim.claim_id
+                    )
+                )
             )
         ]
 
@@ -113,9 +120,16 @@ class ContextAssembler:
         workspace: WorkspaceVersion | None,
     ) -> list[ArtifactVersion]:
         head_ids = list(workspace.artifact_head_ids if workspace is not None else [])
+        active_trajectory_ids = set(
+            workspace.active_trajectory_ids
+            if workspace is not None
+            else [state.root_trajectory_id]
+        )
         head_ids.extend(
             item.artifact_head_id
             for item in state.trajectories.values()
-            if item.artifact_head_id is not None and item.artifact_head_id not in head_ids
+            if item.trajectory_id in active_trajectory_ids
+            and item.artifact_head_id is not None
+            and item.artifact_head_id not in head_ids
         )
         return [state.artifacts[item] for item in head_ids if item in state.artifacts]

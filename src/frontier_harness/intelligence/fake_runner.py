@@ -7,6 +7,7 @@ it is not a second controller and it does not simulate model intelligence.
 
 from __future__ import annotations
 
+from ..blobs import BlobStore
 from ..core.types import (
     AssayStatus,
     ChallengeVerdict,
@@ -18,6 +19,7 @@ from ..core.types import (
 )
 from .context import ContextFrame
 from .contracts import (
+    ArtifactDraft,
     FinishDraft,
     MoveExecutionResult,
     ObservationDraft,
@@ -28,6 +30,9 @@ from .contracts import (
 class DeterministicMoveRunner:
     """Complete one tiny artifact and challenge it through the canonical path."""
 
+    def __init__(self, blobs: BlobStore) -> None:
+        self.blobs = blobs
+
     async def run(
         self,
         *,
@@ -36,8 +41,11 @@ class DeterministicMoveRunner:
         context: ContextFrame,
         recovering: bool,
     ) -> MoveExecutionResult:
-        del state, recovering
+        del recovering
         if move.mode == MoveMode.CHALLENGE:
+            claim = state.finish_claim
+            assert claim is not None
+            artifact = state.artifacts[claim.artifact_head_ids[0]]
             return MoveExecutionResult(
                 observations=[
                     ObservationDraft(
@@ -46,7 +54,14 @@ class DeterministicMoveRunner:
                         source="fresh-challenger",
                         challenge_verdict=ChallengeVerdict.SUPPORTS,
                         confidence=1.0,
+                        artifact_digest=artifact.digest,
                         assay_status=AssayStatus.VALID,
+                        assay_coverage="the complete deterministic demonstration artifact",
+                        covered_claims=(
+                            state.finish_claim.satisfaction_claims
+                            if state.finish_claim is not None
+                            else []
+                        ),
                         material_to_claim=True,
                         direct_inspection=True,
                     )
@@ -62,6 +77,13 @@ class DeterministicMoveRunner:
             "atomically, and sent its completion claim to a fresh challenger.\n"
         )
         return MoveExecutionResult(
+            artifact=ArtifactDraft(
+                content_ref=self.blobs.put_text(
+                    document,
+                    media_type="text/markdown; charset=utf-8",
+                    original_name="offline-demonstration.md",
+                )
+            ),
             workspace=WorkspaceDraft(
                 document=document,
                 summary="Deterministic canonical-kernel artifact",

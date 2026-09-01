@@ -192,9 +192,10 @@ long ephemeral absolute paths. An inaccessible file, unsupported modality,
 unfinished render, or missing reference emits `assay_invalid`, not `uncertain`,
 `supports`, or `challenges`.
 
-The controller services a typed missing-material request from the ledger and
-blob store, then repeats the exact evaluation against the same digest. If the
-assay still cannot be made valid, the run pauses as an infrastructure failure.
+The runtime services a typed missing-material request by rematerializing the
+capsule from content-addressed state, then repeats the exact evaluation against
+the same digest. If the assay still cannot be made valid, the durable run pauses
+with the assay failure recorded.
 It cannot satisfy the objective, revise the artifact, or contaminate the quality
 gradient.
 
@@ -238,6 +239,12 @@ Flourite detects repetition by semantic residue, not wording:
 - tool use repeats without increasing discriminative power;
 - complexity rises while explanatory compression falls.
 
+The live workspace therefore names one stable `decision_boundary`: the exact
+decision or uncertainty whose resolution would most change the result. A fresh
+reframe is triggered only when consecutive Lead moves remain on that boundary
+without changing the artifact or adding durable evidence. Moving to a genuinely
+new boundary through thought-space elimination counts as progress.
+
 At that point a fresh perspective receives the objective, compressed frontier,
 quality lens, artifact, and negative evidence—not the long conversation. Its
 only job is to identify the hidden shared assumption, missing representation,
@@ -266,6 +273,12 @@ version, and evidence on which it depends. Satisfaction requires:
 4. no uncovered material dimension in the current quality lens;
 5. no stale evidence or evaluator result from another digest or lens version.
 
+Material support also names the exact satisfaction-claim strings it inspected.
+Artifact coverage without semantic-claim coverage cannot terminate the run.
+Pending operator steering must be integrated into the live workspace before a finish
+claim is legal. If the last allowed model call completes an already-sufficient proof,
+the zero-compute satisfaction transition is applied before exhaustion is recorded.
+
 Non-material support cannot close a material claim. Invalid assays cannot vote.
 Changing an artifact, objective amendment, or load-bearing quality criterion
 revokes affected support automatically.
@@ -278,7 +291,11 @@ operator-owned boundary.
 
 The journal records one atomic semantic move: its evidence, artifact, frontier,
 quality-lens update, continuation, and usage commit together or not at all.
-Retries are idempotent. Blobs are immutable. Derived state can be rebuilt.
+Retries are idempotent, and every proposal is bound to the exact causal event frontier
+that produced it, so new evidence can legitimately reopen the same semantic question
+without becoming a duplicate or a zero-cost loop. Blobs are immutable. A snapshot is
+accepted only when it matches the journal head; otherwise the projection is rebuilt from
+the verified journal automatically.
 
 Runtime components are replaceable at move boundaries. A provider, adapter,
 prompt, compiler, or evaluator implementation may be repaired and rebound
@@ -288,6 +305,11 @@ repair prose has no authority.
 
 The supervisor leases one component generation, runs one step, verifies its
 receipt, and repeats. It owns no planning or quality judgment.
+
+Execution pauses identify the causal recovery domain: provider, assay,
+component, or external. Only component failures may invoke code repair. A real
+external blocker must retain durable evidence; difficulty or model uncertainty
+cannot masquerade as a blocked terminal state.
 
 ## What must remain absent
 

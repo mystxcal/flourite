@@ -10,9 +10,14 @@ from typer.testing import CliRunner
 
 import frontier_harness.cli as cli
 from frontier_harness.cli import app
-from frontier_harness.config import load_config
+from frontier_harness.config import HarnessConfig, load_config
 
 runner = CliRunner()
+
+
+def test_unmetered_dollar_envelope_is_rejected() -> None:
+    with pytest.raises(ValueError, match="authoritative monetary cost"):
+        HarnessConfig.model_validate({"kernel": {"max_cost_usd": 1}})
 
 
 def test_failed_engine_returns_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

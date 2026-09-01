@@ -22,8 +22,10 @@ flourite run \
   "Exact task"
 ```
 
-Token and cost envelopes are available under `[kernel]`. Unset values mean the
-harness does not invent a limit.
+Token and model-turn envelopes are also available under `[kernel]`; because the
+provider reports them after a call, they stop the run at that atomic boundary.
+Dollar limits are rejected until the active provider reports authoritative
+monetary cost; Flourite never silently treats an unmetered run as free.
 
 ## Capability mode
 

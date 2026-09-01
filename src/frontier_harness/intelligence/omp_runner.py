@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import Field, model_validator
 
@@ -20,6 +20,7 @@ from ..core.types import (
     ChallengeVerdict,
     ComputeUsage,
     CoreModel,
+    FailureDomain,
     Move,
     MoveMode,
     ObservationKind,
@@ -51,10 +52,11 @@ class ModelObservation(CoreModel):
 
 
 class ModelChallengeObservation(ModelObservation):
-    kind: ObservationKind = ObservationKind.CHALLENGE
+    kind: Literal[ObservationKind.CHALLENGE] = ObservationKind.CHALLENGE
     verdict: ChallengeVerdict
     material_to_claim: bool = True
     artifact_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    covered_claims: Sequence[str] = Field(default_factory=list)
 
 
 class ModelAssayReceipt(CoreModel):
@@ -89,6 +91,15 @@ class ModelFinish(CoreModel):
     satisfaction_claims: list[str] = Field(min_length=1)
     residual_uncertainty: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_claims(self) -> ModelFinish:
+        normalized = [item.strip() for item in self.satisfaction_claims]
+        if any(not item for item in normalized):
+            raise ValueError("finish response contains an empty satisfaction claim")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("finish response repeats a satisfaction claim")
+        return self
+
 
 class ModelBlocker(CoreModel):
     reason: str = Field(min_length=1)
@@ -115,11 +126,18 @@ class ModelOutputBase(CoreModel):
             raise ValueError("choose continuation moves, a finish claim, or a blocker")
         if any(item.fork_purpose is None for item in self.branches):
             raise ValueError("every branch requires a concrete fork_purpose")
+        if self.blocker is not None and not any(
+            (item.evidence_path or "").strip() for item in self.observations
+        ):
+            raise ValueError("a blocker requires an observation with durable evidence_path")
         return self
 
 
 class LeadModelOutput(ModelOutputBase):
     workspace_summary: str
+    decision_boundary: str = Field(min_length=1)
+    consumed_observation_ids: Sequence[str] = Field(default_factory=list)
+    integrated_trajectory_ids: Sequence[str] = Field(default_factory=list)
 
 
 class NavigatorModelOutput(ModelOutputBase):
@@ -178,6 +196,11 @@ class OmpMoveRunner:
         if result.ok:
             return None
         return "; ".join(result.details) or "provider preflight failed"
+
+    def discard_cached_result(self, move_id: str) -> None:
+        """Drop a boundary object rejected by the authoritative compiler."""
+
+        (self.executions_dir / move_id / "committed-result.json").unlink(missing_ok=True)
 
     async def run(
         self,
@@ -278,6 +301,7 @@ class OmpMoveRunner:
                     result = self._convert(
                         move=move,
                         state=state,
+                        context=context,
                         workspace=workspace,
                         parent=parent,
                         output=provider_result.response,
@@ -288,12 +312,12 @@ class OmpMoveRunner:
                     commit_error = f"{type(exc).__name__}: {exc}"
                     if commit_error == previous_commit_error:
                         retain_workspace = True
-                        failed = self._runtime_failure(exc, workspace, usage)
+                        failed = self._boundary_failure(exc, workspace, usage)
                         atomic_write_text(cache_path, failed.model_dump_json(indent=2))
                         return failed
                     if state.usage.plus(usage).exhausted(state.objective.envelope):
                         retain_workspace = True
-                        failed = self._runtime_failure(exc, workspace, usage)
+                        failed = self._boundary_failure(exc, workspace, usage)
                         atomic_write_text(cache_path, failed.model_dump_json(indent=2))
                         return failed
                     previous_commit_error = commit_error
@@ -448,6 +472,31 @@ class OmpMoveRunner:
         return MoveExecutionResult(
             success=False,
             error=f"{type(error).__name__}: {error}",
+            failure_domain=(
+                FailureDomain.ASSAY
+                if isinstance(error, AssayInvalidError)
+                else FailureDomain.COMPONENT
+            ),
+            usage=usage,
+            observations=[self._retained_workspace(workspace, error)],
+        )
+
+    def _boundary_failure(
+        self,
+        error: Exception,
+        workspace: CallWorkspace,
+        usage: ComputeUsage,
+    ) -> MoveExecutionResult:
+        """Classify a repeatedly invalid external result without blaming component code."""
+
+        return MoveExecutionResult(
+            success=False,
+            error=f"{type(error).__name__}: {error}",
+            failure_domain=(
+                FailureDomain.ASSAY
+                if isinstance(error, AssayInvalidError)
+                else FailureDomain.PROVIDER
+            ),
             usage=usage,
             observations=[self._retained_workspace(workspace, error)],
         )
@@ -479,6 +528,7 @@ class OmpMoveRunner:
         return MoveExecutionResult(
             success=False,
             error=f"{type(error).__name__}: {error}",
+            failure_domain=FailureDomain.PROVIDER,
             usage=usage,
             observations=[
                 ObservationDraft(
@@ -679,6 +729,7 @@ class OmpMoveRunner:
             "mode": context.mode,
             "current_workspace_id": context.current_workspace_id,
             "workspace_summary": context.workspace_summary,
+            "decision_boundary": context.decision_boundary,
             "quality_digest": (
                 sha256_text(context.quality_text) if context.quality_text is not None else None
             ),
@@ -743,9 +794,17 @@ to `{workspace_output}`: causal model, load-bearing invariants, established fact
 failed bets and why, unresolved decision-changing uncertainty, shared assumptions, and the
 few best discriminators. Also write `{quality_output}`: the evolving task-native success
 and failure signatures, observable discriminators, proxy traps, coverage gaps, and blind spots.
+Return `decision_boundary` as the single live decision or uncertainty whose resolution would
+most change the result. Keep its wording stable while it is genuinely the same boundary;
+change it only when reasoning or evidence has moved the frontier.
 Integrate only quality distinctions grounded in the objective or direct evidence. Choose one
 next move or make an evidenced
 finish claim. If no move is obvious, broaden or reframe rather than inferring completion.
+Return `consumed_observation_ids` only for evidence you actually integrated into the artifact,
+frontier, or quality lens; unread or unresolved evidence must remain live. When branch evidence
+has been integrated into the root artifact and frontier, return those exact child trajectory IDs
+in `integrated_trajectory_ids`. A finish claim is legal only after every child trajectory is
+integrated into one root artifact.
 Use `blocker` only for a concrete external dependency that tools and further reasoning
 cannot resolve; difficulty, uncertainty, and failed attempts are not blockers.
 Open `branches` only when competing hypotheses or solution families make genuinely
@@ -779,7 +838,12 @@ it exactly. If you attach raw evidence, give one existing workspace-local file i
 direct support. Mark
 `material_to_claim=false` when a finding is real but cannot change whether the exact
 objective is satisfied. If such a finding is the only criticism, also state direct
-support for the claim. Do not edit the artifact or prescribe a ritual.
+support for the claim. For a formal finish claim, `covered_claims` must copy the exact
+satisfaction-claim strings actually tested; together, material support observations must
+cover every claim. Before supporting, determine whether those claims collectively span the
+original objective and every amendment; if they omit anything material, challenge the
+finish claim instead of validating its narrower wording. Do not edit the artifact or
+prescribe a ritual.
 
 First preflight what you can actually perceive. All paths in `{index_path}` are
 relative to the current working directory; use them directly and never retype the absolute
@@ -796,6 +860,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
         *,
         move: Move,
         state: RunState,
+        context: ContextFrame,
         workspace: CallWorkspace,
         parent: ArtifactRef | None,
         output: ModelOutput,
@@ -821,15 +886,70 @@ new material distinction or proxy trap revealed by direct inspection, not generi
                 claim_artifacts=challenge_artifacts,
             )
         )
+        workspace_result = self._workspace_result(
+            move,
+            state,
+            workspace,
+            output,
+            visible_observation_ids={
+                item.observation_id for item in context.observations
+            },
+        )
+        self._validate_semantic_result(
+            move=move,
+            state=state,
+            output=output,
+            artifact=artifact,
+            parent=parent,
+            observations=observations,
+            workspace=workspace_result,
+        )
         return MoveExecutionResult(
             observations=observations,
             artifact=artifact,
-            workspace=self._workspace_result(move, state, workspace, output),
+            workspace=workspace_result,
             next_moves=self._directives(move, output),
             finish=self._finish_result(output),
             blocker=self._blocker_result(output),
             usage=usage,
         )
+
+    @staticmethod
+    def _validate_semantic_result(
+        *,
+        move: Move,
+        state: RunState,
+        output: ModelOutput,
+        artifact: ArtifactDraft | None,
+        parent: ArtifactRef | None,
+        observations: Sequence[ObservationDraft],
+        workspace: WorkspaceDraft | None,
+    ) -> None:
+        if output.blocker is not None and not any(item.raw_ref is not None for item in observations):
+            raise ValueError("blocker evidence was not durably captured")
+        if (
+            isinstance(output, LeadModelOutput)
+            and output.integrated_trajectory_ids
+            and move.trajectory_id != state.root_trajectory_id
+        ):
+            raise ValueError("only the root Lead can integrate child trajectories")
+        if state.finish_claim is not None:
+            allowed_claims = set(state.finish_claim.satisfaction_claims)
+            for observation in observations:
+                unknown = set(observation.covered_claims) - allowed_claims
+                if unknown:
+                    raise ValueError(
+                        "challenge returned unknown covered_claims: "
+                        + ", ".join(sorted(unknown))
+                    )
+        if output.finish is None:
+            return
+        if move.mode != MoveMode.LEAD or move.trajectory_id != state.root_trajectory_id:
+            raise ValueError("only the root Lead can make a finish claim")
+        if artifact is None and parent is None:
+            raise ValueError("finish claim requires an actual artifact")
+        if workspace is None or workspace.active_trajectory_ids != [state.root_trajectory_id]:
+            raise ValueError("finish claim requires every child trajectory integrated")
 
     def _capture_artifact(
         self,
@@ -962,6 +1082,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
             challenge_verdict=challenge.verdict if challenge is not None else None,
             assay_status=AssayStatus.VALID if challenge is not None else None,
             assay_coverage=assay_coverage if challenge is not None else None,
+            covered_claims=list(challenge.covered_claims) if challenge is not None else [],
             material_to_claim=challenge.material_to_claim if challenge is not None else True,
             direct_inspection=challenge is not None,
             metadata=metadata,
@@ -1089,6 +1210,8 @@ new material distinction or proxy trap revealed by direct inspection, not generi
         state: RunState,
         workspace: CallWorkspace,
         output: ModelOutput,
+        *,
+        visible_observation_ids: set[str],
     ) -> WorkspaceDraft | None:
         if not isinstance(output, LeadModelOutput):
             return None
@@ -1102,29 +1225,59 @@ new material distinction or proxy trap revealed by direct inspection, not generi
             if quality_path.is_file()
             else self._bootstrap_quality(state)
         )
-        consumed = set(
-            state.workspaces[move.based_on_workspace_id].consumed_observation_ids
-            if move.based_on_workspace_id in state.workspaces
-            else []
-        )
         grounded_deltas = [
-            item.summary
+            item
             for item in state.observations.values()
-            if item.observation_id not in consumed
-            and item.quality_delta
-            and item.summary not in quality_document
+            if item.quality_delta and item.summary not in quality_document
         ]
         if grounded_deltas:
             quality_document = (
                 quality_document.rstrip()
                 + "\n\n## Evidence-driven updates\n\n"
-                + "\n".join(f"- {item}" for item in grounded_deltas)
+                + "\n".join(f"- {item.summary}" for item in grounded_deltas)
                 + "\n"
             )
+        active = list(
+            state.workspaces[move.based_on_workspace_id].active_trajectory_ids
+            if move.based_on_workspace_id in state.workspaces
+            else [state.root_trajectory_id]
+        )
+        integrated = set(output.integrated_trajectory_ids)
+        if state.root_trajectory_id in integrated:
+            raise ValueError("the root trajectory cannot be integrated away")
+        unknown = integrated - set(active)
+        if unknown:
+            raise ValueError(
+                "integrated_trajectory_ids are not live in this workspace: "
+                + ", ".join(sorted(unknown))
+            )
+        active = [item for item in active if item not in integrated]
+        inherited_consumed = list(
+            state.workspaces[move.based_on_workspace_id].consumed_observation_ids
+            if move.based_on_workspace_id in state.workspaces
+            else []
+        )
+        newly_consumed = list(output.consumed_observation_ids)
+        unseen = set(newly_consumed) - visible_observation_ids
+        if unseen:
+            raise ValueError(
+                "consumed_observation_ids were not present in the live evidence context: "
+                + ", ".join(sorted(unseen))
+            )
+        consumed = list(
+            dict.fromkeys(
+                inherited_consumed
+                + newly_consumed
+                + [item.observation_id for item in grounded_deltas]
+            )
+        )
         return WorkspaceDraft(
             document=path.read_text(encoding="utf-8"),
             quality_document=quality_document,
             summary=output.workspace_summary,
+            decision_boundary=output.decision_boundary,
+            consumed_observation_ids=consumed,
+            active_trajectory_ids=active,
             activate=move.trajectory_id == state.root_trajectory_id,
         )
 
@@ -1192,7 +1345,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
     def _blocker_result(output: ModelOutput) -> BlockerDraft | None:
         if output.blocker is None:
             return None
-        return BlockerDraft(reason=output.blocker.reason, evidence_refs=[])
+        return BlockerDraft(reason=output.blocker.reason)
 
     @staticmethod
     def _check_observation(
@@ -1212,6 +1365,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
             confidence=1.0,
             challenge_verdict=verdict if challenge else None,
             assay_status=AssayStatus.VALID if challenge else None,
+            assay_coverage=evidence.scope if challenge else None,
             material_to_claim=evidence.negative_result,
             direct_inspection=challenge,
             metadata={

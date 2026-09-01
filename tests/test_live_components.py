@@ -9,7 +9,7 @@ import pytest
 
 from frontier_harness.config import HarnessConfig, ProviderConfig, RunPolicy
 from frontier_harness.control import CommandKind
-from frontier_harness.core.types import PauseKind, RunPaused
+from frontier_harness.core.types import FailureDomain, PauseKind, RunPaused
 from frontier_harness.errors import FrontierError
 from frontier_harness.runtime.components import ComponentRegistry
 from frontier_harness.runtime.engine import KernelEngine
@@ -109,6 +109,33 @@ def test_supervisor_executes_fake_run_through_disposable_workers(tmp_path: Path)
     assert len(receipts) >= 2
     assert {item["generation"] for item in receipts} == {1}
     assert all(item["outcome"] == "advanced" for item in receipts)
+
+
+def test_supervisor_rebuilds_a_corrupt_disposable_snapshot(tmp_path: Path) -> None:
+    config = HarnessConfig(
+        run=RunPolicy(run_root=tmp_path / "runs"),
+        provider=ProviderConfig(kind="fake"),
+    )
+    engine = KernelEngine.create(
+        "Recover the projection from the authoritative journal.",
+        config=config,
+        adapter_name="generic",
+    )
+    run_dir = engine.run_dir
+    ComponentRegistry(run_dir).initialize()
+    engine.close()
+    (run_dir / KernelEngine.STATE_FILE).write_text("not json", encoding="utf-8")
+
+    supervisor = StepSupervisor(run_dir)
+    try:
+        state = asyncio.run(supervisor.execute())
+    finally:
+        supervisor.close()
+
+    assert state["status"] == "satisfied"
+    assert json.loads((run_dir / KernelEngine.STATE_FILE).read_text(encoding="utf-8"))[
+        "status"
+    ] == "satisfied"
 
 
 def test_supervisor_executes_a_queued_resume_for_a_paused_run(tmp_path: Path) -> None:
@@ -381,7 +408,11 @@ def test_supervisor_recovers_an_execution_pause_after_process_restart(tmp_path: 
     run_dir = engine.run_dir
     engine.journal.append(
         "run.paused",
-        RunPaused(reason="synthetic execution fault", kind=PauseKind.EXECUTION),
+        RunPaused(
+            reason="synthetic execution fault",
+            kind=PauseKind.EXECUTION,
+            failure_domain=FailureDomain.COMPONENT,
+        ),
     )
     registry = ComponentRegistry(run_dir)
     registry.initialize()
@@ -397,3 +428,37 @@ def test_supervisor_recovers_an_execution_pause_after_process_restart(tmp_path: 
 
     assert state["status"] == "satisfied"
     assert repairer.faults and repairer.faults[0].stage == "execution_pause"
+
+
+def test_supervisor_does_not_rewrite_code_for_a_provider_outage(tmp_path: Path) -> None:
+    config = HarnessConfig(
+        run=RunPolicy(run_root=tmp_path / "runs"),
+        provider=ProviderConfig(kind="fake"),
+    )
+    engine = KernelEngine.create(
+        "Preserve provider failures at their causal layer.",
+        config=config,
+        adapter_name="generic",
+    )
+    run_dir = engine.run_dir
+    engine.journal.append(
+        "run.paused",
+        RunPaused(
+            reason="provider credentials unavailable",
+            kind=PauseKind.EXECUTION,
+            failure_domain=FailureDomain.PROVIDER,
+        ),
+    )
+    engine.close()
+
+    supervisor = StepSupervisor(run_dir)
+    repairer = _Repairer(supervisor.registry)
+    supervisor.repairer = repairer  # type: ignore[assignment]
+    try:
+        state = asyncio.run(supervisor.execute())
+    finally:
+        supervisor.close()
+
+    assert state["status"] == "paused"
+    assert state["failure_domain"] == "provider"
+    assert repairer.faults == []

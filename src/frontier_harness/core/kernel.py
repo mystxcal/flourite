@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Sequence
 
 from ..blobs import BlobStore
+from ..errors import LedgerIntegrityError
 from ..ids import new_id
 from ..intelligence.compiler import MoveResultCompiler
 from ..intelligence.context import ContextAssembler
@@ -16,10 +19,14 @@ from ..intelligence.contracts import (
 )
 from ..util import canonical_json, sha256_text, utc_now
 from .journal import KernelJournal
+from .transition import CompletionValidator
 from .types import (
     AssayStatus,
     ChallengeVerdict,
     ComputeEnvelope,
+    ComputeUsage,
+    FailureDomain,
+    FinishClaim,
     Move,
     MoveMode,
     MoveProposed,
@@ -115,6 +122,8 @@ class IntelligenceKernel:
             return False
         exhausted = state.usage.exhausted(state.objective.envelope)
         if exhausted:
+            if self._settle_supported_finish():
+                return True
             self.journal.append(
                 "run.exhausted",
                 RunTerminated(status="exhausted", reason="; ".join(exhausted)),
@@ -173,7 +182,7 @@ class IntelligenceKernel:
             self.state.observations[item]
             for item in move.observation_ids
             if item in self.state.observations
-            and self.state.observations[item].kind == ObservationKind.CHALLENGE
+            and self.state.observations[item].challenge_verdict is not None
         ]
         disposition = "\n".join(
             f"- {item.challenge_verdict or ChallengeVerdict.UNCERTAIN}: {item.summary}"
@@ -238,14 +247,17 @@ class IntelligenceKernel:
             for obs in relevant
             if obs.challenge_verdict == ChallengeVerdict.SUPPORTS
             and obs.material_to_claim
-            and (
-                obs.raw_ref is not None
-                or obs.source == "artifact-check"
-                or obs.source == "fresh-challenger"
-                or obs.direct_inspection
-            )
+            and obs.direct_inspection
+            and bool((obs.assay_coverage or "").strip())
         ]
         if support:
+            covered_claims = {
+                covered for observation in support for covered in observation.covered_claims
+            }
+            missing_claims = set(claim.satisfaction_claims) - covered_claims
+            if missing_claims:
+                self._request_claim_challenge(missing_claims)
+                return True
             return self._resolve_support(support)
         if relevant:
             summaries = "\n".join(f"- {item.summary}" for item in relevant)
@@ -264,6 +276,46 @@ class IntelligenceKernel:
                 self._propose(directive)
             return True
         return self._request_finish_challenge()
+
+    def _settle_supported_finish(self) -> bool:
+        """Apply an already-complete proof without spending another unit of compute."""
+
+        state = self.state
+        claim = state.finish_claim
+        if claim is None:
+            return False
+        relevant = [
+            item
+            for item in state.observations.values()
+            if item.challenge_verdict is not None
+            and item.claim_id == claim.claim_id
+            and item.assay_status == AssayStatus.VALID
+        ]
+        if any(
+            item.claim_id == claim.claim_id and item.quality_delta
+            for item in state.observations.values()
+        ):
+            return False
+        support = [
+            item
+            for item in relevant
+            if item.challenge_verdict == ChallengeVerdict.SUPPORTS
+            and item.material_to_claim
+            and item.direct_inspection
+            and bool((item.assay_coverage or "").strip())
+        ]
+        proposed = RunTerminated(
+            status="satisfied",
+            reason="completion claim survived direct independent challenge",
+            claim_id=claim.claim_id,
+            supporting_observation_ids=[item.observation_id for item in support],
+        )
+        try:
+            CompletionValidator(state, proposed).validate()
+        except LedgerIntegrityError:
+            return False
+        self._resolve_support(support)
+        return self.state.status in {RunStatus.SATISFIED, RunStatus.PAUSED}
 
     def _continue_after_challenge(self, challenged: list[Observation]) -> bool:
         findings = "\n".join(f"- {observation.summary}" for observation in challenged)
@@ -294,6 +346,19 @@ class IntelligenceKernel:
         if missing:
             self._request_artifact_challenge(missing)
             return True
+        try:
+            self._verify_completion_material(claim)
+        except (OSError, ValueError) as exc:
+            self.journal.append(
+                "run.paused",
+                RunPaused(
+                    reason=f"completion material is not readable: {type(exc).__name__}: {exc}",
+                    kind=PauseKind.EXECUTION,
+                    failure_domain=FailureDomain.ASSAY,
+                ),
+                actor="kernel",
+            )
+            return True
         self.journal.append(
             "run.satisfied",
             RunTerminated(
@@ -305,6 +370,17 @@ class IntelligenceKernel:
         )
         return True
 
+    def _verify_completion_material(self, claim: FinishClaim) -> None:
+        workspace = self.state.workspaces[claim.workspace_id]
+        if workspace.quality_ref is None:
+            raise ValueError("quality lens is missing")
+        self.blobs.verify(workspace.quality_ref)
+        for artifact_id in claim.artifact_head_ids:
+            artifact = self.state.artifacts[artifact_id]
+            self.blobs.verify(artifact.content_ref)
+            for deliverable in artifact.deliverables:
+                self.blobs.verify(deliverable)
+
     def _request_artifact_challenge(self, missing_digests: set[str]) -> None:
         self._propose(
             MoveDirective(
@@ -313,6 +389,19 @@ class IntelligenceKernel:
                 instructions=(
                     "Directly inspect the claimed artifact heads whose digests still lack "
                     "independent support: " + ", ".join(sorted(missing_digests))
+                ),
+            )
+        )
+
+    def _request_claim_challenge(self, missing_claims: set[str]) -> None:
+        self._propose(
+            MoveDirective(
+                mode=MoveMode.CHALLENGE,
+                intent="Challenge the uncovered semantic claims in the finish claim",
+                instructions=(
+                    "Directly test these exact satisfaction claims, then copy each tested "
+                    "claim verbatim into covered_claims: "
+                    + " | ".join(sorted(missing_claims))
                 ),
             )
         )
@@ -356,6 +445,7 @@ class IntelligenceKernel:
         ):
             raise ValueError(f"move trajectory does not exist: {trajectory_id}")
         basis = {
+            "event_seq": state.last_event_seq,
             "workspace": based_on_workspace_id,
             "trajectory": trajectory_id,
             "mode": directive.mode,
@@ -371,11 +461,11 @@ class IntelligenceKernel:
             move_id=new_id("move"),
             retry_of_move_id=directive.retry_of_move_id,
             based_on_workspace_id=based_on_workspace_id,
+            based_on_event_seq=state.last_event_seq,
             trajectory_id=trajectory_id,
             mode=directive.mode,
             intent=directive.intent,
             instructions=directive.instructions,
-            declared_ceiling=directive.declared_ceiling,
             idempotency_key=idempotency_key,
             proposed_at=utc_now(),
         )
@@ -396,17 +486,43 @@ class IntelligenceKernel:
             workspace_id=move.based_on_workspace_id,
             capabilities=self.capabilities,
         )
+        started = time.monotonic()
+        wall_limit = self.state.objective.envelope.max_wall_seconds
+        wall_remaining = (
+            max(0.0, wall_limit - self.state.usage.wall_seconds)
+            if wall_limit is not None
+            else None
+        )
         try:
-            result = await self.runner.run(
-                move=move,
-                state=self.state,
-                context=frame,
-                recovering=recovering,
+            async with asyncio.timeout(wall_remaining):
+                result = await self.runner.run(
+                    move=move,
+                    state=self.state,
+                    context=frame,
+                    recovering=recovering,
+                )
+        except TimeoutError:
+            elapsed = time.monotonic() - started
+            result = MoveExecutionResult(
+                success=False,
+                error="ComputeEnvelope: wall-time boundary reached during the live move",
+                failure_domain=FailureDomain.EXTERNAL,
+                usage=ComputeUsage(wall_seconds=elapsed),
+                observations=[
+                    ObservationDraft(
+                        kind=ObservationKind.RESOURCE,
+                        summary="The operator-owned wall-time envelope stopped the live move.",
+                        source="kernel",
+                    )
+                ],
             )
         except Exception as exc:
+            elapsed = time.monotonic() - started
             result = MoveExecutionResult(
                 success=False,
                 error=f"{type(exc).__name__}: {exc}",
+                failure_domain=FailureDomain.COMPONENT,
+                usage=ComputeUsage(wall_seconds=elapsed),
                 observations=[
                     ObservationDraft(
                         kind=ObservationKind.ERROR,
@@ -415,15 +531,61 @@ class IntelligenceKernel:
                     )
                 ],
             )
-        self._commit_result(move, frame.observations, result)
+        else:
+            elapsed = time.monotonic() - started
+            result = result.model_copy(
+                update={
+                    "usage": result.usage.model_copy(
+                        update={"wall_seconds": max(result.usage.wall_seconds, elapsed)}
+                    )
+                }
+            )
+        visible_observation_ids = {item.observation_id for item in frame.observations}
+        try:
+            self._commit_result(
+                move,
+                result,
+                visible_observation_ids=visible_observation_ids,
+            )
+        except (LedgerIntegrityError, ValueError) as exc:
+            if self.state.moves[move.move_id].status != MoveStatus.RUNNING:
+                raise
+            discard = getattr(self.runner, "discard_cached_result", None)
+            if callable(discard):
+                discard(move.move_id)
+            boundary_failure = MoveExecutionResult(
+                success=False,
+                error=f"Invalid move boundary: {type(exc).__name__}: {exc}",
+                failure_domain=FailureDomain.PROVIDER,
+                usage=result.usage,
+                observations=[
+                    ObservationDraft(
+                        kind=ObservationKind.ERROR,
+                        summary=(
+                            "The external move result violated the canonical commit contract: "
+                            f"{exc}"
+                        ),
+                        source="kernel",
+                    )
+                ],
+            )
+            self._commit_result(
+                move,
+                boundary_failure,
+                visible_observation_ids=visible_observation_ids,
+            )
 
     def _commit_result(
         self,
         move: Move,
-        visible_observations: list[Observation],
         result: MoveExecutionResult,
+        *,
+        visible_observation_ids: set[str],
     ) -> None:
-        if not result.success:
+        exhausted = self.state.usage.plus(result.usage).exhausted(
+            self.state.objective.envelope
+        )
+        if not result.success and not exhausted:
             result = result.model_copy(
                 update={
                     "next_move": MoveDirective(
@@ -432,7 +594,6 @@ class IntelligenceKernel:
                         instructions=move.instructions,
                         trajectory_id=move.trajectory_id,
                         retry_of_move_id=move.move_id,
-                        declared_ceiling=move.declared_ceiling,
                     )
                 }
             )
@@ -440,13 +601,23 @@ class IntelligenceKernel:
             state=self.state,
             blobs=self.blobs,
             build_move=self._build_move,
-        ).compile(move, visible_observations, result)
+        ).compile(move, result, visible_observation_ids=visible_observation_ids)
         self.journal.append(
             "move.applied",
             payload,
             actor="runtime",
             action_id=move.move_id,
         )
+        if exhausted:
+            if self._settle_supported_finish():
+                return
+            self.journal.append(
+                "run.exhausted",
+                RunTerminated(status="exhausted", reason="; ".join(exhausted)),
+                actor="kernel",
+                action_id=move.move_id,
+            )
+            return
         if not result.success and not self.state.status.terminal:
             self.journal.append(
                 "run.paused",
@@ -456,6 +627,7 @@ class IntelligenceKernel:
                         + (result.error or "move execution failed without a reason")
                     ),
                     kind=PauseKind.EXECUTION,
+                    failure_domain=result.failure_domain,
                 ),
                 actor="runtime",
                 action_id=move.move_id,

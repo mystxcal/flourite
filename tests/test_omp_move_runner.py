@@ -12,7 +12,13 @@ from frontier_harness.blobs import BlobStore
 from frontier_harness.config import ProviderConfig, SoftwarePolicy
 from frontier_harness.core.journal import KernelJournal
 from frontier_harness.core.kernel import IntelligenceKernel
-from frontier_harness.core.types import AssayStatus, ComputeEnvelope, RunResumed, RunStatus
+from frontier_harness.core.types import (
+    AssayStatus,
+    ComputeEnvelope,
+    FailureDomain,
+    RunResumed,
+    RunStatus,
+)
 from frontier_harness.errors import ProviderCallError
 from frontier_harness.intelligence.omp_runner import OmpMoveRunner
 from frontier_harness.ledger import EventLedger
@@ -43,6 +49,7 @@ class FakeOmpProvider:
             value = {
                 "artifact_changed": True,
                 "workspace_summary": "Complete first candidate",
+                "decision_boundary": "Whether the candidate satisfies the objective",
                 "observations": [
                     {
                         "kind": "artifact",
@@ -71,6 +78,7 @@ class FakeOmpProvider:
                         "kind": "challenge",
                         "summary": "Direct inspection supports the completion claim",
                         "verdict": "supports",
+                        "covered_claims": ["The artifact directly satisfies the objective"],
                         "evidence_path": "challenge-assay.txt",
                     }
                 ],
@@ -93,6 +101,18 @@ class FakeOmpProvider:
         )
 
 
+class IncompleteClaimCoverageProvider(FakeOmpProvider):
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        result = await super().run(request)
+        if request.call_kind != "challenge":
+            return result
+        value = result.response.model_dump(mode="python")
+        value["observations"][0]["covered_claims"] = []
+        return result.model_copy(
+            update={"response": request.response_model.model_validate(value)}
+        )
+
+
 class CommitRepairProvider(FakeOmpProvider):
     async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
         result = await super().run(request)
@@ -103,6 +123,18 @@ class CommitRepairProvider(FakeOmpProvider):
                 update={"response": request.response_model.model_validate(value)}
             )
         return result
+
+
+class UnrepairableBoundaryProvider(FakeOmpProvider):
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        result = await super().run(request)
+        if request.call_kind != "lead":
+            return result
+        value = result.response.model_dump(mode="python")
+        value["observations"][0]["evidence_path"] = "/outside-the-live-workspace"
+        return result.model_copy(
+            update={"response": request.response_model.model_validate(value)}
+        )
 
 
 class EphemeralChallengeRepairProvider(FakeOmpProvider):
@@ -164,6 +196,7 @@ class AssayHandshakeProvider(FakeOmpProvider):
                         "kind": "challenge",
                         "summary": "Direct whole-artifact inspection supports the claim",
                         "verdict": "supports",
+                        "covered_claims": ["The artifact directly satisfies the objective"],
                     }
                 ],
                 "quality_delta": (
@@ -195,6 +228,7 @@ class ExploratoryChallengeProvider(FakeOmpProvider):
             value = {
                 "artifact_changed": True,
                 "workspace_summary": "Candidate awaiting an exploratory challenge",
+                "decision_boundary": "Whether the representative premise survives challenge",
                 "observations": [],
                 "next_move": {
                     "mode": "challenge",
@@ -269,6 +303,7 @@ class VanishingSessionProvider(FakeOmpProvider):
             value: dict[str, Any] = {
                 "artifact_changed": True,
                 "workspace_summary": f"Lead call {lead_call}",
+                "decision_boundary": f"Decision boundary {lead_call}",
                 "observations": [],
             }
             if lead_call == 1:
@@ -294,6 +329,9 @@ class VanishingSessionProvider(FakeOmpProvider):
                         "kind": "challenge",
                         "summary": "Direct inspection supports the reconstructed artifact",
                         "verdict": "supports",
+                        "covered_claims": [
+                            "The reconstructed Lead completed the work"
+                        ],
                         "evidence_path": "challenge-assay.txt",
                     }
                 ],
@@ -346,6 +384,7 @@ class PersistentSoftwareProvider(FakeOmpProvider):
                 value = {
                     "artifact_changed": True,
                     "workspace_summary": "first durable epoch",
+                    "decision_boundary": "Whether the first epoch is complete",
                     "observations": [],
                     "next_move": {"mode": "lead", "intent": "refine the same artifact"},
                 }
@@ -359,6 +398,7 @@ class PersistentSoftwareProvider(FakeOmpProvider):
                 value = {
                     "artifact_changed": True,
                     "workspace_summary": "second durable epoch",
+                    "decision_boundary": "Whether the second epoch is complete",
                     "observations": [],
                     "finish": {
                         "satisfaction_claims": ["The durable film is complete"],
@@ -388,6 +428,7 @@ class PersistentSoftwareProvider(FakeOmpProvider):
                             else "The exact durable film survives independent projection"
                         ),
                         "verdict": "supports",
+                        "covered_claims": ["The durable film is complete"],
                         "artifact_digest": json.loads(
                             (request.cwd / ".sfh_context" / "index.json").read_text(
                                 encoding="utf-8"
@@ -475,6 +516,7 @@ class BranchingSoftwareProvider(FakeOmpProvider):
             value = {
                 "artifact_changed": True,
                 "workspace_summary": "root fork point",
+                "decision_boundary": "Which fork has the stronger governing premise",
                 "observations": [],
                 "branches": [
                     {
@@ -488,6 +530,7 @@ class BranchingSoftwareProvider(FakeOmpProvider):
             value = {
                 "artifact_changed": False,
                 "workspace_summary": "root fork point after independent challenge",
+                "decision_boundary": "How to integrate the challenged fork evidence",
                 "observations": [],
                 "branches": [
                     {
@@ -506,6 +549,7 @@ class BranchingSoftwareProvider(FakeOmpProvider):
             value = {
                 "artifact_changed": True,
                 "workspace_summary": "independent branch result",
+                "decision_boundary": "Whether the independent branch should be integrated",
                 "observations": [],
             }
         return ProviderCallResult(
@@ -572,6 +616,41 @@ async def test_omp_runner_connects_transport_adapter_and_kernel(tmp_path: Path) 
     assert provider.requests[0].preserve_session is True
     assert provider.requests[1].preserve_session is False
     assert (tmp_path / "provider-sessions.json").is_file()
+
+
+async def test_new_evidence_can_repeat_a_semantic_challenge_without_spinning(
+    tmp_path: Path,
+) -> None:
+    blobs = BlobStore(tmp_path / "blobs")
+    provider = IncompleteClaimCoverageProvider()
+    runner = OmpMoveRunner(
+        provider=provider,  # type: ignore[arg-type]
+        adapter=MarkdownAdapter(
+            profile=get_profile("generic"),
+            run_dir=tmp_path,
+            blobs=blobs,
+            workspace=None,
+        ),
+        run_dir=tmp_path,
+    )
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_incomplete_claims"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=runner,
+    )
+    kernel.start("Create an excellent artifact.", envelope=ComputeEnvelope(max_model_turns=6))
+
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.EXHAUSTED
+    assert [request.call_kind for request in provider.requests] == [
+        "lead",
+        "challenge",
+        "challenge",
+    ]
 
 
 async def test_software_lead_keeps_one_live_workspace_and_durable_outputs(
@@ -751,6 +830,36 @@ async def test_commit_error_is_repaired_in_the_same_live_codex_workspace(
     repair = next(item for item in provider.requests if "-repair-" in item.call_id)
     assert repair.resume_thread_id == "thread-lead"
     assert "Exact error:" in repair.prompt
+
+
+async def test_repeated_invalid_external_boundary_is_not_misclassified_as_code_fault(
+    tmp_path: Path,
+) -> None:
+    blobs = BlobStore(tmp_path / "blobs")
+    provider = UnrepairableBoundaryProvider()
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_bad_boundary"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=OmpMoveRunner(
+            provider=provider,  # type: ignore[arg-type]
+            adapter=MarkdownAdapter(
+                profile=get_profile("generic"),
+                run_dir=tmp_path,
+                blobs=blobs,
+                workspace=None,
+            ),
+            run_dir=tmp_path,
+        ),
+    )
+    kernel.start("Build an artifact with a valid boundary.")
+
+    await kernel.run(max_steps=1)
+
+    assert kernel.state.status == RunStatus.PAUSED
+    assert kernel.state.failure_domain == FailureDomain.PROVIDER
 
 
 async def test_ephemeral_challenge_repairs_bad_evidence_path_before_admission(

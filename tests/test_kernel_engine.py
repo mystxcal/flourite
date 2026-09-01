@@ -6,6 +6,7 @@ from pathlib import Path
 
 from rich.console import Console
 
+from frontier_harness.blobs import BlobStore
 from frontier_harness.config import HarnessConfig, ProviderConfig, RunPolicy
 from frontier_harness.control import CommandKind
 from frontier_harness.core.types import (
@@ -19,6 +20,7 @@ from frontier_harness.core.types import (
 )
 from frontier_harness.intelligence.context import ContextFrame
 from frontier_harness.intelligence.contracts import (
+    ArtifactDraft,
     FinishDraft,
     MoveExecutionResult,
     ObservationDraft,
@@ -34,6 +36,7 @@ class EngineRunner:
     def __init__(self, outcomes: list[MoveExecutionResult]) -> None:
         self.outcomes = deque(outcomes)
         self.contexts: list[ContextFrame] = []
+        self.blobs: BlobStore | None = None
 
     async def run(
         self,
@@ -44,7 +47,51 @@ class EngineRunner:
         recovering: bool,
     ) -> MoveExecutionResult:
         self.contexts.append(context)
-        return self.outcomes.popleft()
+        result = self.outcomes.popleft()
+        update: dict[str, object] = {}
+        if result.workspace is not None:
+            steering_ids = [
+                item.observation_id
+                for item in context.observations
+                if item.kind == ObservationKind.STEERING
+            ]
+            if steering_ids:
+                update["workspace"] = result.workspace.model_copy(
+                    update={
+                        "consumed_observation_ids": list(
+                            dict.fromkeys(
+                                [*result.workspace.consumed_observation_ids, *steering_ids]
+                            )
+                        )
+                    }
+                )
+        if result.finish is not None and result.artifact is None:
+            assert self.blobs is not None
+            document = result.workspace.document if result.workspace is not None else "artifact"
+            update["artifact"] = ArtifactDraft(
+                content_ref=self.blobs.put_text(
+                    document,
+                    media_type="text/markdown; charset=utf-8",
+                    original_name="engine-test-artifact.md",
+                )
+            )
+        if move.mode.value == "challenge":
+            claim = state.finish_claim
+            assert claim is not None
+            digest = state.artifacts[claim.artifact_head_ids[0]].digest
+            update["observations"] = [
+                item.model_copy(
+                    update={
+                        "artifact_digest": item.artifact_digest or digest,
+                        "assay_coverage": item.assay_coverage or "the exact claimed artifact",
+                        "covered_claims": item.covered_claims or claim.satisfaction_claims,
+                    }
+                )
+                if item.challenge_verdict is not None
+                else item
+                for item in result.observations
+            ]
+        return result.model_copy(update=update)
 
 
 def config_for(tmp_path: Path) -> HarnessConfig:
@@ -91,6 +138,7 @@ async def test_kernel_engine_create_control_execute_verify_and_materialize(
         source_paths=[source],
         runner=runner,
     )
+    runner.blobs = engine.blobs
     engine.control.enqueue(CommandKind.STEER, text="Prefer the clearest exact answer.")
 
     await engine.execute()
@@ -101,6 +149,7 @@ async def test_kernel_engine_create_control_execute_verify_and_materialize(
         observation.kind == ObservationKind.STEERING
         for observation in runner.contexts[0].observations
     )
+    assert len(engine.state.objective.amendments) == 1
     materialized = engine.materialize_current()
     assert materialized.read_text(encoding="utf-8").startswith("# Current best")
     assert engine.verify()[0] == engine.journal.ledger.count()

@@ -14,6 +14,7 @@ from .types import (
     MoveProposed,
     MoveStarted,
     MoveStatus,
+    ObjectiveAmendment,
     ObservationKind,
     RunPaused,
     RunResumed,
@@ -114,8 +115,18 @@ class KernelReducer:
             raise LedgerIntegrityError("steering must be a user/operator steering observation")
         if obs.observation_id in state.observations:
             raise LedgerIntegrityError(f"duplicate observation: {obs.observation_id}")
+        if obs.raw_ref is None:
+            raise LedgerIntegrityError("steering must preserve its exact text")
         state.observations[obs.observation_id] = obs
         state.pending_steering_ids.append(obs.observation_id)
+        state.objective.amendments.append(
+            ObjectiveAmendment(
+                amendment_id=obs.observation_id,
+                text_ref=obs.raw_ref,
+                created_at=obs.created_at,
+                source="user" if obs.source == "user" else "operator",
+            )
+        )
         state.finish_claim = None
 
     @classmethod
@@ -131,6 +142,10 @@ class KernelReducer:
             existing.idempotency_key == move.idempotency_key for existing in state.moves.values()
         ):
             raise LedgerIntegrityError(f"duplicate move idempotency key: {move.idempotency_key}")
+        if move.based_on_event_seq and move.based_on_event_seq != state.last_event_seq:
+            raise LedgerIntegrityError(
+                "move was not proposed from the current causal event frontier"
+            )
         if move.status != MoveStatus.PROPOSED:
             raise LedgerIntegrityError("new move must be proposed")
         trajectory = state.trajectories.get(move.trajectory_id)
@@ -188,12 +203,15 @@ class KernelReducer:
     @classmethod
     def _pause(cls, state: RunState, event: LedgerEvent) -> None:
         cls._require_active(state, event.event_type)
-        payload = RunPaused.model_validate(event.payload)
+        payload = RunPaused.model_validate(
+            canonical_payload(event.event_type, event.payload, state)
+        )
         if state.active_move_ids:
             raise LedgerIntegrityError("run may pause only at a safe move boundary")
         state.status = RunStatus.PAUSED
         state.terminal_reason = payload.reason
         state.pause_kind = payload.kind
+        state.failure_domain = payload.failure_domain
 
     @staticmethod
     def _resume(state: RunState, event: LedgerEvent) -> None:
@@ -203,6 +221,7 @@ class KernelReducer:
         state.status = RunStatus.ACTIVE
         state.terminal_reason = None
         state.pause_kind = None
+        state.failure_domain = None
 
     @staticmethod
     def _terminate(state: RunState, event: LedgerEvent) -> None:
@@ -218,4 +237,6 @@ class KernelReducer:
             raise LedgerIntegrityError("run cannot be exhausted before a hard envelope")
         state.status = RunStatus(payload.status)
         state.terminal_reason = payload.reason
+        state.terminal_evidence_refs = list(payload.supporting_observation_ids)
         state.pause_kind = None
+        state.failure_domain = None

@@ -27,7 +27,7 @@ def test_deferred_promotion_payload_becomes_plain_finish_claim() -> None:
 
     current = canonical_payload("move.applied", old, None)
 
-    assert current["finish_claim"] == claim
+    assert current.get("finish_claim") is None
     assert "deferred_finish_claim" not in current
     assert "promotion_decision" not in current
     MoveApplied.model_validate(current)
@@ -63,5 +63,6 @@ def test_legacy_evidence_control_metadata_is_promoted_to_typed_fields() -> None:
     assert observation["assay_status"] == "valid"
     assert observation["material_to_claim"] is True
     assert observation["direct_inspection"] is True
+    assert observation["assay_coverage"] == "legacy direct challenge"
     assert observation["metadata"] == {"diagnostic": "preserved"}
     MoveApplied.model_validate(current)

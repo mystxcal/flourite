@@ -73,6 +73,26 @@ class KernelJournal:
         except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
             return None
 
+    @classmethod
+    def recover_projection(
+        cls,
+        *,
+        ledger: EventLedger,
+        snapshot_path: Path,
+        max_event_payload_bytes: int = 256 * 1024,
+    ) -> RunState:
+        """Load the exact derived view or rebuild it from the authoritative journal."""
+
+        checkpoint = cls.load_checkpoint(ledger=ledger, snapshot_path=snapshot_path)
+        if checkpoint is not None:
+            return checkpoint
+        journal = cls(
+            ledger=ledger,
+            snapshot_path=snapshot_path,
+            max_event_payload_bytes=max_event_payload_bytes,
+        )
+        return journal.refresh()
+
     @property
     def state(self) -> RunState:
         if self._state is None:

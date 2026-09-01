@@ -17,6 +17,7 @@ from .types import (
     RunStatus,
     RunTerminated,
     TrajectoryStatus,
+    WorkspaceVersion,
 )
 
 
@@ -144,11 +145,26 @@ class AtomicMoveTransition:
                 and observation.artifact_digest not in self.index.known_artifact_digests
             ):
                 raise LedgerIntegrityError("move observation is bound to an unknown artifact")
+            if observation.covered_claims:
+                claim = self.state.finish_claim
+                if claim is None or observation.claim_id != claim.claim_id:
+                    raise LedgerIntegrityError("observation covers no live finish claim")
+                unknown = set(observation.covered_claims) - set(claim.satisfaction_claims)
+                if unknown:
+                    raise LedgerIntegrityError(
+                        "observation claims unknown finish coverage: "
+                        + ", ".join(sorted(unknown))
+                    )
 
     def _validate_workspace(self) -> None:
         workspace = self.payload.workspace
         if workspace is None:
             return
+        self._validate_workspace_lineage(workspace)
+        self._validate_workspace_references(workspace)
+        self._validate_workspace_trajectories(workspace)
+
+    def _validate_workspace_lineage(self, workspace: WorkspaceVersion) -> None:
         if workspace.workspace_id in self.state.workspaces:
             raise LedgerIntegrityError("move application reuses a workspace id")
         if workspace.created_by_move_id != self.move.move_id:
@@ -162,16 +178,36 @@ class AtomicMoveTransition:
             raise LedgerIntegrityError("workspace activation lost compare-and-swap")
         if workspace.based_on_event_seq >= self.event_seq:
             raise LedgerIntegrityError("workspace cannot depend on its own or a future event")
+
+    def _validate_workspace_references(self, workspace: WorkspaceVersion) -> None:
         if any(item not in self.index.known_artifacts for item in workspace.artifact_head_ids):
             raise LedgerIntegrityError("workspace references a missing artifact")
         if any(
             item not in self.index.known_trajectories for item in workspace.active_trajectory_ids
         ):
             raise LedgerIntegrityError("workspace references a missing trajectory")
+        if len(workspace.active_trajectory_ids) != len(set(workspace.active_trajectory_ids)):
+            raise LedgerIntegrityError("workspace repeats an active trajectory")
         if any(
             item not in self.index.known_observations for item in workspace.consumed_observation_ids
         ):
             raise LedgerIntegrityError("workspace consumed a missing observation")
+
+    def _validate_workspace_trajectories(self, workspace: WorkspaceVersion) -> None:
+        if self.payload.activate_workspace and self.state.root_trajectory_id not in (
+            workspace.active_trajectory_ids
+        ):
+            raise LedgerIntegrityError("active workspace must retain the root trajectory")
+        for trajectory_id in workspace.active_trajectory_ids:
+            if trajectory_id in self.index.trajectory_ids:
+                continue
+            if self.state.trajectories[trajectory_id].status != TrajectoryStatus.ACTIVE:
+                raise LedgerIntegrityError("workspace reactivates a closed trajectory")
+        if any(
+            self._artifact_trajectory(item) not in workspace.active_trajectory_ids
+            for item in workspace.artifact_head_ids
+        ):
+            raise LedgerIntegrityError("workspace retains an artifact from a closed trajectory")
 
     def _validate_continuations(self) -> None:
         existing_keys = {item.idempotency_key for item in self.state.moves.values()}
@@ -189,6 +225,8 @@ class AtomicMoveTransition:
     def _validate_continuation_scope(self, move: Move) -> None:
         if move.status != MoveStatus.PROPOSED:
             raise LedgerIntegrityError("move application continuation must be proposed")
+        if move.based_on_event_seq and move.based_on_event_seq != self.state.last_event_seq:
+            raise LedgerIntegrityError("move continuation lost its causal event frontier")
         if move.retry_of_move_id is not None:
             retried = self.state.moves.get(move.retry_of_move_id)
             if retried is None:
@@ -214,6 +252,12 @@ class AtomicMoveTransition:
             raise LedgerIntegrityError("move continuation omitted an available workspace")
 
     def _validate_terminal_intent(self) -> None:
+        if not self.payload.success:
+            exhausted = self.state.usage.plus(self.payload.usage_delta).exhausted(
+                self.state.objective.envelope
+            )
+            if not exhausted and len(self.payload.next_moves) != 1:
+                raise LedgerIntegrityError("failed move lost its exact retry")
         claim = self.payload.finish_claim
         if claim is not None:
             self._validate_finish_claim(claim)
@@ -233,6 +277,43 @@ class AtomicMoveTransition:
             raise LedgerIntegrityError("finish claim references a missing artifact")
         if any(item not in self.index.known_observations for item in claim.evidence_refs):
             raise LedgerIntegrityError("finish claim references missing evidence")
+        workspace = (
+            self.payload.workspace
+            if self.payload.workspace is not None
+            and self.payload.workspace.workspace_id == claim.workspace_id
+            else self.state.workspaces[claim.workspace_id]
+        )
+        if workspace.quality_ref is None or claim.quality_digest != workspace.quality_ref.digest:
+            raise LedgerIntegrityError("finish claim is not bound to the live quality lens")
+        unintegrated_steering = set(self.state.pending_steering_ids) - set(
+            workspace.consumed_observation_ids
+        )
+        if unintegrated_steering:
+            raise LedgerIntegrityError("finish claim ignores pending objective steering")
+        if workspace.active_trajectory_ids != [self.state.root_trajectory_id]:
+            raise LedgerIntegrityError("finish claim requires every exploratory trajectory merged")
+        root_head = self._resulting_root_head()
+        if root_head is None or claim.artifact_head_ids != [root_head]:
+            raise LedgerIntegrityError("finish claim must name the integrated root artifact")
+        if workspace.artifact_head_ids != [root_head]:
+            raise LedgerIntegrityError("finish workspace must contain only the integrated artifact")
+
+    def _artifact_trajectory(self, artifact_id: str) -> str:
+        if artifact_id in self.state.artifacts:
+            return self.state.artifacts[artifact_id].trajectory_id
+        return next(
+            item.trajectory_id for item in self.payload.artifacts if item.artifact_id == artifact_id
+        )
+
+    def _resulting_root_head(self) -> str | None:
+        created = [
+            item.artifact_id
+            for item in self.payload.artifacts
+            if item.trajectory_id == self.state.root_trajectory_id
+        ]
+        if created:
+            return created[-1]
+        return self.state.trajectories[self.state.root_trajectory_id].artifact_head_id
 
     def _commit(self) -> None:
         for trajectory in self.payload.new_trajectories:
@@ -250,6 +331,7 @@ class AtomicMoveTransition:
         if self.payload.blocked_reason is not None:
             self.state.status = RunStatus.BLOCKED
             self.state.terminal_reason = self.payload.blocked_reason
+            self.state.terminal_evidence_refs = list(self.payload.blocker_evidence_refs)
 
     def _commit_workspace(self) -> None:
         workspace = self.payload.workspace
@@ -258,6 +340,18 @@ class AtomicMoveTransition:
         self.state.workspaces[workspace.workspace_id] = workspace
         if not self.payload.activate_workspace:
             return
+        previous = (
+            set(self.state.workspaces[workspace.parent_workspace_id].active_trajectory_ids)
+            if workspace.parent_workspace_id is not None
+            else set(self.state.trajectories)
+        )
+        active = set(workspace.active_trajectory_ids)
+        for trajectory_id in previous - active:
+            if trajectory_id == self.state.root_trajectory_id:
+                continue
+            trajectory = self.state.trajectories[trajectory_id]
+            if trajectory.status == TrajectoryStatus.ACTIVE:
+                trajectory.status = TrajectoryStatus.MERGED
         self.state.current_workspace_id = workspace.workspace_id
         if (
             self.state.finish_claim is not None
@@ -292,11 +386,20 @@ class CompletionValidator:
     def validate(self) -> None:
         claim = self._current_claim()
         workspace = self.state.workspaces[claim.workspace_id]
-        live_quality_digest = (
-            workspace.quality_ref.digest if workspace.quality_ref is not None else None
-        )
+        if workspace.quality_ref is None:
+            raise LedgerIntegrityError("satisfied run has no task-native quality lens")
+        if self.state.pending_steering_ids:
+            raise LedgerIntegrityError("satisfied run ignores pending objective steering")
+        live_quality_digest = workspace.quality_ref.digest
         if claim.quality_digest != live_quality_digest:
             raise LedgerIntegrityError("satisfied run uses a stale quality lens")
+        if workspace.active_trajectory_ids != [self.state.root_trajectory_id]:
+            raise LedgerIntegrityError("satisfied run retains an unmerged trajectory")
+        root_head = self.state.trajectories[self.state.root_trajectory_id].artifact_head_id
+        if root_head is None or claim.artifact_head_ids != [root_head]:
+            raise LedgerIntegrityError("satisfied run is not bound to its integrated artifact")
+        if workspace.artifact_head_ids != [root_head]:
+            raise LedgerIntegrityError("satisfied workspace differs from its delivered artifact")
         relevant = self._challenge_observations(claim)
         if any(self._is_material_challenge(item) for item in relevant):
             raise LedgerIntegrityError("satisfied run has unresolved challenge evidence")
@@ -309,6 +412,14 @@ class CompletionValidator:
         }
         if not claimed_digests.issubset(supported_digests):
             raise LedgerIntegrityError("satisfied run lacks exact artifact support")
+        covered_claims = {
+            covered
+            for item in support
+            if self._supports_claim(item, claim)
+            for covered in item.covered_claims
+        }
+        if not set(claim.satisfaction_claims).issubset(covered_claims):
+            raise LedgerIntegrityError("satisfied run lacks exact semantic-claim coverage")
 
     def _current_claim(self) -> FinishClaim:
         claim = self.state.finish_claim
@@ -347,10 +458,6 @@ class CompletionValidator:
             and observation.claim_id == claim.claim_id
             and observation.assay_status == AssayStatus.VALID
             and observation.material_to_claim
-            and (
-                observation.raw_ref is not None
-                or observation.source == "artifact-check"
-                or observation.source == "fresh-challenger"
-                or observation.direct_inspection
-            )
+            and observation.direct_inspection
+            and bool((observation.assay_coverage or "").strip())
         )

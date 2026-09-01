@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from .errors import ConfigurationError
 from .models import Role, StrictModel
@@ -165,6 +165,15 @@ class HarnessConfig(StrictModel):
     runtime: RuntimePolicy = Field(default_factory=RuntimePolicy)
     kernel: KernelPolicy = Field(default_factory=KernelPolicy)
 
+    @model_validator(mode="after")
+    def reject_unmetered_cost_envelope(self) -> HarnessConfig:
+        if self.kernel.max_cost_usd is not None:
+            raise ValueError(
+                "kernel.max_cost_usd is unavailable because the current providers do not "
+                "emit authoritative monetary cost; use token, turn, or wall-time envelopes"
+            )
+        return self
+
 
 DEFAULT_CONFIG: dict[str, Any] = HarnessConfig().model_dump(mode="json")
 
@@ -201,7 +210,7 @@ max_parallel = 1
 # max_input_tokens = 1000000
 # max_output_tokens = 100000
 # max_model_turns = 1000
-# max_cost_usd = 100
+# Monetary cost is not accepted until the provider reports authoritative cost.
 
 [provider]
 kind = "omp-codex"

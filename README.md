@@ -17,7 +17,7 @@ record of how it got there.
 [Quick start](#quick-start) · [How it works](#how-it-works) ·
 [Live control](#watch-and-steer) · [Commands](#commands) ·
 [Canonical model](docs/CANONICAL_MODEL.md) ·
-[Kernel design](docs/INTELLIGENCE_KERNEL_V2.md) ·
+[Rebuild history](docs/INTELLIGENCE_KERNEL_V2.md) ·
 [Operations](docs/OPERATOR_GUIDE.md) · [Security](SECURITY.md)
 
 Flourite is an independent open-source project, not an OpenAI product.
@@ -44,10 +44,13 @@ bad at handling for themselves: exact goal continuity, recovery, global
 reframing, causal learning from rejection, artifact-bound completion, and
 durable operator control.
 
-There is no default call count, round count, repair count, or reserved
-“synthesis phase.” If you set a wall-time, token, turn, or cost envelope, it is
-a hard operator boundary. Otherwise productive work is not stopped by a hidden
-harness horizon.
+There is no default semantic call count, round count, or reserved “synthesis
+phase.” Transport and component recovery use bounded retries so a broken
+boundary cannot consume the run forever. An operator wall-time envelope can interrupt a live move;
+metered token and turn envelopes close the run at the next atomic move boundary.
+Otherwise productive work is not stopped by a hidden harness horizon. Flourite
+does not pretend to enforce a dollar limit when the provider does not report
+authoritative cost.
 
 ## Quick start
 
@@ -220,9 +223,9 @@ checks against the candidate; a media adapter can retain rendered deliverables;
 the universal kernel does not pretend a language-model opinion is equivalent
 to a direct measurement.
 
-Read [the canonical model](docs/CANONICAL_MODEL.md) for the complete object and
-[the rebuild design](docs/INTELLIGENCE_KERNEL_V2.md) for invariants and failure
-analysis.
+Read [the canonical model](docs/CANONICAL_MODEL.md) for the authoritative design
+and [the rebuild history](docs/INTELLIGENCE_KERNEL_V2.md) for the failure analysis
+that led to it.
 
 ## Commands
 
@@ -258,7 +261,7 @@ Flourite records explicitly.
 
 The important current sections are:
 
-- `[kernel]` — optional hard envelopes and maximum live trajectories;
+- `[kernel]` — optional hard envelopes and the in-flight move safety ceiling;
 - `[provider]` and `[provider.capabilities]` — transport and tool plane;
 - `[provider.strong]` — model and reasoning effort;
 - `[software]` — domain checks, deliverables, and explicit apply behavior.
@@ -287,7 +290,7 @@ mypy src/frontier_harness
 ## Project notes
 
 - [Canonical model](docs/CANONICAL_MODEL.md)
-- [Intelligence kernel v2](docs/INTELLIGENCE_KERNEL_V2.md)
+- [Rebuild history](docs/INTELLIGENCE_KERNEL_V2.md)
 - [Operator guide](docs/OPERATOR_GUIDE.md)
 - [Live validation](docs/LIVE_CODEX_VALIDATION.md)
 - [Event model](docs/event-model.md)

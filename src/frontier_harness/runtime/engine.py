@@ -18,6 +18,7 @@ from ..core.kernel import IntelligenceKernel
 from ..core.types import (
     ArtifactVersion,
     ComputeEnvelope,
+    FailureDomain,
     Observation,
     ObservationKind,
     PauseKind,
@@ -137,7 +138,7 @@ class KernelEngine:
             if runner is None:
                 provider = build_provider(config.provider)
                 if config.provider.kind == "fake":
-                    runner = DeterministicMoveRunner()
+                    runner = DeterministicMoveRunner(blobs)
                 else:
                     if not isinstance(provider, OmpCodexProvider):
                         raise ValueError("the intelligence kernel currently requires omp-codex")
@@ -238,7 +239,7 @@ class KernelEngine:
         adapter.prepare()
         provider = build_provider(config.provider)
         if config.provider.kind == "fake":
-            runner: MoveRunner = DeterministicMoveRunner()
+            runner: MoveRunner = DeterministicMoveRunner(blobs)
         else:
             if not isinstance(provider, OmpCodexProvider):
                 raise ValueError("the intelligence kernel currently requires omp-codex")
@@ -253,9 +254,10 @@ class KernelEngine:
             run_id,
             busy_timeout_ms=config.runtime.sqlite_busy_timeout_ms,
         )
-        checkpoint = KernelJournal.load_checkpoint(
+        checkpoint = KernelJournal.recover_projection(
             ledger=ledger,
             snapshot_path=run_dir / cls.STATE_FILE,
+            max_event_payload_bytes=config.kernel.max_event_payload_bytes,
         )
         journal = KernelJournal(
             ledger=ledger,
@@ -263,8 +265,6 @@ class KernelEngine:
             max_event_payload_bytes=config.kernel.max_event_payload_bytes,
             state=checkpoint,
         )
-        if checkpoint is None:
-            journal.refresh()
         engine = cls(
             run_dir=run_dir,
             config=config,
@@ -326,6 +326,7 @@ class KernelEngine:
                             RunPaused(
                                 reason=f"provider preflight failed: {readiness_error}",
                                 kind=PauseKind.EXECUTION,
+                                failure_domain=FailureDomain.PROVIDER,
                             ),
                             actor="runtime",
                         )
@@ -533,6 +534,11 @@ class KernelEngine:
         references = [self.state.objective.original_text_ref]
         references.extend(item.text_ref for item in self.state.objective.amendments)
         references.extend(item.document_ref for item in self.state.workspaces.values())
+        references.extend(
+            item.quality_ref
+            for item in self.state.workspaces.values()
+            if item.quality_ref is not None
+        )
         for artifact in self.state.artifacts.values():
             references.append(artifact.content_ref)
             references.extend(artifact.deliverables)

@@ -12,7 +12,9 @@ from typing import Any
 
 from ..config import HarnessConfig
 from ..control import CommandKind, RunControlPlane, RuntimeStatus
+from ..core.journal import KernelJournal
 from ..errors import FrontierError
+from ..ledger import EventLedger
 from ..locking import RunLock
 from ..util import utc_now
 from .components import STEP_PROTOCOL, ComponentBinding, ComponentRegistry
@@ -53,12 +55,30 @@ class StepSupervisor:
     @staticmethod
     def _state(run_dir: Path) -> dict[str, Any]:
         try:
-            decoded = json.loads((run_dir / KernelEngine.STATE_FILE).read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            manifest = json.loads(
+                (run_dir / KernelEngine.MANIFEST_FILE).read_text(encoding="utf-8")
+            )
+            config = HarnessConfig.model_validate_json(
+                (run_dir / KernelEngine.CONFIG_FILE).read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, json.JSONDecodeError, ValueError, KeyError) as exc:
             raise FrontierError(f"invalid durable run state: {run_dir}") from exc
-        if not isinstance(decoded, dict):
-            raise FrontierError(f"invalid durable run state: {run_dir}")
-        return decoded
+        ledger = EventLedger(
+            run_dir / KernelEngine.LEDGER_FILE,
+            str(manifest["run_id"]),
+            busy_timeout_ms=config.runtime.sqlite_busy_timeout_ms,
+        )
+        try:
+            state = KernelJournal.recover_projection(
+                ledger=ledger,
+                snapshot_path=run_dir / KernelEngine.STATE_FILE,
+                max_event_payload_bytes=config.kernel.max_event_payload_bytes,
+            )
+            return state.model_dump(mode="json", exclude_computed_fields=True)
+        except (OSError, ValueError) as exc:
+            raise FrontierError(f"invalid durable run state: {run_dir}") from exc
+        finally:
+            ledger.close()
 
     async def execute(self) -> dict[str, Any]:
         with self.lock:
@@ -75,7 +95,9 @@ class StepSupervisor:
                     state = self._state(self.run_dir)
                     status = str(state.get("status", "active"))
                     recoverable_pause = (
-                        status == "paused" and state.get("pause_kind") == "execution"
+                        status == "paused"
+                        and state.get("pause_kind") == "execution"
+                        and state.get("failure_domain") == "component"
                     )
                     pending_resume = status == "paused" and any(
                         command.kind.value == "resume"
@@ -182,7 +204,11 @@ class StepSupervisor:
                         ):
                             continue
                         raise FrontierError(detail)
-                    if receipt.status == "paused" and current.get("pause_kind") == "execution":
+                    if (
+                        receipt.status == "paused"
+                        and current.get("pause_kind") == "execution"
+                        and current.get("failure_domain") == "component"
+                    ):
                         detail = str(current.get("terminal_reason") or "execution paused")
                         if await self._recover_component(
                             binding,

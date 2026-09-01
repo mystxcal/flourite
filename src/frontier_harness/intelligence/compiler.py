@@ -67,13 +67,21 @@ class MoveResultCompiler:
     def compile(
         self,
         move: Move,
-        visible_observations: Sequence[Observation],
         result: MoveExecutionResult,
+        *,
+        visible_observation_ids: set[str],
     ) -> MoveApplied:
         artifact = self._artifact(move, result)
         observations = self._observations(move, result.observations, artifact)
-        repeated_low_information = self._record_information_signal(move, artifact, observations)
-        workspace = self._workspace(move, result, artifact, observations=visible_observations)
+        workspace = self._workspace(
+            move,
+            result,
+            artifact,
+            visible_observation_ids=visible_observation_ids,
+        )
+        repeated_low_information = self._record_information_signal(
+            move, artifact, observations, workspace
+        )
         resulting_workspace = self._resulting_workspace(result, workspace)
         finish_claim = self._finish_claim(result, resulting_workspace, observations)
         continuations = self._continuations(
@@ -86,6 +94,16 @@ class MoveResultCompiler:
         )
         workspace = self._include_new_trajectories(workspace, continuations.trajectories)
         blocker = result.blocker
+        blocker_evidence = (
+            list(
+                dict.fromkeys(
+                    [*blocker.evidence_refs]
+                    + [item.observation_id for item in observations if item.raw_ref is not None]
+                )
+            )
+            if blocker is not None
+            else []
+        )
         return MoveApplied(
             move_id=move.move_id,
             success=result.success,
@@ -99,7 +117,7 @@ class MoveResultCompiler:
             finish_claim=finish_claim,
             next_moves=list(continuations.moves),
             blocked_reason=blocker.reason if blocker is not None else None,
-            blocker_evidence_refs=blocker.evidence_refs if blocker is not None else [],
+            blocker_evidence_refs=blocker_evidence,
             error=result.error,
         )
 
@@ -155,6 +173,7 @@ class MoveResultCompiler:
             claim_id=claim_id,
             assay_status=draft.assay_status,
             assay_coverage=draft.assay_coverage,
+            covered_claims=draft.covered_claims,
             material_to_claim=draft.material_to_claim,
             direct_inspection=draft.direct_inspection,
             quality_delta=draft.quality_delta,
@@ -166,8 +185,9 @@ class MoveResultCompiler:
         move: Move,
         artifact: ArtifactVersion | None,
         observations: list[Observation],
+        workspace: WorkspaceVersion | None,
     ) -> bool:
-        if not self._is_low_information(move, artifact, observations):
+        if not self._is_low_information(move, artifact, observations, workspace):
             return False
         repeated = self._previous_move_was_low_information(move.trajectory_id)
         observations.append(
@@ -175,8 +195,8 @@ class MoveResultCompiler:
                 observation_id=new_id("obs"),
                 kind=ObservationKind.RESOURCE,
                 summary=(
-                    "This Lead move changed neither the artifact nor decision-relevant "
-                    "external evidence."
+                    "This Lead move revisited the same decision boundary without changing "
+                    "the artifact or adding durable evidence."
                 ),
                 source="kernel",
                 created_at=self.now,
@@ -187,27 +207,36 @@ class MoveResultCompiler:
         )
         return repeated
 
-    @staticmethod
     def _is_low_information(
+        self,
         move: Move,
         artifact: ArtifactVersion | None,
         observations: Sequence[Observation],
+        workspace: WorkspaceVersion | None,
     ) -> bool:
-        direct_kinds = {
-            ObservationKind.TOOL,
-            ObservationKind.TEST,
-            ObservationKind.SOURCE,
-            ObservationKind.ARTIFACT,
-        }
-        has_direct_evidence = any(
-            item.raw_ref is not None or item.kind in direct_kinds for item in observations
-        )
-        return (
-            move.mode == MoveMode.LEAD
-            and move.based_on_workspace_id is not None
-            and artifact is None
-            and not has_direct_evidence
-        )
+        # Model-selected labels are not evidence. Information gain here means
+        # durable inspected bytes or a changed artifact, not calling prose a
+        # tool/test/source observation.
+        has_direct_evidence = any(item.raw_ref is not None for item in observations)
+        if (
+            move.mode != MoveMode.LEAD
+            or move.based_on_workspace_id is None
+            or artifact is not None
+            or has_direct_evidence
+            or workspace is None
+        ):
+            return False
+        base = self.state.workspaces[move.based_on_workspace_id]
+        current_boundary = self._normalize_boundary(workspace.decision_boundary)
+        previous_boundary = self._normalize_boundary(base.decision_boundary)
+        return current_boundary is None or current_boundary == previous_boundary
+
+    @staticmethod
+    def _normalize_boundary(value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(value.casefold().split())
+        return normalized or None
 
     def _previous_move_was_low_information(self, trajectory_id: str) -> bool:
         completed = sorted(
@@ -234,7 +263,7 @@ class MoveResultCompiler:
         result: MoveExecutionResult,
         artifact: ArtifactVersion | None,
         *,
-        observations: Sequence[Observation],
+        visible_observation_ids: set[str],
     ) -> WorkspaceVersion | None:
         draft = result.workspace
         if draft is None:
@@ -262,23 +291,44 @@ class MoveResultCompiler:
                 )
             )
         )
-        heads = draft.artifact_head_ids or self._artifact_heads(move, artifact)
-        trajectories = draft.active_trajectory_ids or [
-            item.trajectory_id
-            for item in self.state.trajectories.values()
-            if item.status == TrajectoryStatus.ACTIVE
-        ]
-        consumed = list(
-            dict.fromkeys(
-                [item.observation_id for item in observations] + draft.consumed_observation_ids
+        trajectories = (
+            list(draft.active_trajectory_ids)
+            if draft.active_trajectory_ids is not None
+            else (
+                list(base.active_trajectory_ids)
+                if base is not None
+                else [
+                    item.trajectory_id
+                    for item in self.state.trajectories.values()
+                    if item.status == TrajectoryStatus.ACTIVE
+                ]
             )
         )
+        heads = (
+            list(draft.artifact_head_ids)
+            if draft.artifact_head_ids is not None
+            else self._artifact_heads(move, artifact, active_trajectory_ids=set(trajectories))
+        )
+        inherited_consumed = list(base.consumed_observation_ids if base is not None else [])
+        requested_consumed = list(dict.fromkeys(draft.consumed_observation_ids))
+        unseen = (
+            set(requested_consumed)
+            - set(inherited_consumed)
+            - visible_observation_ids
+        )
+        if unseen:
+            raise ValueError(
+                "workspace cannot consume evidence absent from its context: "
+                + ", ".join(sorted(unseen))
+            )
+        consumed = list(dict.fromkeys([*inherited_consumed, *requested_consumed]))
         return WorkspaceVersion(
             workspace_id=new_id("ws"),
             parent_workspace_id=move.based_on_workspace_id,
             document_ref=document_ref,
             quality_ref=quality_ref,
             summary=draft.summary,
+            decision_boundary=draft.decision_boundary,
             based_on_event_seq=self.state.last_event_seq,
             artifact_head_ids=heads,
             active_trajectory_ids=trajectories,
@@ -287,9 +337,19 @@ class MoveResultCompiler:
             created_at=self.now,
         )
 
-    def _artifact_heads(self, move: Move, artifact: ArtifactVersion | None) -> list[str]:
+    def _artifact_heads(
+        self,
+        move: Move,
+        artifact: ArtifactVersion | None,
+        *,
+        active_trajectory_ids: set[str],
+    ) -> list[str]:
         base = self.state.workspaces.get(move.based_on_workspace_id or "")
-        heads = list(base.artifact_head_ids if base is not None else [])
+        heads = [
+            artifact_id
+            for artifact_id in (base.artifact_head_ids if base is not None else [])
+            if self.state.artifacts[artifact_id].trajectory_id in active_trajectory_ids
+        ]
         if artifact is None:
             return heads
         heads = [
@@ -319,15 +379,26 @@ class MoveResultCompiler:
             return None
         if workspace is None:
             raise ValueError("finish claim requires a live workspace")
+        if workspace.quality_ref is None:
+            raise ValueError("finish claim requires a task-native quality lens")
+        artifact_head_ids = draft.artifact_head_ids or workspace.artifact_head_ids
+        if not artifact_head_ids:
+            raise ValueError("finish claim requires an actual artifact head")
         return FinishClaim(
             claim_id=new_id("claim"),
             workspace_id=workspace.workspace_id,
-            quality_digest=(
-                workspace.quality_ref.digest if workspace.quality_ref is not None else None
-            ),
-            artifact_head_ids=draft.artifact_head_ids or workspace.artifact_head_ids,
+            quality_digest=workspace.quality_ref.digest,
+            artifact_head_ids=artifact_head_ids,
             satisfaction_claims=draft.satisfaction_claims,
-            evidence_refs=draft.evidence_refs or [item.observation_id for item in observations],
+            evidence_refs=list(
+                dict.fromkeys(
+                    [
+                        *workspace.consumed_observation_ids,
+                        *draft.evidence_refs,
+                        *(item.observation_id for item in observations),
+                    ]
+                )
+            ),
             residual_uncertainty=draft.residual_uncertainty,
             created_at=self.now,
         )
@@ -385,8 +456,9 @@ class MoveResultCompiler:
             mode=MoveMode.NAVIGATE,
             intent="Escape a repeated low-information trajectory",
             instructions=(
-                "Two consecutive Lead moves changed neither the artifact nor direct evidence. "
-                "Reconstruct the frontier from fresh context, identify the repeated assumption "
+                "Two consecutive Lead moves stayed on the same decision boundary while changing "
+                "neither the artifact nor direct evidence. Reconstruct the frontier from fresh "
+                "context, identify the repeated assumption "
                 "or missing representation, and return a materially different next move."
             ),
             trajectory_id=move.trajectory_id,
