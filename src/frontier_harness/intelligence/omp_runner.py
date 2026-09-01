@@ -158,9 +158,7 @@ class ChallengeModelOutput(ModelOutputBase):
     def assay_controls_verdicts(self) -> ChallengeModelOutput:
         if self.assay.status == AssayStatus.VALID and not self.observations:
             raise ValueError("a valid assay requires at least one semantic observation")
-        if self.assay.status == AssayStatus.INVALID and (
-            self.observations or self.quality_delta
-        ):
+        if self.assay.status == AssayStatus.INVALID and (self.observations or self.quality_delta):
             raise ValueError("an invalid assay cannot emit semantic verdicts or quality changes")
         return self
 
@@ -750,6 +748,11 @@ class OmpMoveRunner:
             ),
             "usage": context.usage.model_dump(mode="json"),
             "hard_envelope": context.envelope.model_dump(mode="json"),
+            "causal_boundary": (
+                context.causal_boundary.model_dump(mode="json")
+                if context.causal_boundary is not None
+                else None
+            ),
             "capabilities": context.capabilities,
             "sources": sources,
             "generated_at": utc_now(),
@@ -782,7 +785,38 @@ Prefer eliminating bad ideas in thought space when direct reasoning settles them
 when the resulting observation can change a decision. Calls and activity are costs, not proof.
 The typed final response is a concise durable boundary, not the work itself.
 """
+        if move.causal_checkpoint:
+            common += """
+
+This is the controller-owned adaptive causal-boundary checkpoint, not an ordinary
+planning turn. The current run index contains the empirical boundary and exact remaining
+envelope. Use this one move to act at the earliest accessible cause and produce a complete,
+directly inspected result. Do not return `next_move` or `branches`. If a complete causal
+intervention cannot fit, preserve the current artifact and frontier, add an observation whose
+`evidence_path` points to that durable workspace or artifact, and return `blocker` with the
+exact unresolved boundary. At this checkpoint the operator-owned remaining envelope is a
+valid blocker; difficulty by itself is not.
+"""
         if move.mode in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
+            continuation_contract = (
+                "Make an evidenced finish claim or return the checkpoint blocker; do not "
+                "return another continuation."
+                if move.causal_checkpoint
+                else (
+                    "Choose one next move or make an evidenced finish claim. If no move is "
+                    "obvious, broaden or reframe rather than inferring completion."
+                )
+            )
+            blocker_contract = (
+                "At this checkpoint, use `blocker` when the remaining hard envelope cannot "
+                "support a complete causal intervention and bind it to durable evidence."
+                if move.causal_checkpoint
+                else (
+                    "Use `blocker` only for a concrete external dependency that tools and "
+                    "further reasoning cannot resolve; difficulty, uncertainty, and failed "
+                    "attempts are not blockers."
+                )
+            )
             return (
                 common
                 + f"""
@@ -797,16 +831,14 @@ and failure signatures, observable discriminators, proxy traps, coverage gaps, a
 Return `decision_boundary` as the single live decision or uncertainty whose resolution would
 most change the result. Keep its wording stable while it is genuinely the same boundary;
 change it only when reasoning or evidence has moved the frontier.
-Integrate only quality distinctions grounded in the objective or direct evidence. Choose one
-next move or make an evidenced
-finish claim. If no move is obvious, broaden or reframe rather than inferring completion.
+Integrate only quality distinctions grounded in the objective or direct evidence.
+{continuation_contract}
 Return `consumed_observation_ids` only for evidence you actually integrated into the artifact,
 frontier, or quality lens; unread or unresolved evidence must remain live. When branch evidence
 has been integrated into the root artifact and frontier, return those exact child trajectory IDs
 in `integrated_trajectory_ids`. A finish claim is legal only after every child trajectory is
 integrated into one root artifact.
-Use `blocker` only for a concrete external dependency that tools and further reasoning
-cannot resolve; difficulty, uncertainty, and failed attempts are not blockers.
+{blocker_contract}
 Open `branches` only when competing hypotheses or solution families make genuinely
 different predictions; give each a concrete `fork_purpose`. Branching is optional, not
 a default display of effort.
@@ -891,9 +923,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
             state,
             workspace,
             output,
-            visible_observation_ids={
-                item.observation_id for item in context.observations
-            },
+            visible_observation_ids={item.observation_id for item in context.observations},
         )
         self._validate_semantic_result(
             move=move,
@@ -925,7 +955,9 @@ new material distinction or proxy trap revealed by direct inspection, not generi
         observations: Sequence[ObservationDraft],
         workspace: WorkspaceDraft | None,
     ) -> None:
-        if output.blocker is not None and not any(item.raw_ref is not None for item in observations):
+        if output.blocker is not None and not any(
+            item.raw_ref is not None for item in observations
+        ):
             raise ValueError("blocker evidence was not durably captured")
         if (
             isinstance(output, LeadModelOutput)
@@ -939,8 +971,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
                 unknown = set(observation.covered_claims) - allowed_claims
                 if unknown:
                     raise ValueError(
-                        "challenge returned unknown covered_claims: "
-                        + ", ".join(sorted(unknown))
+                        "challenge returned unknown covered_claims: " + ", ".join(sorted(unknown))
                     )
         if output.finish is None:
             return
@@ -1014,9 +1045,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
     ) -> list[ObservationDraft]:
         digest_owners = self._artifact_digest_owners(challenge_artifacts)
         target_digests = {item.digest for item in challenge_artifacts}
-        assay_coverage = (
-            output.assay.coverage if isinstance(output, ChallengeModelOutput) else None
-        )
+        assay_coverage = output.assay.coverage if isinstance(output, ChallengeModelOutput) else None
         observations = [
             self._model_observation(
                 move,

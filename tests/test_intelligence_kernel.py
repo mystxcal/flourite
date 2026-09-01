@@ -408,10 +408,7 @@ async def test_non_material_criticism_is_preserved_without_vetoing_completion(
     await kernel.run()
 
     assert kernel.state.status == RunStatus.SATISFIED
-    assert any(
-        item.material_to_claim is False
-        for item in kernel.state.observations.values()
-    )
+    assert any(item.material_to_claim is False for item in kernel.state.observations.values())
 
 
 async def test_non_material_support_cannot_close_a_semantic_claim(tmp_path: Path) -> None:
@@ -573,9 +570,7 @@ async def test_integrated_evidence_stays_consumed_through_workspace_lineage(
                     next_move=MoveDirective(mode=MoveMode.LEAD, intent="Continue cleanly"),
                 )
             assert self.evidence_id is not None
-            assert self.evidence_id not in {
-                item.observation_id for item in context.observations
-            }
+            assert self.evidence_id not in {item.observation_id for item in context.observations}
             return MoveExecutionResult(workspace=workspace("Later workspace"))
 
     runner = IntegratingRunner()
@@ -681,7 +676,9 @@ async def test_finish_challenger_receives_the_integrated_raw_evidence(tmp_path: 
     await kernel.run()
 
     assert kernel.state.status == RunStatus.SATISFIED
-    assert runner.evidence_id in (kernel.state.finish_claim.evidence_refs if kernel.state.finish_claim else [])
+    assert runner.evidence_id in (
+        kernel.state.finish_claim.evidence_refs if kernel.state.finish_claim else []
+    )
 
 
 def test_challenge_verdict_cannot_impersonate_direct_inspection() -> None:
@@ -1047,6 +1044,10 @@ async def test_wall_envelope_interrupts_the_live_move_and_exhausts_cleanly(
 
     assert kernel.state.status == RunStatus.EXHAUSTED
     assert kernel.state.usage.wall_seconds >= 0.02
+    assert kernel.state.terminal_evidence_refs
+    terminal = kernel.state.observations[kernel.state.terminal_evidence_refs[0]]
+    assert terminal.kind == ObservationKind.RESOURCE
+    assert terminal.raw_ref == kernel.state.objective.original_text_ref
     assert not any(item.status == MoveStatus.PROPOSED for item in kernel.state.moves.values())
 
 

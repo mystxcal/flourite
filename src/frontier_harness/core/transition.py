@@ -152,8 +152,7 @@ class AtomicMoveTransition:
                 unknown = set(observation.covered_claims) - set(claim.satisfaction_claims)
                 if unknown:
                     raise LedgerIntegrityError(
-                        "observation claims unknown finish coverage: "
-                        + ", ".join(sorted(unknown))
+                        "observation claims unknown finish coverage: " + ", ".join(sorted(unknown))
                     )
 
     def _validate_workspace(self) -> None:
@@ -236,6 +235,7 @@ class AtomicMoveTransition:
                 or retried.mode != move.mode
                 or retried.intent != move.intent
                 or retried.instructions != move.instructions
+                or retried.causal_checkpoint != move.causal_checkpoint
             ):
                 raise LedgerIntegrityError("move retry changes the semantic operation")
         trajectory = self.state.trajectories.get(move.trajectory_id)
@@ -431,8 +431,7 @@ class CompletionValidator:
         return [
             item
             for item in self.state.observations.values()
-            if item.challenge_verdict is not None
-            and item.claim_id == claim.claim_id
+            if item.challenge_verdict is not None and item.claim_id == claim.claim_id
         ]
 
     @staticmethod

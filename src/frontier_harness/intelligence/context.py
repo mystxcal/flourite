@@ -18,6 +18,7 @@ from ..core.types import (
     Trajectory,
     WorkspaceVersion,
 )
+from .budget import CausalBoundarySignal, causal_boundary_signal
 
 
 class ContextFrame(CoreModel):
@@ -37,6 +38,7 @@ class ContextFrame(CoreModel):
     finish_claim: FinishClaim | None = None
     usage: ComputeUsage
     envelope: ComputeEnvelope
+    causal_boundary: CausalBoundarySignal | None = None
     capabilities: list[str] = Field(default_factory=list)
 
 
@@ -80,6 +82,7 @@ class ContextAssembler:
             finish_claim=state.finish_claim,
             usage=state.usage,
             envelope=state.objective.envelope,
+            causal_boundary=causal_boundary_signal(state),
             capabilities=capabilities or [],
         )
 
@@ -121,9 +124,7 @@ class ContextAssembler:
     ) -> list[ArtifactVersion]:
         head_ids = list(workspace.artifact_head_ids if workspace is not None else [])
         active_trajectory_ids = set(
-            workspace.active_trajectory_ids
-            if workspace is not None
-            else [state.root_trajectory_id]
+            workspace.active_trajectory_ids if workspace is not None else [state.root_trajectory_id]
         )
         head_ids.extend(
             item.artifact_head_id

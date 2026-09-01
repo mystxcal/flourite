@@ -22,6 +22,7 @@ from ..core.types import (
 )
 from ..ids import new_id
 from ..util import utc_now
+from .budget import CausalBoundarySignal, causal_boundary_signal
 from .contracts import MoveDirective, MoveExecutionResult, ObservationDraft
 
 DEFAULT_QUALITY_LENS = """# Quality lens
@@ -84,16 +85,58 @@ class MoveResultCompiler:
         )
         resulting_workspace = self._resulting_workspace(result, workspace)
         finish_claim = self._finish_claim(result, resulting_workspace, observations)
-        continuations = self._continuations(
-            move,
-            result,
-            workspace=resulting_workspace,
-            repeated_low_information=repeated_low_information,
-            has_finish_claim=finish_claim is not None,
-            forced_directive=None,
+        hard_exhausted = bool(
+            self.state.usage.plus(result.usage).exhausted(self.state.objective.envelope)
+        )
+        signal = causal_boundary_signal(
+            self.state,
+            prospective_usage=result.usage,
+            prospective_lead_seconds=(
+                result.usage.wall_seconds
+                if result.success
+                and move.mode == MoveMode.LEAD
+                and move.trajectory_id == self.state.root_trajectory_id
+                else None
+            ),
+        )
+        checkpoint_terminal = (
+            move.causal_checkpoint
+            and result.success
+            and not hard_exhausted
+            and finish_claim is None
+            and result.blocker is None
+        )
+        forced_directive = (
+            self._causal_checkpoint(signal, result)
+            if signal is not None
+            and result.success
+            and not move.causal_checkpoint
+            and finish_claim is None
+            and result.blocker is None
+            and self.state.finish_claim is None
+            else None
+        )
+        continuations = (
+            CompiledContinuations()
+            if checkpoint_terminal
+            else self._continuations(
+                move,
+                result,
+                workspace=resulting_workspace,
+                repeated_low_information=repeated_low_information,
+                has_finish_claim=finish_claim is not None,
+                forced_directive=forced_directive,
+            )
         )
         workspace = self._include_new_trajectories(workspace, continuations.trajectories)
         blocker = result.blocker
+        if checkpoint_terminal:
+            checkpoint_observation = self._checkpoint_observation(
+                move,
+                resulting_workspace,
+                signal,
+            )
+            observations.append(checkpoint_observation)
         blocker_evidence = (
             list(
                 dict.fromkeys(
@@ -102,7 +145,7 @@ class MoveResultCompiler:
                 )
             )
             if blocker is not None
-            else []
+            else ([checkpoint_observation.observation_id] if checkpoint_terminal else [])
         )
         return MoveApplied(
             move_id=move.move_id,
@@ -116,9 +159,83 @@ class MoveResultCompiler:
             activate_workspace=result.workspace.activate if result.workspace is not None else True,
             finish_claim=finish_claim,
             next_moves=list(continuations.moves),
-            blocked_reason=blocker.reason if blocker is not None else None,
+            blocked_reason=(
+                blocker.reason
+                if blocker is not None
+                else (
+                    "The adaptive causal-boundary checkpoint preserved the current "
+                    "artifact and unresolved decision before the hard envelope."
+                    if checkpoint_terminal
+                    else None
+                )
+            ),
             blocker_evidence_refs=blocker_evidence,
             error=result.error,
+        )
+
+    def _causal_checkpoint(
+        self,
+        signal: CausalBoundarySignal,
+        result: MoveExecutionResult,
+    ) -> MoveDirective:
+        requested = self._directives(result)
+        requested_text = (
+            " | ".join(f"{item.intent}: {item.instructions}" for item in requested)
+            if requested
+            else "No continuation was proposed."
+        )
+        return MoveDirective(
+            mode=MoveMode.LEAD,
+            intent="Settle the earliest causal boundary before the hard envelope",
+            instructions=(
+                "The controller has admitted the one adaptive causal-boundary checkpoint. "
+                f"About {signal.remaining_wall_seconds:.0f}s remain; the empirical upper-"
+                f"quartile Lead move is {signal.empirical_move_seconds:.0f}s across "
+                f"{signal.completed_lead_moves} completed Lead moves. Do not spend this move "
+                "on a downstream symptom, local polish, or another plan. Inspect the current "
+                "artifact and evidence, identify the earliest accessible cause behind the live "
+                "decision boundary, and directly execute one complete intervention only if you "
+                "can inspect and commit it inside this move. Otherwise preserve the current head, "
+                "attach the workspace or artifact as durable evidence, and return a blocker whose "
+                "reason names the exact unfinished causal boundary. Do not return another next "
+                "move or branch. The prior continuation was: " + requested_text
+            ),
+            trajectory_id=self.state.root_trajectory_id,
+            causal_checkpoint=True,
+        )
+
+    def _checkpoint_observation(
+        self,
+        move: Move,
+        workspace: WorkspaceVersion | None,
+        signal: CausalBoundarySignal | None,
+    ) -> Observation:
+        snapshot = (
+            workspace.document_ref
+            if workspace is not None
+            else self.state.objective.original_text_ref
+        )
+        boundary = workspace.decision_boundary if workspace is not None else None
+        return Observation(
+            observation_id=new_id("obs"),
+            kind=ObservationKind.RESOURCE,
+            summary=(
+                "The adaptive causal-boundary checkpoint ended without a finish claim or "
+                "evidenced external blocker; the current workspace was preserved instead of "
+                "starting another move."
+            ),
+            source="kernel",
+            created_at=self.now,
+            move_id=move.move_id,
+            trajectory_id=move.trajectory_id,
+            raw_ref=snapshot,
+            metadata={
+                "kernel_signal": "causal_boundary_settled",
+                "decision_boundary": boundary,
+                "remaining_wall_seconds": (
+                    signal.remaining_wall_seconds if signal is not None else None
+                ),
+            },
         )
 
     def _artifact(self, move: Move, result: MoveExecutionResult) -> ArtifactVersion | None:
@@ -311,11 +428,7 @@ class MoveResultCompiler:
         )
         inherited_consumed = list(base.consumed_observation_ids if base is not None else [])
         requested_consumed = list(dict.fromkeys(draft.consumed_observation_ids))
-        unseen = (
-            set(requested_consumed)
-            - set(inherited_consumed)
-            - visible_observation_ids
-        )
+        unseen = set(requested_consumed) - set(inherited_consumed) - visible_observation_ids
         if unseen:
             raise ValueError(
                 "workspace cannot consume evidence absent from its context: "
@@ -414,9 +527,7 @@ class MoveResultCompiler:
         forced_directive: MoveDirective | None,
     ) -> CompiledContinuations:
         directives = (
-            [forced_directive]
-            if forced_directive is not None
-            else self._directives(result)
+            [forced_directive] if forced_directive is not None else self._directives(result)
         )
         if repeated_low_information and directives and not has_finish_claim:
             directives = [self._navigation_escape(move)]

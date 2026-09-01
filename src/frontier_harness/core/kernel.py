@@ -184,10 +184,13 @@ class IntelligenceKernel:
             if item in self.state.observations
             and self.state.observations[item].challenge_verdict is not None
         ]
-        disposition = "\n".join(
-            f"- {item.challenge_verdict or ChallengeVerdict.UNCERTAIN}: {item.summary}"
-            for item in findings
-        ) or "- uncertain: the fork returned no challenge disposition"
+        disposition = (
+            "\n".join(
+                f"- {item.challenge_verdict or ChallengeVerdict.UNCERTAIN}: {item.summary}"
+                for item in findings
+            )
+            or "- uncertain: the fork returned no challenge disposition"
+        )
         self._propose(
             MoveDirective(
                 mode=MoveMode.LEAD,
@@ -400,8 +403,7 @@ class IntelligenceKernel:
                 intent="Challenge the uncovered semantic claims in the finish claim",
                 instructions=(
                     "Directly test these exact satisfaction claims, then copy each tested "
-                    "claim verbatim into covered_claims: "
-                    + " | ".join(sorted(missing_claims))
+                    "claim verbatim into covered_claims: " + " | ".join(sorted(missing_claims))
                 ),
             )
         )
@@ -451,6 +453,7 @@ class IntelligenceKernel:
             "mode": directive.mode,
             "intent": directive.intent,
             "instructions": directive.instructions,
+            "causal_checkpoint": directive.causal_checkpoint,
             "retry_of_move_id": directive.retry_of_move_id,
         }
         idempotency_key = sha256_text(canonical_json(basis))
@@ -466,6 +469,7 @@ class IntelligenceKernel:
             mode=directive.mode,
             intent=directive.intent,
             instructions=directive.instructions,
+            causal_checkpoint=directive.causal_checkpoint,
             idempotency_key=idempotency_key,
             proposed_at=utc_now(),
         )
@@ -489,9 +493,7 @@ class IntelligenceKernel:
         started = time.monotonic()
         wall_limit = self.state.objective.envelope.max_wall_seconds
         wall_remaining = (
-            max(0.0, wall_limit - self.state.usage.wall_seconds)
-            if wall_limit is not None
-            else None
+            max(0.0, wall_limit - self.state.usage.wall_seconds) if wall_limit is not None else None
         )
         try:
             async with asyncio.timeout(wall_remaining):
@@ -503,6 +505,11 @@ class IntelligenceKernel:
                 )
         except TimeoutError:
             elapsed = time.monotonic() - started
+            checkpoint_ref = (
+                self.state.current_workspace.document_ref
+                if self.state.current_workspace is not None
+                else self.state.objective.original_text_ref
+            )
             result = MoveExecutionResult(
                 success=False,
                 error="ComputeEnvelope: wall-time boundary reached during the live move",
@@ -513,6 +520,11 @@ class IntelligenceKernel:
                         kind=ObservationKind.RESOURCE,
                         summary="The operator-owned wall-time envelope stopped the live move.",
                         source="kernel",
+                        raw_ref=checkpoint_ref,
+                        metadata={
+                            "current_workspace_id": self.state.current_workspace_id,
+                            "causal_checkpoint": move.causal_checkpoint,
+                        },
                     )
                 ],
             )
@@ -582,9 +594,7 @@ class IntelligenceKernel:
         *,
         visible_observation_ids: set[str],
     ) -> None:
-        exhausted = self.state.usage.plus(result.usage).exhausted(
-            self.state.objective.envelope
-        )
+        exhausted = self.state.usage.plus(result.usage).exhausted(self.state.objective.envelope)
         if not result.success and not exhausted:
             result = result.model_copy(
                 update={
@@ -592,6 +602,7 @@ class IntelligenceKernel:
                         mode=move.mode,
                         intent=move.intent,
                         instructions=move.instructions,
+                        causal_checkpoint=move.causal_checkpoint,
                         trajectory_id=move.trajectory_id,
                         retry_of_move_id=move.move_id,
                     )
@@ -608,12 +619,18 @@ class IntelligenceKernel:
             actor="runtime",
             action_id=move.move_id,
         )
+        if self.state.status.terminal:
+            return
         if exhausted:
             if self._settle_supported_finish():
                 return
             self.journal.append(
                 "run.exhausted",
-                RunTerminated(status="exhausted", reason="; ".join(exhausted)),
+                RunTerminated(
+                    status="exhausted",
+                    reason="; ".join(exhausted),
+                    supporting_observation_ids=list(self.state.moves[move.move_id].observation_ids),
+                ),
                 actor="kernel",
                 action_id=move.move_id,
             )

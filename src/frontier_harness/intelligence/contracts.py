@@ -25,6 +25,7 @@ class MoveDirective(CoreModel):
     mode: MoveMode
     intent: str
     instructions: str = ""
+    causal_checkpoint: bool = False
     trajectory_id: str | None = None
     retry_of_move_id: str | None = None
     fork_purpose: str | None = None

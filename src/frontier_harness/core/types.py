@@ -200,6 +200,7 @@ class Move(CoreModel):
     mode: MoveMode
     intent: str
     instructions: str = ""
+    causal_checkpoint: bool = False
     idempotency_key: str
     status: MoveStatus = MoveStatus.PROPOSED
     proposed_at: str
@@ -401,9 +402,7 @@ class RunState(CoreModel):
                 raise ValueError("workspace artifact is missing")
             if any(item not in self.trajectories for item in workspace.active_trajectory_ids):
                 raise ValueError("workspace trajectory is missing")
-            if len(workspace.active_trajectory_ids) != len(
-                set(workspace.active_trajectory_ids)
-            ):
+            if len(workspace.active_trajectory_ids) != len(set(workspace.active_trajectory_ids)):
                 raise ValueError("workspace repeats a trajectory")
             if any(item not in self.observations for item in workspace.consumed_observation_ids):
                 raise ValueError("workspace consumed observation is missing")
@@ -445,7 +444,9 @@ class RunState(CoreModel):
             raise ValueError("run repeats an active move")
         if any(move_id not in self.moves for move_id in self.active_move_ids):
             raise ValueError("active move is missing")
-        if any(self.moves[move_id].status != MoveStatus.RUNNING for move_id in self.active_move_ids):
+        if any(
+            self.moves[move_id].status != MoveStatus.RUNNING for move_id in self.active_move_ids
+        ):
             raise ValueError("active move is not running")
         if len(self.pending_steering_ids) != len(set(self.pending_steering_ids)):
             raise ValueError("run repeats pending steering")
@@ -528,15 +529,10 @@ class MoveApplied(CoreModel):
             raise ValueError("failed move cannot commit semantic progress")
         if not self.success and (
             len(self.next_moves) > 1
-            or (
-                self.next_moves
-                and self.next_moves[0].retry_of_move_id != self.move_id
-            )
+            or (self.next_moves and self.next_moves[0].retry_of_move_id != self.move_id)
         ):
             raise ValueError("failed move may preserve only one exact retry of itself")
-        if self.blocked_reason is not None and (
-            self.finish_claim is not None or self.next_moves
-        ):
+        if self.blocked_reason is not None and (self.finish_claim is not None or self.next_moves):
             raise ValueError("a blocked move cannot also continue or claim completion")
         if self.blocked_reason is not None and not self.blocker_evidence_refs:
             raise ValueError("a blocked move requires durable evidence")
