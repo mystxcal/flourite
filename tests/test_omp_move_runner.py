@@ -252,6 +252,7 @@ class ExploratoryChallengeProvider(FakeOmpProvider):
                         "summary": "A file-level inspection found a material defect",
                         "verdict": "challenges",
                         "artifact_digest": artifact_digest,
+                        "covered_claims": ["A provisional objective criterion"],
                         "evidence_path": "challenge-assay.txt",
                     }
                 ],
@@ -982,6 +983,7 @@ async def test_exploratory_challenge_binds_to_frozen_workspace_without_finish_cl
 
     await kernel.run(max_steps=2)
 
+    assert kernel.state.status == RunStatus.ACTIVE
     assert kernel.state.finish_claim is None
     root = kernel.state.trajectories[kernel.state.root_trajectory_id]
     assert root.artifact_head_id is not None
@@ -990,6 +992,8 @@ async def test_exploratory_challenge_binds_to_frozen_workspace_without_finish_cl
         item for item in kernel.state.observations.values() if item.kind.value == "challenge"
     )
     assert challenge.artifact_digest == artifact.digest
+    assert challenge.claim_id is None
+    assert challenge.covered_claims == []
     assert challenge.metadata["evidence_capture"] == "durable"
     assert not any("-repair-" in item.call_id for item in provider.requests)
 

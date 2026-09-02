@@ -909,6 +909,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
             workspace,
             output,
             challenge_artifacts=challenge_artifacts,
+            allow_claim_coverage=state.finish_claim is not None,
         )
         observations.extend(
             self._artifact_observations(
@@ -1042,6 +1043,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
         output: ModelOutput,
         *,
         challenge_artifacts: Sequence[Any],
+        allow_claim_coverage: bool,
     ) -> list[ObservationDraft]:
         digest_owners = self._artifact_digest_owners(challenge_artifacts)
         target_digests = {item.digest for item in challenge_artifacts}
@@ -1054,6 +1056,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
                 digest_owners=digest_owners,
                 target_digests=target_digests,
                 assay_coverage=assay_coverage,
+                allow_claim_coverage=allow_claim_coverage,
             )
             for item in output.observations
         ]
@@ -1081,6 +1084,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
         digest_owners: dict[str, str],
         target_digests: set[str],
         assay_coverage: str | None,
+        allow_claim_coverage: bool,
     ) -> ObservationDraft:
         raw_ref, evidence_metadata = self._capture_model_evidence(
             move,
@@ -1111,7 +1115,14 @@ new material distinction or proxy trap revealed by direct inspection, not generi
             challenge_verdict=challenge.verdict if challenge is not None else None,
             assay_status=AssayStatus.VALID if challenge is not None else None,
             assay_coverage=assay_coverage if challenge is not None else None,
-            covered_claims=list(challenge.covered_claims) if challenge is not None else [],
+            # Exploratory challenges have no formal claim to cover.  Preserve
+            # their verdict and evidence without promoting model-written labels
+            # into exact finish-claim coverage.
+            covered_claims=(
+                list(challenge.covered_claims)
+                if challenge is not None and allow_claim_coverage
+                else []
+            ),
             material_to_claim=challenge.material_to_claim if challenge is not None else True,
             direct_inspection=challenge is not None,
             metadata=metadata,
