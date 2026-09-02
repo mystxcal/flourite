@@ -559,7 +559,7 @@ class OmpMoveRunner:
         workspace: CallWorkspace,
         usage: ComputeUsage,
     ) -> MoveExecutionResult:
-        """Classify a repeatedly invalid external result without blaming component code."""
+        """Preserve a rejected boundary for intelligent runtime diagnosis."""
 
         return MoveExecutionResult(
             success=False,
@@ -567,7 +567,7 @@ class OmpMoveRunner:
             failure_domain=(
                 FailureDomain.ASSAY
                 if isinstance(error, AssayInvalidError)
-                else FailureDomain.PROVIDER
+                else FailureDomain.COMPONENT
             ),
             usage=usage,
             observations=[self._retained_workspace(workspace, error)],
@@ -600,7 +600,11 @@ class OmpMoveRunner:
         return MoveExecutionResult(
             success=False,
             error=f"{type(error).__name__}: {error}",
-            failure_domain=FailureDomain.PROVIDER,
+            failure_domain=(
+                FailureDomain.COMPONENT
+                if error.failure_kind == "boundary"
+                else FailureDomain.PROVIDER
+            ),
             usage=usage,
             observations=[
                 ObservationDraft(

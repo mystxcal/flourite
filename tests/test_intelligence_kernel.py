@@ -303,7 +303,7 @@ async def test_finish_claim_cannot_ignore_pending_operator_steering(tmp_path: Pa
     await kernel.run(max_steps=1)
 
     assert kernel.state.status == RunStatus.PAUSED
-    assert kernel.state.failure_domain == FailureDomain.PROVIDER
+    assert kernel.state.failure_domain == FailureDomain.COMPONENT
     assert kernel.state.finish_claim is None
 
 
@@ -1083,7 +1083,7 @@ async def test_invalid_external_boundary_becomes_a_preserved_retry_not_a_runtime
     await kernel.run(max_steps=1)
 
     assert kernel.state.status == RunStatus.PAUSED
-    assert kernel.state.failure_domain == FailureDomain.PROVIDER
+    assert kernel.state.failure_domain == FailureDomain.COMPONENT
     failed = [item for item in kernel.state.moves.values() if item.status == MoveStatus.FAILED]
     retries = [item for item in kernel.state.moves.values() if item.status == MoveStatus.PROPOSED]
     assert len(failed) == len(retries) == 1

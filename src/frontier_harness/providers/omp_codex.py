@@ -1340,6 +1340,7 @@ class OmpCodexProvider(ModelProvider):
             trace_summary=state.trace().model_dump(mode="json"),
             boundary_attempts=len(state.records),
             thread_id=state.thread_id,
+            failure_kind="process",
         )
 
     def _raise_schema_failure(
@@ -1364,4 +1365,5 @@ class OmpCodexProvider(ModelProvider):
             trace_summary=state.trace().model_dump(mode="json"),
             boundary_attempts=len(state.records),
             thread_id=state.thread_id,
+            failure_kind="boundary",
         )

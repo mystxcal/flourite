@@ -568,7 +568,10 @@ class IntelligenceKernel:
             boundary_failure = MoveExecutionResult(
                 success=False,
                 error=f"Invalid move boundary: {type(exc).__name__}: {exc}",
-                failure_domain=FailureDomain.PROVIDER,
+                # The provider completed; our component failed to reconcile its
+                # result with the canonical ledger contract.  Keep that defect
+                # inside the hot-swappable component repair boundary.
+                failure_domain=FailureDomain.COMPONENT,
                 usage=result.usage,
                 observations=[
                     ObservationDraft(

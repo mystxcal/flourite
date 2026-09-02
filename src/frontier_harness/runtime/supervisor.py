@@ -53,6 +53,14 @@ class StepSupervisor:
         self.repairer = CodexComponentRepairer(self.run_dir, self.registry, config.runtime)
 
     @staticmethod
+    def _repairable_pause(state: dict[str, Any]) -> bool:
+        return (
+            state.get("status") == "paused"
+            and state.get("pause_kind") == "execution"
+            and state.get("failure_domain") in {"component", "provider", "assay"}
+        )
+
+    @staticmethod
     def _state(run_dir: Path) -> dict[str, Any]:
         try:
             manifest = json.loads(
@@ -94,11 +102,7 @@ class StepSupervisor:
                 while True:
                     state = self._state(self.run_dir)
                     status = str(state.get("status", "active"))
-                    recoverable_pause = (
-                        status == "paused"
-                        and state.get("pause_kind") == "execution"
-                        and state.get("failure_domain") == "component"
-                    )
+                    recoverable_pause = self._repairable_pause(state)
                     pending_resume = status == "paused" and any(
                         command.kind.value == "resume"
                         for command in self.control.commands(pending_only=True)
@@ -204,11 +208,7 @@ class StepSupervisor:
                         ):
                             continue
                         raise FrontierError(detail)
-                    if (
-                        receipt.status == "paused"
-                        and current.get("pause_kind") == "execution"
-                        and current.get("failure_domain") == "component"
-                    ):
+                    if receipt.status == "paused" and self._repairable_pause(current):
                         detail = str(current.get("terminal_reason") or "execution paused")
                         if await self._recover_component(
                             binding,

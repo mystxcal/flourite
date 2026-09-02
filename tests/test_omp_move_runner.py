@@ -880,7 +880,7 @@ async def test_commit_error_is_repaired_in_the_same_live_codex_workspace(
     assert "Exact error:" in repair.prompt
 
 
-async def test_repeated_invalid_external_boundary_is_not_misclassified_as_code_fault(
+async def test_repeated_invalid_external_boundary_enters_component_repair(
     tmp_path: Path,
 ) -> None:
     blobs = BlobStore(tmp_path / "blobs")
@@ -907,7 +907,7 @@ async def test_repeated_invalid_external_boundary_is_not_misclassified_as_code_f
     await kernel.run(max_steps=1)
 
     assert kernel.state.status == RunStatus.PAUSED
-    assert kernel.state.failure_domain == FailureDomain.PROVIDER
+    assert kernel.state.failure_domain == FailureDomain.COMPONENT
 
 
 async def test_ephemeral_challenge_repairs_bad_evidence_path_before_admission(

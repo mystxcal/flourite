@@ -425,6 +425,18 @@ def test_omp_provider_failure_preserves_observed_tool_trace(tmp_path: Path, monk
     assert caught.value.trace_summary["tool_calls"][0]["success"] is True
     assert caught.value.boundary_attempts == 1
     assert caught.value.thread_id == "session-test"
+    assert caught.value.failure_kind == "process"
+
+
+def test_omp_provider_identifies_a_rejected_result_boundary(tmp_path: Path, monkeypatch) -> None:
+    from frontier_harness.errors import ProviderCallError
+
+    monkeypatch.setenv("FAKE_OMP_RETRY_COUNTER", str(tmp_path / "attempts"))
+    with pytest.raises(ProviderCallError) as caught:
+        asyncio.run(_provider(tmp_path, attempts=1).run(_request(tmp_path)))
+
+    assert caught.value.failure_kind == "boundary"
+    assert caught.value.boundary_attempts == 1
 
 
 def test_contained_network_access_adds_only_bounded_web_search(tmp_path: Path) -> None:

@@ -430,7 +430,7 @@ def test_supervisor_recovers_an_execution_pause_after_process_restart(tmp_path: 
     assert repairer.faults and repairer.faults[0].stage == "execution_pause"
 
 
-def test_supervisor_does_not_rewrite_code_for_a_provider_outage(tmp_path: Path) -> None:
+def test_supervisor_sends_a_provider_pause_through_intelligent_triage(tmp_path: Path) -> None:
     config = HarnessConfig(
         run=RunPolicy(run_root=tmp_path / "runs"),
         provider=ProviderConfig(kind="fake"),
@@ -449,6 +449,7 @@ def test_supervisor_does_not_rewrite_code_for_a_provider_outage(tmp_path: Path) 
             failure_domain=FailureDomain.PROVIDER,
         ),
     )
+    ComponentRegistry(run_dir).initialize()
     engine.close()
 
     supervisor = StepSupervisor(run_dir)
@@ -459,6 +460,22 @@ def test_supervisor_does_not_rewrite_code_for_a_provider_outage(tmp_path: Path) 
     finally:
         supervisor.close()
 
-    assert state["status"] == "paused"
-    assert state["failure_domain"] == "provider"
-    assert repairer.faults == []
+    assert state["status"] == "satisfied"
+    assert repairer.faults and repairer.faults[0].stage == "execution_pause"
+
+
+def test_only_execution_failures_enter_intelligent_repair() -> None:
+    assert StepSupervisor._repairable_pause(
+        {
+            "status": "paused",
+            "pause_kind": "execution",
+            "failure_domain": "assay",
+        }
+    )
+    assert not StepSupervisor._repairable_pause(
+        {
+            "status": "paused",
+            "pause_kind": "operator",
+            "failure_domain": "component",
+        }
+    )

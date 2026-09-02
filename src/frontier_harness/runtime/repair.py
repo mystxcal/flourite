@@ -70,12 +70,15 @@ class CodexComponentRepairer:
             for item in history
             if item.get("fingerprint") == fault.fingerprint
         ]
-        applied = [item for item in same_boundary if item.get("outcome") == "applied"]
-        if len(applied) >= self.policy.repair_no_progress_limit:
+        if any(
+            item.get("outcome") == "retry_unchanged"
+            and item.get("failed_digest") == binding.digest
+            for item in same_boundary
+        ):
             self._record(
                 fault,
                 outcome="stopped_no_progress",
-                detail="distinct repairs reproduced the same fault at the same journal head",
+                detail="the exact activity was replayed once against unchanged code",
             )
             return False
 
@@ -93,7 +96,9 @@ class CodexComponentRepairer:
                     "protocol": "flourite-component-repair/v1",
                     "fault": asdict(fault),
                     "fingerprint": fault.fingerprint,
+                    "run_dir": str(self.run_dir),
                     "run_state": self._state_excerpt(),
+                    "evidence": self._evidence_map(fault),
                 },
                 indent=2,
                 sort_keys=True,
@@ -190,6 +195,18 @@ class CodexComponentRepairer:
             for key in ("run_id", "status", "pause_kind", "terminal_reason", "last_event_seq")
         }
 
+    def _evidence_map(self, fault: ComponentFault) -> dict[str, Any]:
+        return {
+            "state": str(self.run_dir / "state.json"),
+            "ledger": str(self.run_dir / "ledger.sqlite3"),
+            "components": str(self.run_dir / "components.json"),
+            "component_receipts": str(self.run_dir / "component-receipts.jsonl"),
+            "repair_receipts": str(self.receipts),
+            "provider_sessions": str(self.run_dir / "provider-sessions"),
+            "kernel_execution": str(self.run_dir / "kernel-executions" / fault.activity_key),
+            "workspace_root": str(self.run_dir / "software" / "worktrees"),
+        }
+
     def _history(self) -> list[dict[str, Any]]:
         try:
             lines = self.receipts.read_text(encoding="utf-8").splitlines()
@@ -240,9 +257,12 @@ class CodexComponentRepairer:
         return f"""You are Flourite's infrastructure repairer, not a task-solving agent.
 
 Read `{attempt_dir / 'fault.json'}` and inspect the `frontier_harness` package in this
-workspace. Find the general implementation defect that explains the exact fault. Fix the
-causing layer only. Do not hardcode the current task, run id, path, artifact, or error text.
-Do not alter any durable run data. Preserve public interfaces and semantic behavior.
+workspace. The fault contains a read-only map to the actual durable run, provider traces,
+receipts, and failed activity. Use those freely to reconstruct what happened; do not rely on
+the controller's summary or match an error template. Find the general implementation defect
+that explains the exact fault. Fix the causing layer only. Do not hardcode the current task,
+run id, path, artifact, or error text. Do not alter any durable run data. Preserve public
+interfaces and semantic behavior.
 
 Work directly and quickly. Run cheap compile/import or focused checks that discriminate your
 hypothesis. The stable supervisor will make the final decision by atomically binding your

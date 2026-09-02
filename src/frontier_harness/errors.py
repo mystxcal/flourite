@@ -9,7 +9,7 @@ engine.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .models import Usage
 
@@ -45,6 +45,7 @@ class ProviderCallError(ProviderError):
         trace_summary: dict[str, Any] | None = None,
         boundary_attempts: int = 1,
         thread_id: str | None = None,
+        failure_kind: Literal["boundary", "process", "transport", "unknown"] = "unknown",
     ) -> None:
         super().__init__(message)
         self.usage = usage or Usage(calls=1)
@@ -54,6 +55,7 @@ class ProviderCallError(ProviderError):
         self.trace_summary = trace_summary or {}
         self.boundary_attempts = max(1, boundary_attempts)
         self.thread_id = thread_id
+        self.failure_kind = failure_kind
 
 
 class LedgerIntegrityError(FrontierError):
