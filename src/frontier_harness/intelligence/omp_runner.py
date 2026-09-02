@@ -981,7 +981,11 @@ new material distinction or proxy trap revealed by direct inspection, not generi
             reason = output.assay.reason or "the evaluator could not inspect the exact target"
             raise AssayInvalidError(f"{reason}; missing: {missing}")
         artifact, candidate = self._capture_artifact(move, workspace, parent, output)
-        challenge_artifacts = self._challenge_artifacts(state, move)
+        # Bind Challenger observations to the exact heads materialized in its
+        # frozen capsule.  Recomputing this set from the base workspace drops
+        # trajectory-head overlays, so a valid branch digest shown in
+        # context/index.json can otherwise be rejected at admission time.
+        challenge_artifacts = list(context.artifact_heads)
         observations = self._model_observations(
             move,
             workspace,
@@ -1095,24 +1099,6 @@ new material distinction or proxy trap revealed by direct inspection, not generi
             and [item.digest for item in candidate.deliverables]
             == [item.digest for item in parent.deliverables]
         )
-
-    @staticmethod
-    def _challenge_artifacts(state: RunState, move: Move) -> list[Any]:
-        """Return the exact artifact heads visible to a Challenger.
-
-        A Challenger can be requested either by the kernel for a formal finish
-        claim or explicitly by the Lead while the work is still evolving.  In
-        the latter case there is deliberately no finish claim yet; the move's
-        frozen workspace is the authority.  Treating "no claim" as "no
-        artifact" made valid exploratory challenges impossible to commit.
-        """
-
-        if state.finish_claim is not None:
-            artifact_ids = state.finish_claim.artifact_head_ids
-        else:
-            workspace = state.workspaces.get(move.based_on_workspace_id or "")
-            artifact_ids = workspace.artifact_head_ids if workspace is not None else []
-        return [state.artifacts[item] for item in artifact_ids if item in state.artifacts]
 
     def _model_observations(
         self,

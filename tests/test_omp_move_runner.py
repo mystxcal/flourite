@@ -315,6 +315,79 @@ class ExploratoryChallengeProvider(FakeOmpProvider):
         )
 
 
+class BranchExploratoryChallengeProvider(FakeOmpProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.root_thread_id: str | None = None
+
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        self.requests.append(request)
+        output = request.cwd / ".sfh_output"
+        output.mkdir(parents=True, exist_ok=True)
+        if request.call_kind == "challenge":
+            index = json.loads(
+                (request.cwd / ".sfh_context" / "index.json").read_text(encoding="utf-8")
+            )
+            branch = index["artifact_heads"][-1]
+            value = {
+                "assay": {"status": "valid", "coverage": "whole branch artifact"},
+                "observations": [
+                    {
+                        "kind": "challenge",
+                        "summary": "Direct inspection found a branch-specific defect",
+                        "verdict": "challenges",
+                        "artifact_digest": branch["digest"],
+                        "evidence_path": branch["local_path"],
+                    }
+                ],
+            }
+            thread_id = None
+        else:
+            assert request.expected_artifact_path is not None
+            if self.root_thread_id is None:
+                request.expected_artifact_path.write_text("# Root artifact\n", encoding="utf-8")
+                (output / "workspace.md").write_text("# Root workspace\n", encoding="utf-8")
+                value = {
+                    "artifact_changed": True,
+                    "workspace_summary": "Root artifact with an active branch",
+                    "decision_boundary": "Whether the branch survives direct inspection",
+                    "observations": [],
+                    "branches": [
+                        {
+                            "mode": "lead",
+                            "intent": "Develop and inspect the branch",
+                            "fork_purpose": "Test a distinct branch artifact",
+                        }
+                    ],
+                }
+                thread_id = "root-thread"
+                self.root_thread_id = thread_id
+            else:
+                request.expected_artifact_path.write_text(
+                    "# Distinct branch artifact\n", encoding="utf-8"
+                )
+                (output / "workspace.md").write_text("# Branch workspace\n", encoding="utf-8")
+                value = {
+                    "artifact_changed": True,
+                    "workspace_summary": "Branch artifact awaiting inspection",
+                    "decision_boundary": "Whether the branch survives direct inspection",
+                    "observations": [],
+                    "next_move": {
+                        "mode": "challenge",
+                        "intent": "Inspect the exact branch artifact",
+                    },
+                }
+                thread_id = "branch-thread"
+        return ProviderCallResult(
+            call_id=request.call_id,
+            response=request.response_model.model_validate(value),
+            usage=Usage(calls=1, model_requests=1, input_tokens=10, output_tokens=5),
+            duration_seconds=0.01,
+            thread_id=thread_id,
+            trace_summary=ProviderTraceSummary(model_turns=1),
+        )
+
+
 class VanishingSessionProvider(FakeOmpProvider):
     def __init__(self) -> None:
         super().__init__()
@@ -1042,6 +1115,49 @@ async def test_exploratory_challenge_binds_to_frozen_workspace_without_finish_cl
     assert challenge.claim_id is None
     assert challenge.covered_claims == []
     assert challenge.metadata["evidence_capture"] == "durable"
+    assert not any("-repair-" in item.call_id for item in provider.requests)
+
+
+async def test_branch_challenge_accepts_head_materialized_by_trajectory_overlay(
+    tmp_path: Path,
+) -> None:
+    blobs = BlobStore(tmp_path / "blobs")
+    provider = BranchExploratoryChallengeProvider()
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_branch_challenge"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=OmpMoveRunner(
+            provider=provider,  # type: ignore[arg-type]
+            adapter=MarkdownAdapter(
+                profile=get_profile("generic"),
+                run_dir=tmp_path,
+                blobs=blobs,
+                workspace=None,
+            ),
+            run_dir=tmp_path,
+        ),
+    )
+    kernel.start("Build a root artifact and independently inspect a branch.")
+
+    await kernel.run(max_steps=3)
+
+    branch = next(
+        item
+        for item in kernel.state.trajectories.values()
+        if item.parent_trajectory_id is not None
+    )
+    assert branch.artifact_head_id is not None
+    branch_artifact = kernel.state.artifacts[branch.artifact_head_id]
+    challenge = next(
+        item
+        for item in kernel.state.observations.values()
+        if item.challenge_verdict is not None
+    )
+    assert challenge.artifact_digest == branch_artifact.digest
+    assert challenge.assay_status == AssayStatus.VALID
     assert not any("-repair-" in item.call_id for item in provider.requests)
 
 
