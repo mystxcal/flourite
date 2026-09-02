@@ -22,7 +22,12 @@ from frontier_harness.core.types import (
     RunStatus,
 )
 from frontier_harness.errors import ProviderCallError
-from frontier_harness.intelligence.omp_runner import LeadModelOutput, OmpMoveRunner
+from frontier_harness.intelligence.omp_runner import (
+    ChallengeModelOutput,
+    LeadModelOutput,
+    NavigatorModelOutput,
+    OmpMoveRunner,
+)
 from frontier_harness.ledger import EventLedger
 from frontier_harness.models import Usage
 from frontier_harness.providers.base import (
@@ -104,15 +109,21 @@ class FakeOmpProvider:
 
 
 def test_model_visible_schema_matches_mutually_exclusive_outcome_boundary() -> None:
-    schema = LeadModelOutput.model_json_schema()
+    lead_schema = LeadModelOutput.model_json_schema()
 
-    assert [item["title"] for item in schema["oneOf"]] == [
+    assert [item["title"] for item in lead_schema["oneOf"]] == [
         "Continuation",
         "Finish",
         "Blocker",
         "No outcome",
     ]
-    blocker = schema["oneOf"][2]
+    assert [
+        item["title"] for item in NavigatorModelOutput.model_json_schema()["oneOf"]
+    ] == ["Continuation", "Blocker", "No outcome"]
+    assert [
+        item["title"] for item in ChallengeModelOutput.model_json_schema()["oneOf"]
+    ] == ["No outcome"]
+    blocker = lead_schema["oneOf"][2]
     assert blocker["properties"]["next_move"] == {"type": "null"}
     assert blocker["properties"]["branches"] == {"maxItems": 0}
     assert blocker["properties"]["finish"] == {"type": "null"}

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 
 from pydantic import Field, GetJsonSchemaHandler, model_validator
 from pydantic.json_schema import JsonSchemaValue
@@ -108,6 +108,13 @@ class ModelBlocker(CoreModel):
 
 
 class ModelOutputBase(CoreModel):
+    model_visible_outcomes: ClassVar[tuple[str, ...]] = (
+        "Continuation",
+        "Finish",
+        "Blocker",
+        "No outcome",
+    )
+
     artifact_changed: bool = False
     observations: Sequence[ModelObservation] = Field(default_factory=list)
     next_move: ModelNextMove | None = None
@@ -123,7 +130,7 @@ class ModelOutputBase(CoreModel):
     ) -> JsonSchemaValue:
         schema = super().__get_pydantic_json_schema__(core_schema, handler)
         schema = handler.resolve_ref_schema(schema)
-        schema["oneOf"] = [
+        alternatives: list[JsonSchemaValue] = [
             {
                 "title": "Continuation",
                 "anyOf": [
@@ -171,6 +178,9 @@ class ModelOutputBase(CoreModel):
                 },
             },
         ]
+        schema["oneOf"] = [
+            item for item in alternatives if item["title"] in cls.model_visible_outcomes
+        ]
         return schema
 
     @model_validator(mode="after")
@@ -201,11 +211,15 @@ class LeadModelOutput(ModelOutputBase):
 
 
 class NavigatorModelOutput(ModelOutputBase):
+    model_visible_outcomes = ("Continuation", "Blocker", "No outcome")
+
     observations: Sequence[ModelObservation] = Field(min_length=1)
     finish: None = None
 
 
 class ChallengeModelOutput(ModelOutputBase):
+    model_visible_outcomes = ("No outcome",)
+
     assay: ModelAssayReceipt
     observations: Sequence[ModelChallengeObservation] = Field(default_factory=list)
     quality_delta: Sequence[str] = Field(default_factory=list)
