@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic import Field, model_validator
 
@@ -135,3 +135,29 @@ class MoveRunner(Protocol):
         context: ContextFrame,
         recovering: bool,
     ) -> MoveExecutionResult: ...
+
+
+class AdmissionRejection(CoreModel):
+    """Lossless feedback from the authoritative ledger admission boundary."""
+
+    error_type: str
+    error: str
+    candidate_digest: str
+    attempt: int
+
+
+@runtime_checkable
+class SemanticRepairRunner(Protocol):
+    """A runner that keeps candidate ownership until semantic admission."""
+
+    async def repair_rejected_result(
+        self,
+        *,
+        move: Move,
+        state: RunState,
+        context: ContextFrame,
+        rejected: MoveExecutionResult,
+        rejection: AdmissionRejection,
+    ) -> MoveExecutionResult: ...
+
+    def accept_result(self, move_id: str, result: MoveExecutionResult) -> None: ...

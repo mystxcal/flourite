@@ -18,10 +18,14 @@ from frontier_harness.core.types import (
     AssayStatus,
     ComputeEnvelope,
     FailureDomain,
+    Observation,
+    ObservationKind,
     RunResumed,
     RunStatus,
+    SteeringReceived,
 )
 from frontier_harness.errors import ProviderCallError
+from frontier_harness.intelligence.contracts import MoveExecutionResult
 from frontier_harness.intelligence.omp_runner import (
     ChallengeModelOutput,
     LeadModelOutput,
@@ -170,6 +174,25 @@ class CommitRepairProvider(FakeOmpProvider):
                 update={"response": request.response_model.model_validate(value)}
             )
         return result
+
+
+class SemanticAdmissionRepairProvider(FakeOmpProvider):
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        result = await super().run(request)
+        if request.call_kind != "lead" or "-admission-" not in request.call_id:
+            return result
+        observations = json.loads(
+            (request.cwd / ".sfh_context" / "observations.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        steering = next(item for item in observations if item["kind"] == "steering")
+        value = result.response.model_dump(mode="python")
+        value["consumed_observation_ids"] = [steering["observation_id"]]
+        value["workspace_summary"] = "Complete candidate with operator steering integrated"
+        return result.model_copy(
+            update={"response": request.response_model.model_validate(value)}
+        )
 
 
 class UnrepairableBoundaryProvider(FakeOmpProvider):
@@ -735,8 +758,64 @@ async def test_omp_runner_connects_transport_adapter_and_kernel(tmp_path: Path) 
         "challenge",
     ]
     assert provider.requests[0].preserve_session is True
-    assert provider.requests[1].preserve_session is False
+    assert provider.requests[1].preserve_session is True
     assert (tmp_path / "provider-sessions.json").is_file()
+
+
+async def test_authoritative_rejection_returns_to_same_activity_without_losing_work(
+    tmp_path: Path,
+) -> None:
+    blobs = BlobStore(tmp_path / "blobs")
+    provider = SemanticAdmissionRepairProvider()
+    runner = OmpMoveRunner(
+        provider=provider,  # type: ignore[arg-type]
+        adapter=MarkdownAdapter(
+            profile=get_profile("generic"),
+            run_dir=tmp_path,
+            blobs=blobs,
+            workspace=None,
+        ),
+        run_dir=tmp_path,
+    )
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_semantic_handshake"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=runner,
+    )
+    kernel.start("Create an excellent artifact and integrate operator steering.")
+    steering_ref = blobs.put_text(
+        "Keep the final artifact concise.",
+        media_type="text/plain; charset=utf-8",
+        original_name="steering.txt",
+    )
+    kernel.journal.append(
+        "steering.received",
+        SteeringReceived(
+            observation=Observation(
+                observation_id="obs_operator_constraint",
+                kind=ObservationKind.STEERING,
+                summary="Keep the final artifact concise.",
+                source="operator",
+                raw_ref=steering_ref,
+                created_at="2026-09-02T00:00:00Z",
+            )
+        ),
+    )
+
+    await kernel.run()
+
+    assert kernel.state.status == RunStatus.SATISFIED
+    repairs = [item for item in provider.requests if "-admission-" in item.call_id]
+    assert len(repairs) == 1
+    assert repairs[0].resume_thread_id == "thread-lead"
+    assert "finish claim ignores pending objective steering" in repairs[0].prompt
+    assert kernel.state.pending_steering_ids == []
+    execution = next((tmp_path / "kernel-executions").iterdir())
+    assert (execution / "committed-result.json").is_file()
+    assert not (execution / "candidate-result.json").exists()
 
 
 async def test_new_evidence_can_repeat_a_semantic_challenge_without_spinning(
@@ -981,6 +1060,13 @@ async def test_repeated_invalid_external_boundary_enters_component_repair(
 
     assert kernel.state.status == RunStatus.PAUSED
     assert kernel.state.failure_domain == FailureDomain.COMPONENT
+    execution = next((tmp_path / "kernel-executions").iterdir())
+    committed = MoveExecutionResult.model_validate_json(
+        (execution / "committed-result.json").read_text(encoding="utf-8")
+    )
+    assert committed.success is False
+    assert "escapes the call workspace" in (committed.error or "")
+    assert not (execution / "candidate-result.json").exists()
 
 
 async def test_ephemeral_challenge_repairs_bad_evidence_path_before_admission(

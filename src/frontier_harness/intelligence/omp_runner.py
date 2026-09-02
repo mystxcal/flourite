@@ -36,6 +36,7 @@ from ..runtime.sources import StagedInput
 from ..util import atomic_write_text, sha256_text, utc_now
 from .context import ContextFrame
 from .contracts import (
+    AdmissionRejection,
     ArtifactDraft,
     BlockerDraft,
     FinishDraft,
@@ -259,6 +260,8 @@ class OmpMoveRunner:
         self.activity_callback = activity_callback
         self.executions_dir = run_dir / "kernel-executions"
         self.sessions_path = run_dir / "provider-sessions.json"
+        self._pending_workspaces: dict[str, CallWorkspace] = {}
+        self._pending_modes: dict[str, MoveMode] = {}
         self.executions_dir.mkdir(parents=True, exist_ok=True)
 
     async def preflight(self) -> str | None:
@@ -269,10 +272,22 @@ class OmpMoveRunner:
             return None
         return "; ".join(result.details) or "provider preflight failed"
 
-    def discard_cached_result(self, move_id: str) -> None:
-        """Drop a boundary object rejected by the authoritative compiler."""
+    def accept_result(self, move_id: str, result: MoveExecutionResult) -> None:
+        """Commit an admitted candidate and release only its disposable capsule."""
 
-        (self.executions_dir / move_id / "committed-result.json").unlink(missing_ok=True)
+        execution_dir = self.executions_dir / move_id
+        candidate = execution_dir / "candidate-result.json"
+        committed = execution_dir / "committed-result.json"
+        atomic_write_text(committed, result.model_dump_json(indent=2))
+        candidate.unlink(missing_ok=True)
+        workspace = self._pending_workspaces.pop(move_id, None)
+        mode = self._pending_modes.pop(move_id, None)
+        if workspace is not None and mode not in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
+            self.adapter.close_call(workspace)
+        if mode not in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
+            sessions = self._sessions()
+            if sessions.pop(self._move_session_key(move_id), None) is not None:
+                self._write_sessions(sessions)
 
     async def run(
         self,
@@ -283,9 +298,16 @@ class OmpMoveRunner:
         recovering: bool,
     ) -> MoveExecutionResult:
         execution_dir = self.executions_dir / move.move_id
-        cache_path = execution_dir / "committed-result.json"
-        if cache_path.is_file():
-            return MoveExecutionResult.model_validate_json(cache_path.read_text(encoding="utf-8"))
+        committed_path = execution_dir / "committed-result.json"
+        candidate_path = execution_dir / "candidate-result.json"
+        if committed_path.is_file():
+            return MoveExecutionResult.model_validate_json(
+                committed_path.read_text(encoding="utf-8")
+            )
+        if candidate_path.is_file():
+            return MoveExecutionResult.model_validate_json(
+                candidate_path.read_text(encoding="utf-8")
+            )
         execution_dir.mkdir(parents=True, exist_ok=True)
 
         parent = self._current_artifact(state, move)
@@ -304,7 +326,8 @@ class OmpMoveRunner:
             runtime_dir = execution_dir / "provider"
             runtime_dir.mkdir(parents=True, exist_ok=True)
             sessions = self._sessions()
-            thread_id = sessions.get(move.trajectory_id) if move.mode == MoveMode.LEAD else None
+            session_key = self._session_key(move)
+            thread_id = sessions.get(session_key)
             request = ProviderCallRequest(
                 call_id=move.move_id,
                 call_kind=move.mode.value,
@@ -322,7 +345,9 @@ class OmpMoveRunner:
                 network_access=self.provider.config.default_network_access,
                 expected_artifact_path=workspace.expected_artifact_path,
                 resume_thread_id=thread_id,
-                preserve_session=move.mode == MoveMode.LEAD,
+                # Every activity keeps a session until its semantic result is
+                # admitted. Only Lead continuity survives beyond that activity.
+                preserve_session=True,
                 lead_call=move.mode == MoveMode.LEAD,
                 max_provider_calls=self.provider.config.schema_attempts,
                 metadata={
@@ -353,16 +378,16 @@ class OmpMoveRunner:
                         )
                         retain_workspace = True
                         failed.observations.append(self._retained_workspace(workspace, retry_exc))
-                        atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                        atomic_write_text(candidate_path, failed.model_dump_json(indent=2))
                         return failed
                 else:
                     failed = self._provider_failure(exc, usage=failed_resume_usage)
                     retain_workspace = True
                     failed.observations.append(self._retained_workspace(workspace, exc))
-                    atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                    atomic_write_text(candidate_path, failed.model_dump_json(indent=2))
                     return failed
-            if move.mode == MoveMode.LEAD and provider_result.thread_id:
-                sessions[move.trajectory_id] = provider_result.thread_id
+            if provider_result.thread_id:
+                sessions[session_key] = provider_result.thread_id
                 self._write_sessions(sessions)
             usage = failed_resume_usage
             previous_commit_error: str | None = None
@@ -385,12 +410,12 @@ class OmpMoveRunner:
                     if commit_error == previous_commit_error:
                         retain_workspace = True
                         failed = self._boundary_failure(exc, workspace, usage)
-                        atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                        atomic_write_text(candidate_path, failed.model_dump_json(indent=2))
                         return failed
                     if state.usage.plus(usage).exhausted(state.objective.envelope):
                         retain_workspace = True
                         failed = self._boundary_failure(exc, workspace, usage)
-                        atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                        atomic_write_text(candidate_path, failed.model_dump_json(indent=2))
                         return failed
                     previous_commit_error = commit_error
                     repair += 1
@@ -406,15 +431,7 @@ class OmpMoveRunner:
                         "and return the corrected typed result.\n\n"
                         f"Exact error: {commit_error}"
                     )
-                    # OMP may report an ephemeral thread id even for --no-session
-                    # calls.  Such ids cannot be resumed.  A fresh Challenger or
-                    # Navigator repair gets the full durable prompt again; only a
-                    # deliberately persistent Lead session receives a delta prompt.
-                    repair_thread = (
-                        provider_result.thread_id or sessions.get(move.trajectory_id)
-                        if request.preserve_session
-                        else None
-                    )
+                    repair_thread = provider_result.thread_id or sessions.get(session_key)
                     repair_request = request.model_copy(
                         update={
                             "call_id": f"{move.move_id}-repair-{repair}",
@@ -452,7 +469,9 @@ class OmpMoveRunner:
                                 failed.observations.append(
                                     self._retained_workspace(workspace, reconstructed_error)
                                 )
-                                atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                                atomic_write_text(
+                                    candidate_path, failed.model_dump_json(indent=2)
+                                )
                                 return failed
                         else:
                             failed = self._provider_failure(
@@ -463,10 +482,10 @@ class OmpMoveRunner:
                             failed.observations.append(
                                 self._retained_workspace(workspace, repair_error)
                             )
-                            atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+                            atomic_write_text(candidate_path, failed.model_dump_json(indent=2))
                             return failed
-                    if move.mode == MoveMode.LEAD and provider_result.thread_id:
-                        sessions[move.trajectory_id] = provider_result.thread_id
+                    if provider_result.thread_id:
+                        sessions[session_key] = provider_result.thread_id
                         self._write_sessions(sessions)
             if reconstructed_session:
                 result.observations.append(
@@ -481,18 +500,174 @@ class OmpMoveRunner:
                     )
                 )
             atomic_write_text(
-                cache_path,
+                candidate_path,
                 result.model_dump_json(indent=2),
             )
+            retain_workspace = True
+            self._pending_workspaces[move.move_id] = workspace
+            self._pending_modes[move.move_id] = move.mode
             return result
         except Exception as exc:
             retain_workspace = True
             failed = self._runtime_failure(exc, workspace, usage)
-            atomic_write_text(cache_path, failed.model_dump_json(indent=2))
+            atomic_write_text(candidate_path, failed.model_dump_json(indent=2))
             return failed
         finally:
             if not retain_workspace:
                 self.adapter.close_call(workspace)
+
+    async def repair_rejected_result(
+        self,
+        *,
+        move: Move,
+        state: RunState,
+        context: ContextFrame,
+        rejected: MoveExecutionResult,
+        rejection: AdmissionRejection,
+    ) -> MoveExecutionResult:
+        """Return authoritative rejection to the same activity and capsule."""
+
+        execution_dir = self.executions_dir / move.move_id
+        runtime_dir = execution_dir / "provider"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        candidate_path = execution_dir / "candidate-result.json"
+        parent = self._current_artifact(state, move)
+        workspace = self._pending_workspaces.get(move.move_id)
+        if workspace is None:
+            workspace = self.adapter.open_call(
+                call_id=self._workspace_key(move),
+                call_kind=move.mode.value,
+                current_artifact=parent,
+            )
+        self._pending_workspaces[move.move_id] = workspace
+        self._pending_modes[move.move_id] = move.mode
+        self._write_context(workspace, context)
+        if move.mode == MoveMode.CHALLENGE:
+            self._preflight_assay(workspace)
+        rejection_path = workspace.context_dir / "admission-rejection.json"
+        atomic_write_text(rejection_path, rejection.model_dump_json(indent=2))
+
+        sessions = self._sessions()
+        session_key = self._session_key(move)
+        thread_id = sessions.get(session_key)
+        repair_note = f"""The authoritative semantic admission boundary rejected your candidate.
+The candidate and all workspace work remain intact. Do not restart the task or merely explain
+the mismatch. Read `.sfh_context/admission-rejection.json` and the authoritative
+`.sfh_context/index.json`, inspect the live files when needed, correct only the rejected
+handoff or underlying work, and return the corrected typed result.
+
+Exact rejection: {rejection.error_type}: {rejection.error}
+Rejected candidate digest: {rejection.candidate_digest}
+"""
+        base_prompt = self._prompt(move, workspace, context)
+        request = ProviderCallRequest(
+            call_id=f"{move.move_id}-admission-{rejection.attempt}",
+            call_kind=move.mode.value,
+            role=Role.STRONG,
+            prompt=repair_note if thread_id else f"{base_prompt}\n\n{repair_note}",
+            cwd=workspace.cwd,
+            response_model=self._output_type(move.mode),
+            output_path=runtime_dir / f"response-admission-{rejection.attempt}.json",
+            schema_path=runtime_dir / "response.schema.json",
+            sandbox=(
+                SandboxPolicy.WORKSPACE_WRITE
+                if move.mode in {MoveMode.LEAD, MoveMode.ENVIRONMENT}
+                else SandboxPolicy.READ_ONLY
+            ),
+            network_access=self.provider.config.default_network_access,
+            expected_artifact_path=workspace.expected_artifact_path,
+            resume_thread_id=thread_id,
+            preserve_session=True,
+            lead_call=move.mode == MoveMode.LEAD,
+            max_provider_calls=self.provider.config.schema_attempts,
+            metadata={
+                "provider_session_dir": self.run_dir / "provider-sessions",
+                "semantic_admission_repair": True,
+            },
+            activity_callback=self.activity_callback,
+        )
+        usage = rejected.usage
+        previous_error: str | None = None
+        correction = 0
+        while True:
+            try:
+                provider_result = await self.provider.run(request)
+            except ProviderCallError as provider_error:
+                if request.resume_thread_id and self.provider.config.resume_fallback_to_reconstruction:
+                    request = request.model_copy(
+                        update={
+                            "prompt": f"{base_prompt}\n\n{repair_note}",
+                            "resume_thread_id": None,
+                        }
+                    )
+                    try:
+                        provider_result = await self.provider.run(request)
+                    except ProviderCallError as fallback_error:
+                        usage = usage.plus(self._failed_usage(provider_error)).plus(
+                            self._failed_usage(fallback_error)
+                        )
+                        failed = self._provider_failure(fallback_error, usage=usage)
+                        failed.observations.append(
+                            self._retained_workspace(workspace, fallback_error)
+                        )
+                        atomic_write_text(candidate_path, failed.model_dump_json(indent=2))
+                        return failed
+                else:
+                    usage = usage.plus(self._failed_usage(provider_error))
+                    failed = self._provider_failure(provider_error, usage=usage)
+                    failed.observations.append(
+                        self._retained_workspace(workspace, provider_error)
+                    )
+                    atomic_write_text(candidate_path, failed.model_dump_json(indent=2))
+                    return failed
+            usage = usage.plus(self._provider_usage(provider_result))
+            if provider_result.thread_id:
+                sessions[session_key] = provider_result.thread_id
+                self._write_sessions(sessions)
+            try:
+                result = self._convert(
+                    move=move,
+                    state=state,
+                    context=context,
+                    workspace=workspace,
+                    parent=parent,
+                    output=provider_result.response,
+                    usage=usage,
+                )
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                if error == previous_error or state.usage.plus(usage).exhausted(
+                    state.objective.envelope
+                ):
+                    failed = self._boundary_failure(exc, workspace, usage)
+                    atomic_write_text(candidate_path, failed.model_dump_json(indent=2))
+                    return failed
+                previous_error = error
+                correction += 1
+                if isinstance(exc, AssayInvalidError):
+                    self._write_context(workspace, context)
+                    self._preflight_assay(workspace)
+                followup = (
+                    "Your correction still could not be admitted. Preserve all work and correct "
+                    f"the exact remaining mismatch. Exact error: {error}"
+                )
+                repair_thread = provider_result.thread_id or sessions.get(session_key)
+                request = request.model_copy(
+                    update={
+                        "call_id": (
+                            f"{move.move_id}-admission-{rejection.attempt}-repair-{correction}"
+                        ),
+                        "prompt": followup if repair_thread else f"{base_prompt}\n\n{followup}",
+                        "resume_thread_id": repair_thread,
+                        "output_path": runtime_dir
+                        / (
+                            f"response-admission-{rejection.attempt}-repair-{correction}.json"
+                        ),
+                    }
+                )
+                continue
+            atomic_write_text(candidate_path, result.model_dump_json(indent=2))
+            return result
 
     @staticmethod
     def _workspace_key(move: Move) -> str:
@@ -508,6 +683,16 @@ class OmpMoveRunner:
         if move.mode in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
             return f"trajectory_{move.trajectory_id}"
         return move.move_id
+
+    @staticmethod
+    def _move_session_key(move_id: str) -> str:
+        return f"move:{move_id}"
+
+    @classmethod
+    def _session_key(cls, move: Move) -> str:
+        if move.mode in {MoveMode.LEAD, MoveMode.ENVIRONMENT}:
+            return move.trajectory_id
+        return cls._move_session_key(move.move_id)
 
     @staticmethod
     def _provider_usage(result: ProviderCallResult[Any]) -> ComputeUsage:

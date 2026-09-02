@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Sequence
+from typing import cast
 
 from ..blobs import BlobStore
 from ..errors import LedgerIntegrityError
@@ -12,10 +13,12 @@ from ..ids import new_id
 from ..intelligence.compiler import MoveResultCompiler
 from ..intelligence.context import ContextAssembler
 from ..intelligence.contracts import (
+    AdmissionRejection,
     MoveDirective,
     MoveExecutionResult,
     MoveRunner,
     ObservationDraft,
+    SemanticRepairRunner,
 )
 from ..util import canonical_json, sha256_text, utc_now
 from .journal import KernelJournal
@@ -553,42 +556,106 @@ class IntelligenceKernel:
                 }
             )
         visible_observation_ids = {item.observation_id for item in frame.observations}
-        try:
-            self._commit_result(
-                move,
-                result,
-                visible_observation_ids=visible_observation_ids,
-            )
-        except (LedgerIntegrityError, ValueError) as exc:
-            if self.state.moves[move.move_id].status != MoveStatus.RUNNING:
-                raise
-            discard = getattr(self.runner, "discard_cached_result", None)
-            if callable(discard):
-                discard(move.move_id)
-            boundary_failure = MoveExecutionResult(
-                success=False,
-                error=f"Invalid move boundary: {type(exc).__name__}: {exc}",
-                # The provider completed; our component failed to reconcile its
-                # result with the canonical ledger contract.  Keep that defect
-                # inside the hot-swappable component repair boundary.
-                failure_domain=FailureDomain.COMPONENT,
-                usage=result.usage,
-                observations=[
-                    ObservationDraft(
-                        kind=ObservationKind.ERROR,
-                        summary=(
-                            "The external move result violated the canonical commit contract: "
-                            f"{exc}"
-                        ),
-                        source="kernel",
+        rejected_signatures: set[str] = set()
+        rejection_attempt = 0
+        while True:
+            try:
+                self._commit_result(
+                    move,
+                    result,
+                    visible_observation_ids=visible_observation_ids,
+                )
+            except (LedgerIntegrityError, ValueError) as exc:
+                if self.state.moves[move.move_id].status != MoveStatus.RUNNING:
+                    raise
+                rejection_attempt += 1
+                candidate_digest = sha256_text(canonical_json(result.model_dump(mode="json")))
+                signature = sha256_text(
+                    canonical_json(
+                        {
+                            "candidate": candidate_digest,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        }
                     )
-                ],
-            )
-            self._commit_result(
-                move,
-                boundary_failure,
-                visible_observation_ids=visible_observation_ids,
-            )
+                )
+                repairable = (
+                    isinstance(self.runner, SemanticRepairRunner)
+                    and signature not in rejected_signatures
+                    and not self.state.usage.plus(result.usage).exhausted(
+                        self.state.objective.envelope
+                    )
+                )
+                if repairable:
+                    rejected_signatures.add(signature)
+                    repair_runner = cast(SemanticRepairRunner, self.runner)
+                    try:
+                        result = await repair_runner.repair_rejected_result(
+                            move=move,
+                            state=self.state,
+                            context=frame,
+                            rejected=result,
+                            rejection=AdmissionRejection(
+                                error_type=type(exc).__name__,
+                                error=str(exc),
+                                candidate_digest=candidate_digest,
+                                attempt=rejection_attempt,
+                            ),
+                        )
+                    except Exception as repair_error:
+                        result = self._admission_failure(
+                            result,
+                            "semantic correction failed while preserving the candidate: "
+                            f"{type(repair_error).__name__}: {repair_error}",
+                        )
+                    else:
+                        continue
+                else:
+                    reason = f"{type(exc).__name__}: {exc}"
+                    if signature in rejected_signatures:
+                        reason += "; the same unchanged candidate repeated the same rejection"
+                    result = self._admission_failure(result, reason)
+                self._commit_result(
+                    move,
+                    result,
+                    visible_observation_ids=visible_observation_ids,
+                )
+                if isinstance(self.runner, SemanticRepairRunner):
+                    self.runner.accept_result(move.move_id, result)
+            else:
+                if isinstance(self.runner, SemanticRepairRunner):
+                    self.runner.accept_result(move.move_id, result)
+            break
+
+    @staticmethod
+    def _admission_failure(
+        candidate: MoveExecutionResult,
+        reason: str,
+    ) -> MoveExecutionResult:
+        """Preserve a rejected candidate as evidence instead of deleting it."""
+
+        return MoveExecutionResult(
+            success=False,
+            error=f"Invalid move boundary: {reason}",
+            failure_domain=FailureDomain.COMPONENT,
+            usage=candidate.usage,
+            observations=[
+                ObservationDraft(
+                    kind=ObservationKind.ERROR,
+                    summary=(
+                        "The candidate remains durably retained, but authoritative admission "
+                        f"could not reconcile it: {reason}"
+                    ),
+                    source="kernel",
+                    metadata={
+                        "candidate_digest": sha256_text(
+                            canonical_json(candidate.model_dump(mode="json"))
+                        ),
+                        "candidate_retained": True,
+                    },
+                )
+            ],
+        )
 
     def _commit_result(
         self,

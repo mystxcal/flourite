@@ -165,6 +165,42 @@ This router is a causal boundary, not an issue taxonomy. The semantic content
 remains free-form in the frontier and lens; only the destination of a signal is
 typed.
 
+## Conservation and ownership
+
+Intelligence is lost when a boundary destroys the state needed to answer it.
+Every activity therefore owns its live context and candidate until the receiver
+has semantically admitted the handoff.
+
+```text
+author owns context + candidate
+        ↓ present exact digest
+receiver admits ───────────────────────────────→ commit + release context
+        │
+        └─ rejects with exact reason + digest
+                         ↓
+             same author corrects in place
+                         ↓
+                   present again
+```
+
+Rejection is information, not garbage collection. It may archive a candidate,
+but it cannot erase the workspace, conversation, evidence, or correction target
+before the author has consumed the rejection. A lost provider session is
+reconstructed from the same objective, capsule, candidate digest, and rejection;
+it does not become a new semantic task.
+
+The same conservation rule applies to learning. Every material evaluator signal
+has an explicit disposition: integrated into a named discriminator, superseded
+by stronger evidence, or kept unresolved. Prior discriminators cannot disappear
+between versions without an evidence-grounded retirement record. Logs are
+append-only; a convenient latest-error view never replaces history.
+
+Independent artifacts also have independent failure domains. Failure of one
+solver, validator, or grader cannot cancel healthy work in another family. A
+supervisor restart reattaches to a matching live process or resumes the exact
+durable activity; it never assumes that “controller restarted” means “model work
+must be discarded.”
+
 ## The evaluation handshake
 
 An evaluator cannot judge evidence it cannot access. Accessibility and semantic
@@ -223,8 +259,41 @@ version with explicit provenance and held-out checks. The next epoch freezes
 that version. Evolution without versioning destroys measurement; freezing
 forever destroys learning.
 
+Two blind planes make this operational:
+
+- the **anchor** is fixed and preserves comparability;
+- the **adaptive frontier** contains versioned discriminators, proxy traps,
+  probes, and blind spots learned from prior grounded evidence.
+
+Both inspect the same randomized artifact packet independently. The adaptive
+plane can veto a promotion when it reproduces a learned failure; it cannot
+rewrite the anchor or see its verdict. Their disagreement is itself conserved
+as evidence and withholds promotion rather than being averaged away. After
+grading, a separate learner inspects the real artifacts, both scorecards,
+external validation, and inner Challenger quality deltas. Its next frontier is
+accepted only when every input signal and every prior criterion is accounted
+for.
+
 Candidate workers do not see hidden benchmark cases or grader scores. Transfer
 must come from a general causal Flourite change, not evaluator imitation.
+
+## The always-work contract
+
+“Always works” does not mean inventing success when a dependency is truly
+absent. It means every attempted activity reaches exactly one intelligible
+state:
+
+1. **accepted** — its semantic result commits;
+2. **correcting** — the same actor has the exact rejection and retained work;
+3. **recovering** — infrastructure is rematerializing or reattaching the exact
+   activity;
+4. **blocked** — a named external fact is missing and no in-scope action can
+   create it.
+
+There is no fifth state where work silently vanishes, a timer loops forever, a
+sibling cancellation destroys a healthy artifact, or a template parser turns a
+recoverable mismatch into a new run. Durable machinery exists to preserve these
+semantic states, not to dictate how an intelligent worker must think.
 
 ## Anti-samsara
 
