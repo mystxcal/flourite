@@ -161,3 +161,16 @@ class SemanticRepairRunner(Protocol):
     ) -> MoveExecutionResult: ...
 
     def accept_result(self, move_id: str, result: MoveExecutionResult) -> None: ...
+
+
+@runtime_checkable
+class ArtifactFinalizationRunner(Protocol):
+    """A runner that can execute the declared contract for a terminal artifact."""
+
+    async def finalize_terminal_result(
+        self,
+        *,
+        move: Move,
+        state: RunState,
+        result: MoveExecutionResult,
+    ) -> MoveExecutionResult: ...

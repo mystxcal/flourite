@@ -14,6 +14,8 @@ from ..intelligence.compiler import MoveResultCompiler
 from ..intelligence.context import ContextAssembler
 from ..intelligence.contracts import (
     AdmissionRejection,
+    ArtifactFinalizationRunner,
+    BlockerDraft,
     MoveDirective,
     MoveExecutionResult,
     MoveRunner,
@@ -560,6 +562,13 @@ class IntelligenceKernel:
         rejection_attempt = 0
         while True:
             try:
+                if isinstance(self.runner, ArtifactFinalizationRunner):
+                    result = await self.runner.finalize_terminal_result(
+                        move=move,
+                        state=self.state,
+                        result=result,
+                    )
+                    self._require_terminal_acceptance(self.state, move, result)
                 result = self._commit_result(
                     move,
                     result,
@@ -634,28 +643,78 @@ class IntelligenceKernel:
     ) -> MoveExecutionResult:
         """Preserve a rejected candidate as evidence instead of deleting it."""
 
+        acceptance_failure = any(
+            item.metadata.get("acceptance_required") is True
+            for item in candidate.observations
+        )
+        retained = [
+            *candidate.observations,
+            ObservationDraft(
+                kind=ObservationKind.ERROR,
+                summary=(
+                    "The candidate remains durably retained, but authoritative admission "
+                    f"could not reconcile it: {reason}"
+                ),
+                source="kernel",
+                metadata={
+                    "candidate_digest": sha256_text(
+                        canonical_json(candidate.model_dump(mode="json"))
+                    ),
+                    "candidate_retained": True,
+                },
+            ),
+        ]
+        if acceptance_failure:
+            return MoveExecutionResult(
+                observations=retained,
+                artifact=candidate.artifact,
+                workspace=candidate.workspace,
+                blocker=BlockerDraft(
+                    reason=(
+                        "The exact terminal artifact failed its declared acceptance contract; "
+                        "the candidate and receipt were preserved without authorization."
+                    )
+                ),
+                usage=candidate.usage,
+            )
         return MoveExecutionResult(
             success=False,
             error=f"Invalid move boundary: {reason}",
             failure_domain=FailureDomain.COMPONENT,
             usage=candidate.usage,
-            observations=[
-                ObservationDraft(
-                    kind=ObservationKind.ERROR,
-                    summary=(
-                        "The candidate remains durably retained, but authoritative admission "
-                        f"could not reconcile it: {reason}"
-                    ),
-                    source="kernel",
-                    metadata={
-                        "candidate_digest": sha256_text(
-                            canonical_json(candidate.model_dump(mode="json"))
-                        ),
-                        "candidate_retained": True,
-                    },
-                )
-            ],
+            observations=retained[-1:],
         )
+
+    @staticmethod
+    def _require_terminal_acceptance(
+        state: RunState,
+        move: Move,
+        result: MoveExecutionResult,
+    ) -> None:
+        """Refuse a successful terminal artifact boundary without its exact receipt."""
+
+        terminal_intent = result.finish is not None or move.causal_checkpoint
+        if not result.success or not terminal_intent:
+            return
+        trajectory = state.trajectories.get(move.trajectory_id)
+        has_artifact = result.artifact is not None or (
+            trajectory is not None and trajectory.artifact_head_id is not None
+        )
+        if not has_artifact:
+            return
+        receipts = [
+            item.metadata.get("artifact_finalization")
+            for item in result.observations
+            if isinstance(item.metadata.get("artifact_finalization"), dict)
+        ]
+        if not receipts:
+            raise ValueError("terminal artifact finalization returned no acceptance receipt")
+        receipt = receipts[-1]
+        assert isinstance(receipt, dict)
+        status = receipt.get("status")
+        if status not in {"passed", "not_required"}:
+            detail = str(receipt.get("summary") or "declared acceptance contract failed")
+            raise ValueError(f"terminal artifact acceptance {status}: {detail}")
 
     def _commit_result(
         self,

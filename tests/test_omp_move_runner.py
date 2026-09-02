@@ -33,7 +33,13 @@ from frontier_harness.intelligence.omp_runner import (
     OmpMoveRunner,
 )
 from frontier_harness.ledger import EventLedger
-from frontier_harness.models import Usage
+from frontier_harness.models import (
+    ArtifactRef,
+    EvidenceModality,
+    EvidenceRecord,
+    IndependenceClass,
+    Usage,
+)
 from frontier_harness.providers.base import (
     ProviderCallRequest,
     ProviderCallResult,
@@ -193,6 +199,45 @@ class SemanticAdmissionRepairProvider(FakeOmpProvider):
         return result.model_copy(
             update={"response": request.response_model.model_validate(value)}
         )
+
+
+class AcceptanceRepairProvider(FakeOmpProvider):
+    async def run(self, request: ProviderCallRequest[Any]) -> ProviderCallResult[Any]:
+        result = await super().run(request)
+        if request.call_kind == "lead" and "-admission-" in request.call_id:
+            assert request.expected_artifact_path is not None
+            request.expected_artifact_path.write_text(
+                "# Accepted artifact\n", encoding="utf-8"
+            )
+        return result
+
+
+class ContractMarkdownAdapter(MarkdownAdapter):
+    def deterministic_checks(self, artifact: ArtifactRef) -> list[EvidenceRecord]:
+        passed = "Accepted artifact" in self.blobs.read_text(artifact.blob)
+        log = self.blobs.put_text(
+            "acceptance passed\n" if passed else "acceptance failed\n",
+            original_name="acceptance.log",
+        )
+        return [
+            EvidenceRecord(
+                evidence_id=f"evd-{artifact.blob.digest[:16]}",
+                kind="deterministic_release_check",
+                summary=(
+                    "Declared acceptance contract passed"
+                    if passed
+                    else "Declared acceptance contract failed"
+                ),
+                scope="exact terminal artifact",
+                artifact_scope="release",
+                independence_class=IndependenceClass.DETERMINISTIC_TOOL,
+                references=[log.digest],
+                blob=log,
+                negative_result=not passed,
+                modalities=[EvidenceModality.DETERMINISTIC_TEST],
+                artifact_digest=artifact.blob.digest,
+            )
+        ]
 
 
 class UnrepairableBoundaryProvider(FakeOmpProvider):
@@ -816,6 +861,50 @@ async def test_authoritative_rejection_returns_to_same_activity_without_losing_w
     execution = next((tmp_path / "kernel-executions").iterdir())
     assert (execution / "committed-result.json").is_file()
     assert not (execution / "candidate-result.json").exists()
+
+
+async def test_failed_terminal_contract_returns_to_same_lead_and_retains_evidence(
+    tmp_path: Path,
+) -> None:
+    blobs = BlobStore(tmp_path / "blobs")
+    provider = AcceptanceRepairProvider()
+    runner = OmpMoveRunner(
+        provider=provider,  # type: ignore[arg-type]
+        adapter=ContractMarkdownAdapter(
+            profile=get_profile("generic"),
+            run_dir=tmp_path,
+            blobs=blobs,
+            workspace=None,
+        ),
+        run_dir=tmp_path,
+    )
+    kernel = IntelligenceKernel(
+        journal=KernelJournal(
+            ledger=EventLedger(tmp_path / "ledger.sqlite3", "run_terminal_acceptance"),
+            snapshot_path=tmp_path / "state.json",
+        ),
+        blobs=blobs,
+        runner=runner,
+    )
+    kernel.start("Create an artifact that passes its declared release contract.")
+
+    await kernel.run(max_steps=6)
+
+    assert kernel.state.status == RunStatus.SATISFIED
+    repairs = [request for request in provider.requests if "-admission-" in request.call_id]
+    assert len(repairs) == 1
+    assert repairs[0].resume_thread_id == "thread-lead"
+    receipts = [
+        item.metadata["artifact_finalization"]
+        for item in kernel.state.observations.values()
+        if "artifact_finalization" in item.metadata
+    ]
+    assert [receipt["status"] for receipt in receipts] == ["failed", "passed"]
+    assert all(
+        item.raw_ref is not None
+        for item in kernel.state.observations.values()
+        if "artifact_finalization" in item.metadata
+    )
 
 
 async def test_new_evidence_can_repeat_a_semantic_challenge_without_spinning(

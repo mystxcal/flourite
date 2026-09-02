@@ -240,6 +240,27 @@ arrived as prose, a direct test, or a domain-native inspection. Mechanical
 checks may establish only the named properties they actually observe. A valid
 file, build, checksum, or duration can never stand in for semantic quality.
 
+### Artifact finalization
+
+Materialization is not acceptance. A terminal artifact crosses one atomic,
+digest-bound boundary:
+
+```text
+preserve exact head + resource evidence
+        ↓
+run the declared release contract against that head
+        ↓
+PASS ── persist receipt ── authorize completion / sealing / promotion
+        │
+        └─ FAIL or UNKNOWN ── return evidence to the same Lead if capacity remains
+                               otherwise preserve a typed blocked/exhausted result
+```
+
+The candidate remains available for blind grading even when the contract fails;
+negative evidence must not disappear. But `materialized`, `accepted`, `sealed`,
+and `promoted` are separate facts. An invalid artifact can never become accepted
+merely because a process exited, a file exists, or a packet was copied.
+
 ## Evolving judgment
 
 Evaluation evolves at two distinct timescales.

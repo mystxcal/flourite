@@ -7,6 +7,7 @@ any second controller ontology.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -271,6 +272,113 @@ class OmpMoveRunner:
         if result.ok:
             return None
         return "; ".join(result.details) or "provider preflight failed"
+
+    async def finalize_terminal_result(
+        self,
+        *,
+        move: Move,
+        state: RunState,
+        result: MoveExecutionResult,
+    ) -> MoveExecutionResult:
+        """Bind the declared release contract to an exact terminal artifact head."""
+
+        if not result.success or (result.finish is None and not move.causal_checkpoint):
+            return result
+        artifact = self._terminal_artifact(state, move, result)
+        if artifact is None:
+            return result
+        existing_receipts: list[dict[str, object]] = []
+        for item in result.observations:
+            candidate_receipt = item.metadata.get("artifact_finalization")
+            if (
+                isinstance(candidate_receipt, dict)
+                and candidate_receipt.get("artifact_digest") == artifact.blob.digest
+            ):
+                existing_receipts.append(candidate_receipt)
+        if existing_receipts and existing_receipts[-1].get("status") in {
+            "passed",
+            "not_required",
+        }:
+            return result
+        try:
+            checks = await asyncio.to_thread(self.adapter.deterministic_checks, artifact)
+        except Exception as exc:  # the failed contract is evidence, not a vanished candidate
+            check_observations = [self._check_failure(artifact, exc, finalization=True)]
+            status = "failed"
+            summary = f"{type(exc).__name__}: {exc}"
+        else:
+            check_observations = [
+                self._check_observation(check, challenge=False, finalization=True)
+                for check in checks
+            ]
+            failed = [check.summary for check in checks if check.negative_result]
+            status = "failed" if failed else ("passed" if checks else "not_required")
+            summary = "; ".join(failed) if failed else (
+                f"{len(checks)} declared acceptance result(s) passed"
+                if checks
+                else "the adapter declares no tool acceptance contract"
+            )
+        receipt_payload = {
+            "status": status,
+            "summary": summary,
+            "artifact_digest": artifact.blob.digest,
+            "declared_results": len(check_observations),
+        }
+        receipt_ref = self.adapter.blobs.put_text(
+            json.dumps(receipt_payload, indent=2, sort_keys=True),
+            media_type="application/json",
+            original_name="artifact-finalization.json",
+        )
+        receipt = ObservationDraft(
+            kind=ObservationKind.TEST if status != "failed" else ObservationKind.ERROR,
+            summary=f"Terminal artifact acceptance {status}: {summary}",
+            source="artifact-finalization",
+            raw_ref=receipt_ref,
+            artifact_digest=artifact.blob.digest,
+            confidence=1.0,
+            metadata={
+                "acceptance_required": True,
+                "artifact_finalization": receipt_payload,
+            },
+        )
+        finalized = result.model_copy(
+            update={"observations": [*result.observations, *check_observations, receipt]}
+        )
+        execution_dir = self.executions_dir / move.move_id
+        atomic_write_text(
+            execution_dir / "candidate-result.json",
+            finalized.model_dump_json(indent=2),
+        )
+        return finalized
+
+    def _terminal_artifact(
+        self,
+        state: RunState,
+        move: Move,
+        result: MoveExecutionResult,
+    ) -> ArtifactRef | None:
+        draft = result.artifact
+        if draft is None:
+            return self._current_artifact(state, move)
+        raw_version = draft.metadata.get("adapter_version")
+        version = raw_version if isinstance(raw_version, int) else 1
+        return ArtifactRef(
+            artifact_id=f"candidate-{draft.content_ref.digest[:16]}",
+            version=version,
+            blob=draft.content_ref,
+            kind=str(draft.metadata.get("kind", self.adapter.artifact_kind)),
+            summary=(
+                result.workspace.summary
+                if result.workspace is not None
+                else "terminal artifact candidate"
+            ),
+            parent_artifact_id=(
+                draft.parent_artifact_ids[0] if draft.parent_artifact_ids else None
+            ),
+            source_action_ids=[move.move_id],
+            deliverables=draft.deliverables,
+            created_at=utc_now(),
+        )
 
     def accept_result(self, move_id: str, result: MoveExecutionResult) -> None:
         """Commit an admitted candidate and release only its disposable capsule."""
@@ -666,6 +774,25 @@ Rejected candidate digest: {rejection.candidate_digest}
                     }
                 )
                 continue
+            retained_acceptance = [
+                item.model_copy(
+                    update={
+                        "artifact_digest": None,
+                        "metadata": {
+                            **item.metadata,
+                            "rejected_artifact_digest": item.artifact_digest,
+                        },
+                    }
+                )
+                for item in rejected.observations
+                if item.metadata.get("acceptance_required") is True
+            ]
+            if retained_acceptance:
+                result = result.model_copy(
+                    update={
+                        "observations": [*retained_acceptance, *result.observations]
+                    }
+                )
             atomic_write_text(candidate_path, result.model_dump_json(indent=2))
             return result
 
@@ -1482,6 +1609,8 @@ new material distinction or proxy trap revealed by direct inspection, not generi
     def _check_failure(
         artifact: ArtifactRef,
         error: Exception,
+        *,
+        finalization: bool = False,
     ) -> ObservationDraft:
         return ObservationDraft(
             kind=ObservationKind.ERROR,
@@ -1491,6 +1620,10 @@ new material distinction or proxy trap revealed by direct inspection, not generi
             source="artifact-check",
             artifact_digest=artifact.blob.digest,
             confidence=1.0,
+            metadata={
+                "negative_result": True,
+                "acceptance_required": finalization,
+            },
         )
 
     def _workspace_result(
@@ -1641,6 +1774,7 @@ new material distinction or proxy trap revealed by direct inspection, not generi
         evidence: EvidenceRecord,
         *,
         challenge: bool,
+        finalization: bool = False,
     ) -> ObservationDraft:
         verdict = (
             ChallengeVerdict.CHALLENGES if evidence.negative_result else ChallengeVerdict.SUPPORTS
@@ -1667,5 +1801,6 @@ new material distinction or proxy trap revealed by direct inspection, not generi
                 "establishes": evidence.establishes,
                 "cannot_establish": evidence.cannot_establish,
                 "negative_result": evidence.negative_result,
+                "acceptance_required": finalization,
             },
         )
