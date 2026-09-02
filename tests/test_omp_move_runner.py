@@ -1066,6 +1066,7 @@ async def test_repeated_invalid_external_boundary_enters_component_repair(
     )
     assert committed.success is False
     assert "escapes the call workspace" in (committed.error or "")
+    assert committed.next_move is not None
     assert not (execution / "candidate-result.json").exists()
 
 

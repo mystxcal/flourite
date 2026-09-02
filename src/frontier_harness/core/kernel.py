@@ -560,7 +560,7 @@ class IntelligenceKernel:
         rejection_attempt = 0
         while True:
             try:
-                self._commit_result(
+                result = self._commit_result(
                     move,
                     result,
                     visible_observation_ids=visible_observation_ids,
@@ -615,7 +615,7 @@ class IntelligenceKernel:
                     if signature in rejected_signatures:
                         reason += "; the same unchanged candidate repeated the same rejection"
                     result = self._admission_failure(result, reason)
-                self._commit_result(
+                result = self._commit_result(
                     move,
                     result,
                     visible_observation_ids=visible_observation_ids,
@@ -663,7 +663,7 @@ class IntelligenceKernel:
         result: MoveExecutionResult,
         *,
         visible_observation_ids: set[str],
-    ) -> None:
+    ) -> MoveExecutionResult:
         exhausted = self.state.usage.plus(result.usage).exhausted(self.state.objective.envelope)
         if not result.success and not exhausted:
             result = result.model_copy(
@@ -690,10 +690,10 @@ class IntelligenceKernel:
             action_id=move.move_id,
         )
         if self.state.status.terminal:
-            return
+            return result
         if exhausted:
             if self._settle_supported_finish():
-                return
+                return result
             self.journal.append(
                 "run.exhausted",
                 RunTerminated(
@@ -704,7 +704,7 @@ class IntelligenceKernel:
                 actor="kernel",
                 action_id=move.move_id,
             )
-            return
+            return result
         if not result.success and not self.state.status.terminal:
             self.journal.append(
                 "run.paused",
@@ -719,3 +719,4 @@ class IntelligenceKernel:
                 actor="runtime",
                 action_id=move.move_id,
             )
+        return result
