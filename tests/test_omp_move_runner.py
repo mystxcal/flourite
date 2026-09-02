@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from frontier_harness.adapters.generic import MarkdownAdapter
 from frontier_harness.adapters.profiles import get_profile
 from frontier_harness.adapters.software import SoftwareAdapter
@@ -20,7 +22,7 @@ from frontier_harness.core.types import (
     RunStatus,
 )
 from frontier_harness.errors import ProviderCallError
-from frontier_harness.intelligence.omp_runner import OmpMoveRunner
+from frontier_harness.intelligence.omp_runner import LeadModelOutput, OmpMoveRunner
 from frontier_harness.ledger import EventLedger
 from frontier_harness.models import Usage
 from frontier_harness.providers.base import (
@@ -98,6 +100,40 @@ class FakeOmpProvider:
             duration_seconds=1,
             thread_id=thread_id,
             trace_summary=ProviderTraceSummary(model_turns=2),
+        )
+
+
+def test_model_visible_schema_matches_mutually_exclusive_outcome_boundary() -> None:
+    schema = LeadModelOutput.model_json_schema()
+
+    assert [item["title"] for item in schema["oneOf"]] == [
+        "Continuation",
+        "Finish",
+        "Blocker",
+        "No outcome",
+    ]
+    blocker = schema["oneOf"][2]
+    assert blocker["properties"]["next_move"] == {"type": "null"}
+    assert blocker["properties"]["branches"] == {"maxItems": 0}
+    assert blocker["properties"]["finish"] == {"type": "null"}
+    with pytest.raises(ValueError, match="choose continuation moves"):
+        LeadModelOutput.model_validate(
+            {
+                "workspace_summary": "The current artifact is preserved.",
+                "decision_boundary": "An external dependency remains unresolved.",
+                "observations": [
+                    {
+                        "kind": "artifact",
+                        "summary": "The dependency is recorded in the workspace.",
+                        "evidence_path": ".sfh_output/workspace.md",
+                    }
+                ],
+                "next_move": {
+                    "mode": "environment",
+                    "intent": "Wait for the external dependency",
+                },
+                "blocker": {"reason": "The external dependency is unavailable."},
+            }
         )
 
 

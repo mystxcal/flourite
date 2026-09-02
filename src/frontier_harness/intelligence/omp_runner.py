@@ -12,7 +12,9 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import Field, model_validator
+from pydantic import Field, GetJsonSchemaHandler, model_validator
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
 
 from ..adapters.base import ArtifactAdapter, CallWorkspace
 from ..core.types import (
@@ -112,6 +114,64 @@ class ModelOutputBase(CoreModel):
     branches: Sequence[ModelNextMove] = Field(default_factory=list)
     finish: ModelFinish | None = None
     blocker: ModelBlocker | None = None
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: CoreSchema,
+        handler: GetJsonSchemaHandler,
+    ) -> JsonSchemaValue:
+        schema = super().__get_pydantic_json_schema__(core_schema, handler)
+        schema = handler.resolve_ref_schema(schema)
+        schema["oneOf"] = [
+            {
+                "title": "Continuation",
+                "anyOf": [
+                    {
+                        "required": ["next_move"],
+                        "properties": {"next_move": {"not": {"type": "null"}}},
+                    },
+                    {
+                        "required": ["branches"],
+                        "properties": {"branches": {"minItems": 1}},
+                    },
+                ],
+                "properties": {
+                    "finish": {"type": "null"},
+                    "blocker": {"type": "null"},
+                },
+            },
+            {
+                "title": "Finish",
+                "required": ["finish"],
+                "properties": {
+                    "next_move": {"type": "null"},
+                    "branches": {"maxItems": 0},
+                    "finish": {"not": {"type": "null"}},
+                    "blocker": {"type": "null"},
+                },
+            },
+            {
+                "title": "Blocker",
+                "required": ["blocker"],
+                "properties": {
+                    "next_move": {"type": "null"},
+                    "branches": {"maxItems": 0},
+                    "finish": {"type": "null"},
+                    "blocker": {"not": {"type": "null"}},
+                },
+            },
+            {
+                "title": "No outcome",
+                "properties": {
+                    "next_move": {"type": "null"},
+                    "branches": {"maxItems": 0},
+                    "finish": {"type": "null"},
+                    "blocker": {"type": "null"},
+                },
+            },
+        ]
+        return schema
 
     @model_validator(mode="after")
     def one_continuation(self) -> ModelOutputBase:
