@@ -106,6 +106,24 @@ class ArtifactAdapter(ABC):
         return None
 
     @staticmethod
+    def ensure_runtime_directory(path: Path) -> Path:
+        """Make a model-facing runtime namespace a real local directory.
+
+        Workers have trusted filesystem access and may accidentally delete or
+        replace a runtime-owned directory while cleaning their deliverable. A
+        later move must reconstruct that control plane rather than confusing
+        the worker's residue with durable run failure. Real directories keep
+        their contents; files, sockets, and symlinks are disposable residue.
+        """
+
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            path.unlink()
+        path.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink() or not path.is_dir():
+            raise RuntimeError(f"Runtime namespace is not a directory: {path}")
+        return path
+
+    @staticmethod
     def resolve_declared_path(workspace: CallWorkspace, declared_path: str) -> Path:
         candidate = (workspace.cwd / declared_path).resolve()
         root = workspace.cwd.resolve()

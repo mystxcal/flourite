@@ -116,6 +116,34 @@ def test_reopening_an_interrupted_call_preserves_live_work(tmp_path: Path, git_r
         adapter.close_call(resumed)
 
 
+def test_reopening_reconstructs_a_worker_replaced_runtime_namespace(
+    tmp_path: Path, git_repo: Path
+) -> None:
+    adapter = _adapter(tmp_path, git_repo)
+    adapter.prepare()
+    first = adapter.open_call(
+        call_id="tampered-runtime",
+        call_kind="lead",
+        current_artifact=None,
+    )
+    (first.cwd / "app.txt").write_text("valuable live work\n", encoding="utf-8")
+    first.context_dir.rmdir()
+    first.context_dir.symlink_to("/dev/null")
+
+    resumed = adapter.open_call(
+        call_id="tampered-runtime",
+        call_kind="lead",
+        current_artifact=None,
+    )
+    try:
+        assert resumed.metadata["resumed"] is True
+        assert resumed.context_dir.is_dir()
+        assert not resumed.context_dir.is_symlink()
+        assert (resumed.cwd / "app.txt").read_text() == "valuable live work\n"
+    finally:
+        adapter.close_call(resumed)
+
+
 def test_apply_refuses_source_change_after_snapshot(tmp_path: Path, git_repo: Path) -> None:
     adapter = _adapter(tmp_path, git_repo)
     adapter.prepare()

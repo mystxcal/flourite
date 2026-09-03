@@ -46,10 +46,8 @@ class MarkdownAdapter(ArtifactAdapter):
     ) -> CallWorkspace:
         root = self.run_dir / "capsules" / call_id
         if root.exists():
-            context = root / ".sfh_context"
-            output = root / ".sfh_output"
-            context.mkdir(parents=True, exist_ok=True)
-            output.mkdir(parents=True, exist_ok=True)
+            context = self.ensure_runtime_directory(root / ".sfh_context")
+            output = self.ensure_runtime_directory(root / ".sfh_output")
             return CallWorkspace(
                 call_id=call_id,
                 call_kind=call_kind,
@@ -60,10 +58,8 @@ class MarkdownAdapter(ArtifactAdapter):
                 expected_artifact_path=output / "artifact.md",
                 metadata={"profile": self.profile.name, "resumed": True},
             )
-        context = root / ".sfh_context"
-        output = root / ".sfh_output"
-        context.mkdir(parents=True)
-        output.mkdir(parents=True)
+        context = self.ensure_runtime_directory(root / ".sfh_context")
+        output = self.ensure_runtime_directory(root / ".sfh_output")
         expected_artifact = output / "artifact.md"
         if current_artifact is not None:
             if current_artifact.kind != self.artifact_kind:

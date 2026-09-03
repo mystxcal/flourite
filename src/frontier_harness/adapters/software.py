@@ -350,10 +350,8 @@ class SoftwareAdapter(ArtifactAdapter):
         persistent = call_kind in {"lead", "environment"}
         if path.exists():
             baseline_commit = self._git(path, ["rev-parse", "HEAD"]).stdout.decode().strip()
-            context = path / ".sfh_context"
-            output = path / ".sfh_output"
-            context.mkdir(parents=True, exist_ok=True)
-            output.mkdir(parents=True, exist_ok=True)
+            context = self.ensure_runtime_directory(path / ".sfh_context")
+            output = self.ensure_runtime_directory(path / ".sfh_output")
             return CallWorkspace(
                 call_id=call_id,
                 call_kind=call_kind,
@@ -409,10 +407,8 @@ class SoftwareAdapter(ArtifactAdapter):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 self.blobs.materialize(ref, destination)
         baseline_commit = self._commit_current_state(path)
-        context = path / ".sfh_context"
-        output = path / ".sfh_output"
-        context.mkdir(parents=True, exist_ok=True)
-        output.mkdir(parents=True, exist_ok=True)
+        context = self.ensure_runtime_directory(path / ".sfh_context")
+        output = self.ensure_runtime_directory(path / ".sfh_output")
         return CallWorkspace(
             call_id=call_id,
             call_kind=call_kind,

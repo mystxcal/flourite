@@ -1164,6 +1164,8 @@ The compact run index is `{index_path}` and new evidence is `{observations_path}
 The current compressed frontier, when present, is `{frontier_path}`.
 The current task-native quality lens, when present, is `{quality_path}`.
 Open the actual artifact, source, and raw evidence whenever the decision depends on them.
+`.sfh_context` is Flourite's read-only control plane: never delete, rename, replace,
+symlink, or write inside it. Write durable handoff state only to `.sfh_output`.
 
 Move intent: {move.intent}
 Move instructions: {move.instructions or "Use your judgment."}
